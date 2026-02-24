@@ -1,4 +1,4 @@
-# <img src="assets/icon.png" width="48" align="absmiddle"/> RenpyLens
+# <img src="assets/icon.png" width="60" align="absmiddle"/> RenpyLens
 
 RenpyLens 是一款专为 **Ren'Py 引擎游戏** 开发的轻量级、实时游戏翻译弹窗工具。
 本软件既**小白友好**（支持一键拖拽翻译），又适合有一定基础的用户上手部署或二次开发。
@@ -90,4 +90,5 @@ python build.py --python "C:\path\to\your\venv\python.exe"
 ## 📄 许可证 (License)
 
 本项目采用 [GPLv3 License](LICENSE) 许可协议开源。
+
 
