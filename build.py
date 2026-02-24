@@ -27,7 +27,11 @@ def build_exe():
         "--name", "RenpyLens",
         "--windowed", # 隐藏控制台窗口
         "--onefile",   # --onedir 可以打包成一个目录
-        "--add-data", "_translator_hook.rpy;.", # 包含必须的资源文件
+        "--paths", "src", # 将 src 目录添加到模块搜索路径
+        "--add-data", "assets/_translator_hook.rpy;.", # 包含必须的资源文件
+        "--add-data", "assets/icon.ico;.", # 包含图标以便程序运行时提取
+        "--add-data", "assets/icon.png;.", 
+        "--icon", "assets/icon.ico", # 指定程序本身的图标
         
         # 排除体积巨大且程序明显用不到的科学计算和系统级大包
         "--exclude-module", "numpy",
@@ -73,7 +77,7 @@ def build_exe():
         "--clean",
         "--noconfirm",
         "--distpath", ".",  # 将输出目录修改为当前目录，不使用默认的 dist
-        "main.py"
+        "src/main.py"
     ]
     
     print(f"运行命令: {' '.join(command)}")
