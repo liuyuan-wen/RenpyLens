@@ -124,11 +124,15 @@ _DARK_STYLE = """
 
 # 常用语言列表
 _LANGUAGES = [
-    "Chinese", "English", "Japanese", "Korean",
-    "French", "German", "Spanish", "Portuguese",
-    "Russian", "Italian", "Thai", "Vietnamese",
-    "Indonesian", "Arabic", "Turkish",
+    "简体中文", "繁体中文", "English", "日本語", "한국어",
+    "Français", "Deutsch", "Español", "Português",
+    "Русский", "Italiano", "ไทย", "Tiếng Việt",
+    "Bahasa Indonesia", "العربية", "Türkçe",
 ]
+    # "Chinese", "English", "Japanese", "Korean",
+    # "French", "German", "Spanish", "Portuguese",
+    # "Russian", "Italian", "Thai", "Vietnamese",
+    # "Indonesian", "Arabic", "Turkish",
 
 
 class SettingsDialog(QDialog):
@@ -183,7 +187,7 @@ class SettingsDialog(QDialog):
         vbox.setContentsMargins(20, 20, 20, 20)
 
         # 提示（顶部，占满整行宽度）
-        hint = QLabel("💡 源语言和目标语言会作为提示词的一部分，也可自行输入任意语言名，如 Polish、Hungarian")
+        hint = QLabel("💡 源语言和目标语言会作为提示词的一部分，也可自行输入任意语言名，如 한국어、Français")
         hint.setStyleSheet("color: #666; font-size: 18px;")
         hint.setWordWrap(True)
         vbox.addWidget(hint)

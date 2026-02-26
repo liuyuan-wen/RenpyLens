@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
     "temperature": 0.3,
     "keep_original_names": True,  # 保留原文人名不翻译
     "source_lang": "English",
-    "target_lang": "Chinese",
+    "target_lang": "简体中文",
     "socket_port": 19876,
     "font_size": 22,
     "overlay_opacity": 1.0,
@@ -93,6 +93,8 @@ def load_config() -> dict:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             merged = {**DEFAULT_CONFIG, **saved}
+            # 强制覆盖为代码库中的最新版本号，防止旧缓存覆盖导致永远显示旧版本
+            merged["version"] = DEFAULT_CONFIG.get("version", "v1.1.0")
             # 如果优先使用本文件配置，则用 DEFAULT_CONFIG 覆盖 saved
             if PRIORITY_CONFIG_PY:
                 merged.update(DEFAULT_CONFIG)
