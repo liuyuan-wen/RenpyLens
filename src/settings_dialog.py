@@ -8,7 +8,6 @@ from PyQt5.QtWidgets import (
     QScrollArea
 )
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
 
 # 通用暗色样式
 _DARK_STYLE = """
@@ -440,6 +439,16 @@ class SettingsDialog(QDialog):
         self.socket_port_spin.setToolTip("与游戏 Hook 通信的本地端口")
         perf_form.addRow("通信端口:", self.socket_port_spin)
 
+        self.show_character_name_check = QCheckBox("显示说话人名称")
+        self.show_character_name_check.setChecked(self.config.get("show_character_name", True))
+        self.show_character_name_check.setToolTip("如果关闭，浮窗上将只显示翻译后的对话内容，不再带有【名字】前缀。")
+        perf_form.addRow("", self.show_character_name_check)
+
+        self.force_topmost_check = QCheckBox("强力置顶 (解决全屏被挡)")
+        self.force_topmost_check.setChecked(self.config.get("force_topmost", True))
+        self.force_topmost_check.setToolTip("强制将翻译浮窗拉到最顶层")
+        perf_form.addRow("", self.force_topmost_check)
+
         layout.addWidget(perf_group)
         layout.addStretch()
         return tab
@@ -450,7 +459,7 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout(tab)
         vbox.setSpacing(16)
         
-        version = self.config.get("version", "v1.0.0-Beta")
+        version = self.config.get("version", "v1.1.0-Beta")
         
         info_label = QLabel(
             f'<div style="font-size: 20px; font-weight: bold; margin-bottom: 10px;">RenpyLens {version}</div>'
@@ -512,7 +521,8 @@ class SettingsDialog(QDialog):
         self.config["prefetch_count"] = self.prefetch_spin.value()
         self.config["debounce_ms"] = self.debounce_spin.value()
         self.config["socket_port"] = self.socket_port_spin.value()
-
+        self.config["force_topmost"] = self.force_topmost_check.isChecked()
+        self.config["show_character_name"] = self.show_character_name_check.isChecked()
 
         self.config["system_prompt"] = self.sys_prompt_input.toPlainText().strip()
         self.config["batch_prompt"] = self.batch_prompt_input.toPlainText().strip()

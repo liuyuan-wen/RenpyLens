@@ -1,4 +1,4 @@
 PyQt5>=5.15
 httpx>=0.24
-requests>=2.32.0
+pywin32
 pyinstaller>=6.19.0

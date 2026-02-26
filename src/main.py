@@ -61,7 +61,7 @@ class MainWindow(QWidget):
         super().__init__()
         self.config = load_config()
 
-        version = self.config.get("version", "v1.0.0-Beta")
+        version = self.config.get("version", "version")
         self.setWindowTitle(f"RenpyLens {version} - Ren'Py 实时翻译")
         self.resize(800, 10)
         self.setAcceptDrops(True)
@@ -587,6 +587,24 @@ class MainWindow(QWidget):
         self.log_text.setVisible(False)
         layout.addWidget(self.log_text)
 
+        # 发消息测试
+        # dialog = TestServerDialog(self.config, self)
+        # dialog.exec_()
+        
+    def _on_overlay_config_changed(self, new_config: dict):
+        """当用户在悬浮窗右键菜单修改配置时触发"""
+        self.config = new_config
+        
+        # 立即重新渲染当前句
+        who = self._last_displayed_data.get("who", "")
+        what = self._last_displayed_data.get("what", "")
+        trans = self._last_displayed_data.get("translation", "")
+        italic = self._last_displayed_data.get("italic", False)
+        
+        if trans:
+            display = self._format_display(who, what, trans, italic)
+            self.overlay.set_text(display)
+
     def _on_settings(self):
         """打开设置对话框"""
         dlg = SettingsDialog(self.config, parent=self)
@@ -614,6 +632,8 @@ class MainWindow(QWidget):
                 self.url_input.setText(self.config.get(f"{engine}_url", ""))
                 self.key_input.setText(self.config.get(f"{engine}_api_key", ""))
             self.status_label.setText("✅ 设置已保存")
+            if hasattr(self, 'overlay') and self.overlay:
+                self.overlay.update_config(self.config)
             print(f"[Main] Settings updated and saved")
 
     def _toggle_pin(self):
@@ -807,6 +827,10 @@ class MainWindow(QWidget):
         print(f"[Main] Socket server started, port: {self.config['socket_port']}")
         # 翻译弹窗
         self.overlay = TranslationOverlay(self.config)
+        self.overlay.config_updated.connect(self._on_overlay_config_changed)
+        
+        # 保存最后一句显示的原文和翻译
+        self._last_displayed_data = {"who": "", "what": "", "translation": "", "italic": False}
 
     # --- 拖放 ---
     def dragEnterEvent(self, event: QDragEnterEvent):
@@ -1110,13 +1134,13 @@ class MainWindow(QWidget):
                 QMessageBox.warning(self, "卸载失败", msg)
 
     # --- 文本处理 ---
-    def _on_text_received(self, who: str, what: str):
+    def _on_text_received(self, who: str, what: str, italic: bool = False):
         """收到游戏内当前显示的文本"""
         # 递增 generation，使旧的翻译请求过时
         self._text_generation += 1
-        self._process_text(who, what)
+        self._process_text(who, what, italic)
 
-    def _process_text(self, who: str, what: str):
+    def _process_text(self, who: str, what: str, italic: bool = False):
         """实际处理文本：查缓存 / 触发翻译 / 触发预取"""
         import time as _time
         timing_enabled = self.config.get("enable_timing_log", False)
@@ -1126,24 +1150,24 @@ class MainWindow(QWidget):
         # 1) 处理当前句
         cached = self.cache.get(what)
         if cached:
-            display = self._format_display(who, what, cached)
+            display = self._format_display(who, what, cached, italic)
             self.translation_ready.emit(display)
             if timing_enabled:
                 hit_ms = (_time.perf_counter() - t_start) * 1000
                 print(f"[Timing] Cache hit: {hit_ms:.1f}ms (text received -> displayed)")
         else:
             # 未缓存 → 统一走批量翻译路径（当前句 + 预取项合并为一批）
-            self.overlay.set_text(self._format_display(who, what, "翻译中..."))
+            self.overlay.set_text(self._format_display(who, what, "翻译中...", italic))
             threading.Thread(
                 target=self._translate_batch_with_current,
-                args=(who, what, gen), daemon=True
+                args=(who, what, gen, italic), daemon=True
             ).start()
 
         # 2) 无论缓存命中与否，都检查预取缓冲区是否充裕
         #    inflight 的句子会被视为已就绪而跳过
         self._ensure_prefetch_buffer(gen)
 
-    def _translate_batch_with_current(self, who: str, what: str, gen: int):
+    def _translate_batch_with_current(self, who: str, what: str, gen: int, italic: bool = False):
         """将当前句与预取项合并为一个批量翻译请求"""
         import time as _time
         timing_enabled = self.config.get("enable_timing_log", False)
@@ -1162,7 +1186,7 @@ class MainWindow(QWidget):
                     return
                 cached = self.cache.get(what)
                 if cached:
-                    display = self._format_display(who, what, cached)
+                    display = self._format_display(who, what, cached, italic)
                     self.translation_ready.emit(display)
                     print(f"[Batch] Wait successful, cache hit: {cached[:30]}")
                     return
@@ -1229,7 +1253,7 @@ class MainWindow(QWidget):
             # 只有仍是最新文本时才显示到弹窗
             if self._text_generation == gen:
                 current_result = self.cache.get(what) or (results[0] if results else "[翻译失败]")
-                display = self._format_display(who, what, current_result)
+                display = self._format_display(who, what, current_result, italic)
                 self.translation_ready.emit(display)
             else:
                 print(f"[Batch] Translation done but user turned page, result cached only (gen={gen}→{self._text_generation})")
@@ -1258,12 +1282,12 @@ class MainWindow(QWidget):
                 print(f"{'='*60}\n")
         except KeyExpiredError as e:
             if self._text_generation == gen:
-                display = self._format_display(who, what, f"[{e}]")
+                display = self._format_display(who, what, f"[{e}]", italic)
                 self.translation_ready.emit(display)
             self._key_expired_signal.emit()
         except Exception as e:
             if self._text_generation == gen:
-                display = self._format_display(who, what, f"[翻译失败: {e}]")
+                display = self._format_display(who, what, f"[翻译失败: {e}]", italic)
                 self.translation_ready.emit(display)
         finally:
             with self._inflight_lock:
@@ -1397,11 +1421,21 @@ class MainWindow(QWidget):
             "获取更多授权。"
         )
 
-    def _format_display(self, who: str, original: str, translation: str) -> str:
+    def _format_display(self, who: str, original: str, translation: str, italic: bool = False) -> str:
+        # 记录最后一次要被渲染的数据，以便设置变更时可以瞬间重绘
+        self._last_displayed_data["who"] = who
+        self._last_displayed_data["what"] = original
+        self._last_displayed_data["translation"] = translation
+        self._last_displayed_data["italic"] = italic
+        
         # 最终清理 LLM 编号前缀: "1. ", "1) ", "1- ", "- " 等
         translation = re.sub(r'^\s*\d+[.)\-:、]\s*', '', translation)
         translation = re.sub(r'^\s*[\-\*]\s+', '', translation)
-        if who:
+        
+        if italic:
+            translation = f"<i>{translation}</i>"
+            
+        if who and self.config.get("show_character_name", True):
             return f"【{who}】{translation}"
         return translation
 

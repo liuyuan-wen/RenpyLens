@@ -2,8 +2,12 @@
 """翻译弹窗 - 无背景、白字黑描边、可拖拽、置顶、可调字号和宽度"""
 
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QApplication, QMenu, QAction
-from PyQt5.QtCore import Qt, QPoint, QTimer
-from PyQt5.QtGui import QFont, QPainter, QPainterPath, QColor, QCursor, QFontMetrics
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import (
+    QFont, QPainter, QPainterPath, QColor, QFontMetrics
+)
+import win32gui
+import win32con
 
 
 class OutlinedLabel(QLabel):
@@ -16,8 +20,11 @@ class OutlinedLabel(QLabel):
         self._text_color = QColor(255, 255, 255)
         self._outline_color = QColor(0, 0, 0)
         self.setFont(QFont("Microsoft YaHei", self._font_size, QFont.Bold))
+        # QLabel 本身也支持富文本，不过我们要手动接管绘制
+        self.setTextFormat(Qt.RichText)
         self.setWordWrap(True)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents) # 允许事件穿透到父窗口以便拖拽
         self.setStyleSheet("background: transparent;")
 
     def set_font_size(self, size: int):
@@ -29,50 +36,97 @@ class OutlinedLabel(QLabel):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        font = self.font()
-        painter.setFont(font)
-
         text = self.text()
         if not text:
             return
 
-        # 使用实际控件宽度作为换行基准（而不是 contentsRect）
+        # 简单清理一下可能的其他 html 变种
+        text = text.replace("<b>", "").replace("</b>", "")
+        text = text.replace("<div style='font-weight: 900;'>", "").replace("</div>", "")
+
+        import re
+        tokens = re.split(r'(</i>|<i>)', text)
+        char_list = []
+        is_italic = False
+        for token in tokens:
+            if token == '<i>':
+                is_italic = True
+            elif token == '</i>':
+                is_italic = False
+            elif token:
+                for char in token:
+                    char_list.append((char, is_italic))
+
+        font_normal = self.font()
+        fm_normal = QFontMetrics(font_normal)
+
         available_width = self.width() - self._outline_width * 4
 
-        # 使用 QPainterPath 绘制描边文字
-        path = QPainterPath()
-
         # 处理自动换行
-        fm = QFontMetrics(font)
         lines = []
-        current_line = ""
-        for char in text:
+        current_line = []
+        current_line_width = 0
+
+        for char, italic in char_list:
             if char == '\n':
                 lines.append(current_line)
-                current_line = ""
+                current_line = []
+                current_line_width = 0
                 continue
-            test = current_line + char
-            if fm.horizontalAdvance(test) > available_width:
-                if current_line:
-                    lines.append(current_line)
-                current_line = char
+
+            char_w = fm_normal.horizontalAdvance(char)
+
+            if current_line_width + char_w > available_width and current_line:
+                lines.append(current_line)
+                current_line = [(char, italic)]
+                current_line_width = char_w
             else:
-                current_line = test
+                current_line.append((char, italic))
+                current_line_width += char_w
+
         if current_line:
             lines.append(current_line)
 
-        y_offset = fm.ascent() + self._outline_width
-        for line in lines:
-            path.addText(
-                self._outline_width * 2,
-                y_offset,
-                font,
-                line,
-            )
-            y_offset += fm.height()
+        # 构建 Path
+        path = QPainterPath()
+        y_offset = fm_normal.ascent() + self._outline_width
 
-        # 画描边（黑色粗边）
+        from PyQt5.QtGui import QTransform
+        
+        for line in lines:
+            x_offset = self._outline_width * 2
+            
+            # 合并相同样式的连续字符，避免每个字 addText 导致路径碎片化
+            merged_chunks = []
+            for char, italic in line:
+                if not merged_chunks:
+                    merged_chunks.append([char, italic])
+                else:
+                    if merged_chunks[-1][1] == italic:
+                        merged_chunks[-1][0] += char
+                    else:
+                        merged_chunks.append([char, italic])
+            
+            for text_chunk, italic in merged_chunks:
+                f = font_normal
+                fm = fm_normal
+                
+                sub_path = QPainterPath()
+                sub_path.addText(0, 0, f, text_chunk)
+                
+                if italic:
+                    # 强行倾斜原本真正的粗体，防止通过 setItalic 会丢失字重
+                    # -0.25 向右上方倾斜，模拟约 14 度的完美斜体
+                    transform = QTransform().shear(-0.25, 0.0)
+                    sub_path = transform.map(sub_path)
+                    
+                path.addPath(sub_path.translated(x_offset, y_offset))
+                x_offset += fm.horizontalAdvance(text_chunk)
+                
+            y_offset += fm_normal.height()
+
         from PyQt5.QtGui import QPen
+        # 画描边（黑色粗边）
         painter.setPen(QPen(self._outline_color, self._outline_width * 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
@@ -84,14 +138,19 @@ class OutlinedLabel(QLabel):
 
         painter.end()
 
-        # 自动调整高度（允许缩小）
+        # 自动调整高度
         needed_height = int(y_offset + self._outline_width * 2)
-        self.setFixedHeight(needed_height)
+        if hasattr(self, "_last_needed_height") and self._last_needed_height == needed_height:
+            pass
+        else:
+            self._last_needed_height = needed_height
+            self.setFixedHeight(needed_height)
 
 
 class TranslationOverlay(QWidget):
-    """翻译弹窗主窗口 - 透明背景、置顶、可拖拽"""
-
+    # 当悬浮窗尺寸或其他配置发生改变时（内部触发），向外发送包含新配置的信号
+    config_updated = pyqtSignal(dict)
+    
     def __init__(self, config: dict):
         super().__init__()
         self.config = config
@@ -127,8 +186,29 @@ class TranslationOverlay(QWidget):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
+    def _enforce_topmost(self):
+        """使用 Win32 API 狠狠地把窗口拉到最顶层（仅当开启强力置顶时）"""
+        if not self.isVisible() or not self.config.get("force_topmost", False):
+            return
+        try:
+            hwnd = int(self.winId())
+            win32gui.SetWindowPos(
+                hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE
+            )
+        except Exception as e:
+            print(f"[Overlay] Failed to enforce topmost: {e}")
+
+    def update_config(self, new_config: dict):
+        """当主界面保存设置时被调用"""
+        self.config = new_config
+        self.set_font_size(self.config.get("font_size", 22))
+        self._set_width(self.config.get("overlay_width", 800))
+        self._enforce_topmost()
+
     def set_text(self, text: str):
         self.label.setText(text)
+        self._enforce_topmost()  # 每次更新文本时尝试拉回最顶层
         # 延迟调整高度，等 paintEvent 先执行
         QTimer.singleShot(20, self._adjust_height)
 
@@ -206,13 +286,33 @@ class TranslationOverlay(QWidget):
 
         # 宽度选项
         width_menu = menu.addMenu("文本框宽度")
-        for w in [400, 600, 800, 1000, 1200, 1600]:
-            act = width_menu.addAction(f"{w}px" + (" ✓" if w == self.width() else ""))
-            act.setData(w)
-            act.triggered.connect(lambda checked, ww=w: self._set_width(ww))
+        # 获取当前屏幕宽度
+        screen = QApplication.desktop().screenGeometry(self)
+        screen_width = screen.width()
+        
+        for pct in [30, 40, 50, 60, 80, 100]:
+            target_w = int(screen_width * pct / 100)
+            # 判断当前宽度是否匹配该百分比(容差 10px)
+            is_checked = abs(self.width() - target_w) < 10
+            act = width_menu.addAction(f"{pct}%" + (" ✓" if is_checked else ""))
+            act.setData(target_w)
+            act.triggered.connect(lambda checked, ww=target_w: self._set_width(ww))
 
         menu.addSeparator()
 
+        show_name_action = QAction("显示说话人名称", self)
+        show_name_action.setCheckable(True)
+        show_name_action.setChecked(self.config.get("show_character_name", True))
+        show_name_action.triggered.connect(self._toggle_show_name)
+        menu.addAction(show_name_action)
+
+        force_topmost_action = QAction("强力置顶 (解决全屏)", self)
+        force_topmost_action.setCheckable(True)
+        force_topmost_action.setChecked(self.config.get("force_topmost", True))
+        force_topmost_action.triggered.connect(self._toggle_force_topmost)
+        menu.addAction(force_topmost_action)
+
+        menu.addSeparator()
         quit_action = menu.addAction("关闭弹窗")
         quit_action.triggered.connect(self.hide)
 
@@ -220,9 +320,24 @@ class TranslationOverlay(QWidget):
 
     def _set_width(self, width: int):
         """设置宽度并触发重绘"""
+        self.setFixedWidth(width)
+        # 根据当前文本重新计算高度
+        self._adjust_height()
+        # 更新配置并保存
         self.config["overlay_width"] = width
-        self.resize(width, self.height())
-        # 强制重绘 label 以使用新宽度
-        self.label.resize(width - 8, self.label.height())
-        self.label.update()
-        QTimer.singleShot(20, self._adjust_height)
+        from config import save_config
+        save_config(self.config)
+        self.config_updated.emit(self.config)
+
+    def _toggle_show_name(self, checked: bool):
+        self.config["show_character_name"] = checked
+        from config import save_config
+        save_config(self.config)
+        self.config_updated.emit(self.config)
+
+    def _toggle_force_topmost(self, checked: bool):
+        self.config["force_topmost"] = checked
+        self._enforce_topmost()
+        from config import save_config
+        save_config(self.config)
+        self.config_updated.emit(self.config)

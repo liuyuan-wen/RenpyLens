@@ -23,6 +23,23 @@ init python:
     _translator_log_msg("日志文件: " + _translator_log)
     _translator_log_msg("Socket 端口: " + str(_translator_port))
 
+    def _expand_name_vars(text):
+        """手动展开类似 [smgn2m] 的变量，防止 renpy.substitute 漏掉"""
+        import re
+        if not text or not isinstance(text, str):
+            return text
+        def replacer(match):
+            var_name = match.group(1)
+            try:
+                import renpy
+                val = getattr(renpy.store, var_name, None)
+                if val is not None:
+                    return str(val)
+            except Exception:
+                pass
+            return match.group(0)
+        return re.sub(r'\[([a-zA-Z0-9_]+)\]', replacer, text)
+
     def _translator_send(data_dict):
         """异步发送数据到翻译工具，不阻塞游戏"""
         try:
@@ -37,21 +54,60 @@ init python:
             _translator_log_msg("[SEND FAIL] " + str(e))
 
     def _translator_callback(event, interact=True, **kwargs):
+        import renpy
         _translator_log_msg("[CALLBACK] event=" + str(event) + " kwargs_keys=" + str(list(kwargs.keys())))
         if event == "begin":
             what = kwargs.get("what", "")
             who = kwargs.get("who", "")
+            
+            # 兼容标准 Ren'Py：如果 kwargs 中没有 what，从当前 AST 节点获取
+            if not what:
+                try:
+                    if hasattr(renpy, 'game') and hasattr(renpy.game, 'context'):
+                        ctx = renpy.game.context()
+                        if hasattr(ctx, 'current'):
+                            cur_name = ctx.current
+                            if cur_name and hasattr(renpy.game, 'script'):
+                                cur = renpy.game.script.lookup(cur_name)
+                                if hasattr(cur, 'what') and cur.what:
+                                    what = str(cur.what)
+                                if hasattr(cur, 'who') and cur.who:
+                                    # AST 里的 who 通常是个变量名(如 "e")，尝试获取其实际显示的名称
+                                    try:
+                                        who_obj = getattr(renpy.store, cur.who, cur.who)
+                                        if hasattr(who_obj, 'name'):
+                                            who = str(who_obj.name)
+                                        else:
+                                            who = str(cur.who)
+                                    except Exception:
+                                        who = str(cur.who)
+                                    
+                                    # 对 who 进行变量替换（例如 [smgn2m] -> Alice）
+                                    try:
+                                        who = renpy.substitute(who)
+                                    except Exception:
+                                        pass
+                                    who = _expand_name_vars(who)
+                except Exception as e:
+                    _translator_log_msg("[AST GET ERROR] " + str(e))
+
             _translator_log_msg("[BEGIN] who=" + str(who) + " what=" + str(what)[:100])
             if not what:
                 return
-            # 清理 Ren'Py 文本标签 如 {w}, {b}, {/b}, {color=...} 等
+            # 清理 Ren'Py 文本标签如 {w}, {b}, {/b}, {color=...} 等
             import re as _tre
-            clean_what = _tre.sub(r'\{[^}]*\}', '', str(what)).strip()
+            # 记录是否含有斜体标记
+            is_italic = False
+            if "{i}" in what:
+                is_italic = True
+                
+            clean_what = _tre.sub(r'\{[^}]*\}', '', what).strip()
             # 尝试进行变量替换 (例如 [protagonist] -> Kento)
             try:
                 clean_what = renpy.substitute(clean_what)
             except Exception:
                 pass
+            clean_what = _expand_name_vars(clean_what)
             if not clean_what:
                 return
 
@@ -59,6 +115,7 @@ init python:
                 "type": "current",
                 "who": str(who) if who else "",
                 "what": clean_what,
+                "italic": is_italic
             }
 
             # 尝试预取后续几句台词
@@ -96,17 +153,38 @@ init python:
                         # 1. 提取对话 (Say 节点)
                         if hasattr(node, 'what') and hasattr(node, 'who'):
                             w = str(node.what) if node.what else ""
+                            # 记录是否含有斜体标记
+                            node_is_italic = False
+                            if "{i}" in w:
+                                node_is_italic = True
+                                
                             # 尝试进行变量替换 (例如 [protagonist] -> Kento)
                             try:
                                 w = renpy.substitute(w)
                             except Exception:
                                 pass
+                            w = _expand_name_vars(w)
                                 
                             clean_w = _tre.sub(r'\{[^}]*\}', '', w).strip()
                             if clean_w:
+                                who_str = str(node.who) if node.who else ""
+                                try:
+                                    # 尝试解析 AST name 或者直接将 "[smgn2m]" 这样的变量替换掉
+                                    try:
+                                        who_obj = getattr(renpy.store, who_str, who_str)
+                                        if hasattr(who_obj, 'name'):
+                                            who_str = str(who_obj.name)
+                                    except Exception:
+                                        pass
+                                    who_str = renpy.substitute(who_str)
+                                    who_str = _expand_name_vars(who_str)
+                                except Exception:
+                                    pass
+
                                 upcoming.append({
-                                    "who": str(node.who) if node.who else "",
-                                    "what": clean_w
+                                    "who": who_str,
+                                    "what": clean_w,
+                                    "italic": node_is_italic
                                 })
                                 count += 1
                         

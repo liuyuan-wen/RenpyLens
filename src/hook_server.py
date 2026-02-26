@@ -10,7 +10,7 @@ from PyQt5.QtNetwork import QTcpServer, QHostAddress
 class HookServer(QObject):
     """监听来自游戏内 _translator_hook.rpy 的 TCP 连接"""
 
-    text_received = pyqtSignal(str, str)  # who, what
+    text_received = pyqtSignal(str, str, bool)  # who, what, italic
     prefetch_received = pyqtSignal(list)  # [{"who": ..., "what": ...}, ...]
 
     def __init__(self, port: int = 19876, parent=None):
@@ -70,7 +70,8 @@ class HookServer(QObject):
                     self.prefetch_received.emit(prefetch)
                 # 再发射当前文本信号
                 if what:
-                    print(f"[HookServer] Signal emitted: who={who}, what={what[:50]}")
-                    self.text_received.emit(who, what)
+                    italic = msg.get("italic", False)
+                    print(f"[HookServer] Signal emitted: who={who}, what={what[:50]}, italic={italic}")
+                    self.text_received.emit(who, what, italic)
             except Exception as e:
                 print(f"[HookServer] JSON parse error: {e}")

@@ -4,8 +4,6 @@
 import re
 import time
 import httpx
-import asyncio
-import traceback
 import threading
 
 
@@ -27,7 +25,7 @@ class BaseTranslator:
         self._last_call_time = 0
         self._timing_enabled = config.get("enable_timing_log", False)
         self._keep_names = config.get("keep_original_names", True)
-        self._name_instruction = " Do not translate character names, keep them in their original form."
+        self._name_instruction = "\nRule:\nALL character names MUST remain in {source_lang} exactly as they appear in the original text. (e.g. Eileen -> Eileen, Kaelen -> Kaelen)."
         # 线程锁与延迟初始化的客户端
         self._client = None
         self._client_lock = threading.Lock()
@@ -65,9 +63,10 @@ class BaseTranslator:
 
     def translate(self, text: str, source_lang=None, target_lang=None) -> str:
         tl = target_lang or self.target_lang
+        sl = source_lang or self.source_lang
         system_prompt = self.system_prompt.format(target_lang=tl)
         if self._keep_names:
-            system_prompt += self._name_instruction
+            system_prompt += self._name_instruction.format(target_lang=tl, source_lang=sl)
         result = self._call_api(system_prompt, text)
         return self._clean_result(result)
 
@@ -75,10 +74,11 @@ class BaseTranslator:
         if len(texts) == 1:
             return [self.translate(texts[0], source_lang=source_lang, target_lang=target_lang)]
         tl = target_lang or self.target_lang
+        sl = source_lang or self.source_lang
         numbered = "\n".join(f"[{i+1}] {t}" for i, t in enumerate(texts))
         system_prompt = self.batch_prompt.format(target_lang=tl)
         if self._keep_names:
-            system_prompt += self._name_instruction
+            system_prompt += self._name_instruction.format(target_lang=tl, source_lang=sl)
         
         max_retries = 3
         for attempt in range(max_retries):

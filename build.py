@@ -18,7 +18,7 @@ def build_exe():
     # 使用指定的 Python 解释器
     python_exe = args.python
     if not os.path.exists(python_exe):
-        print(f"⚠️ 指定的 Python 解释器不存在: {python_exe}，将回退使用默认解释器")
+        print(f"[WARN] 指定的 Python 解释器不存在: {python_exe}，将回退使用默认解释器")
         python_exe = sys.executable
 
     # 构建 PyInstaller 命令
@@ -49,6 +49,15 @@ def build_exe():
         "--exclude-module", "plotly",
         "--exclude-module", "dash",
         "--exclude-module", "pyinstaller",
+        
+        # 排除不再使用的库和无用的庞大标准库
+        "--exclude-module", "requests",
+        "--exclude-module", "urllib3",
+        "--exclude-module", "unittest",
+        "--exclude-module", "html",
+        "--exclude-module", "http.server",
+        "--exclude-module", "xmlrpc",
+        "--exclude-module", "pydoc",
         
         # PyQt5 优化：排除不使用的庞大模块
         "--exclude-module", "PyQt5.QtSql",
@@ -84,11 +93,11 @@ def build_exe():
     result = subprocess.run(command)
     
     if result.returncode == 0:
-        print("\n✅ 打包成功！")
+        print("\n[OK] 打包成功！")
         print("打包生成的文件 'RenpyLens.exe' 已经直接放在当前代码目录下。")
         print("您可以直接双击 'RenpyLens.exe' 运行，或者将其发给用户（无需安装 Python）。")
     else:
-        print("\n❌ 打包失败，请查看上面的错误信息。")
+        print("\n[ERROR] 打包失败，请查看上面的错误信息。")
 
     # ========= 打包后清理临时文件 =========
     print("\n[清理] 正在清理打包过程中产生的临时文件...")
@@ -98,18 +107,18 @@ def build_exe():
     if os.path.exists(build_dir):
         try:
             shutil.rmtree(build_dir)
-            print(f"✅ 已删除临时构建目录: {build_dir}")
+            print(f"[OK] 已删除临时构建目录: {build_dir}")
         except Exception as e:
-            print(f"⚠️ 删除 build 目录失败: {e}")
+            print(f"[WARN] 删除 build 目录失败: {e}")
             
     # 2. 清理产生的 .spec 文件
     spec_file = os.path.join(os.getcwd(), "RenpyLens.spec")
     if os.path.exists(spec_file):
         try:
             os.remove(spec_file)
-            print(f"✅ 已删除临时配置: {spec_file}")
+            print(f"[OK] 已删除临时配置: {spec_file}")
         except Exception as e:
-            print(f"⚠️ 删除 spec 文件失败: {e}")
+            print(f"[WARN] 删除 spec 文件失败: {e}")
 
 if __name__ == "__main__":
     build_exe()

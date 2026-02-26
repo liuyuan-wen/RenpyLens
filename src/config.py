@@ -16,7 +16,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 
 DEFAULT_CONFIG = {
-    "version": "v1.0.0-Beta",
+    "version": "v1.1.0",
     "translation_engine": "builtin",  # "ollama", "gemini", "zhipu", "builtin"
     "gemini_api_key": "",
     "gemini_url": "https://generativelanguage.googleapis.com",
@@ -77,6 +77,8 @@ DEFAULT_CONFIG = {
     "debounce_ms": 100,  # 防抖延迟(毫秒)，快速翻页时只翻译最后停下的句子
     "enable_timing_log": True,  # 是否打印翻译各阶段耗时日志
     "trial_key_url": "https://frp-bar.com:58385/get_trial_key",
+    "force_topmost": True,  # 强制置顶拉回
+    "show_character_name": False,  # 是否在翻译浮窗显示角色名字
 }
 
 
