@@ -26,6 +26,10 @@ RenpyLens 是一款专为 **Ren'Py 引擎游戏** 开发的轻量级、实时游
   - 支持**斜体排版渲染**，让含心理活动的文字更直观。
   - 支持**强力置顶功能**，解决部分全屏游戏遮挡翻译界面的痛点。
 
+## 📸 运行效果示例
+
+![翻译效果演示](assets/example.jpg)
+
 ## 🎮 软件使用
 
 1. **获取软件**:
@@ -99,3 +103,4 @@ python build.py --python "C:\path\to\your\venv\python.exe"
 ## 📄 许可证 (License)
 
 本项目采用 [GPLv3 License](LICENSE) 许可协议开源。
+
