@@ -124,7 +124,7 @@ _DARK_STYLE = """
 
 # 常用语言列表
 _LANGUAGES = [
-    "简体中文", "繁体中文", "English", "日本語", "한국어",
+    "简体中文", "繁體中文", "English", "日本語", "한국어",
     "Français", "Deutsch", "Español", "Português",
     "Русский", "Italiano", "ไทย", "Tiếng Việt",
     "Bahasa Indonesia", "العربية", "Türkçe",
@@ -555,3 +555,4 @@ class SettingsDialog(QDialog):
                 subprocess.Popen(["xdg-open", CONFIG_DIR])
         except Exception as e:
             print(f"无法打开配置目录: {e}")
+
