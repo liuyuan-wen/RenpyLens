@@ -61,7 +61,7 @@ class MainWindow(QWidget):
         super().__init__()
         self.config = load_config()
 
-        version = self.config.get("version", "version")
+        version = self.config.get("version", "v1.1.0")
         self.setWindowTitle(f"RenpyLens {version} - Ren'Py 实时翻译")
         self.resize(800, 10)
         self.setAcceptDrops(True)
