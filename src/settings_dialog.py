@@ -214,14 +214,14 @@ class SettingsDialog(QDialog):
         self.sys_prompt_input = QTextEdit()
         self.sys_prompt_input.setAcceptRichText(False)
         self.sys_prompt_input.setMaximumHeight(100)
-        self.sys_prompt_input.setPlainText(self.config.get("system_prompt", "You are a professional game dialogue translator. Translate the user's message into {target_lang}. Keep it natural and concise for a visual novel. Output ONLY the translated text. No numbering, no quotes, no explanations."))
+        self.sys_prompt_input.setPlainText(self.config.get("system_prompt", "You are a game localization expert specializing in visual novels. LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text."))
         self.sys_prompt_input.setToolTip("使用 {target_lang} 作为目标语言占位符")
         form.addRow("单句提示词:", self.sys_prompt_input)
 
         self.batch_prompt_input = QTextEdit()
         self.batch_prompt_input.setAcceptRichText(False)
         self.batch_prompt_input.setMaximumHeight(100)
-        self.batch_prompt_input.setPlainText(self.config.get("batch_prompt", "You are a professional game dialogue translator. Translate ALL numbered dialogues into {target_lang}. Keep translations natural and concise. Output ONLY translations in the same numbered format [1]...[2]... No extra text."))
+        self.batch_prompt_input.setPlainText(self.config.get("batch_prompt", "You are a game localization expert specializing in visual novels. LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text."))
         self.batch_prompt_input.setToolTip("使用 {target_lang} 作为目标语言占位符")
         form.addRow("批量提示词:", self.batch_prompt_input)
 
@@ -463,7 +463,7 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout(tab)
         vbox.setSpacing(16)
         
-        version = self.config.get("version", "v1.1.0")
+        version = self.config.get("version", "v1.1.1")
         
         info_label = QLabel(
             f'<div style="font-size: 20px; font-weight: bold; margin-bottom: 10px;">RenpyLens {version}</div>'

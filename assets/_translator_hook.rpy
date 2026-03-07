@@ -96,9 +96,10 @@ init python:
                 return
             # 清理 Ren'Py 文本标签如 {w}, {b}, {/b}, {color=...} 等
             import re as _tre
-            # 记录是否含有斜体标记
+            # 处理斜体：仅当整句话都在 {i}...{/i} 中时才视为全句斜体。局部斜体直接视为无斜体。
             is_italic = False
-            if "{i}" in what:
+            w_strip = what.strip()
+            if w_strip.startswith("{i}") and w_strip.endswith("{/i}"):
                 is_italic = True
                 
             clean_what = _tre.sub(r'\{[^}]*\}', '', what).strip()
@@ -153,9 +154,10 @@ init python:
                         # 1. 提取对话 (Say 节点)
                         if hasattr(node, 'what') and hasattr(node, 'who'):
                             w = str(node.what) if node.what else ""
-                            # 记录是否含有斜体标记
+                            # 处理斜体：仅当整句话都在 {i}...{/i} 中时才视为全句斜体。局部斜体直接视为无斜体。
                             node_is_italic = False
-                            if "{i}" in w:
+                            w_strip = w.strip()
+                            if w_strip.startswith("{i}") and w_strip.endswith("{/i}"):
                                 node_is_italic = True
                                 
                             # 尝试进行变量替换 (例如 [protagonist] -> Kento)

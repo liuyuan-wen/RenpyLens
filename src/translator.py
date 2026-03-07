@@ -19,8 +19,8 @@ class BaseTranslator:
         self.config = config
         self.source_lang = config.get("source_lang", "English")
         self.target_lang = config.get("target_lang", "Chinese")
-        self.system_prompt = config.get("system_prompt", "You are a professional game dialogue translator. Translate the user's message into {target_lang}. Keep it natural and concise for a visual novel. Output ONLY the translated text. No numbering, no quotes, no explanations.")
-        self.batch_prompt = config.get("batch_prompt", "You are a professional game dialogue translator. Translate ALL numbered dialogues into {target_lang}. Keep translations natural and concise. Output ONLY translations in the same numbered format [1]...[2]... No extra text.")
+        self.system_prompt = config.get("system_prompt", "You are a game localization expert specializing in visual novels. LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text.")
+        self.batch_prompt = config.get("batch_prompt", "You are a game localization expert specializing in visual novels. LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text.")
         self.temperature = float(config.get("temperature", 0.3))
         self._last_call_time = 0
         self._timing_enabled = config.get("enable_timing_log", False)
@@ -41,10 +41,17 @@ class BaseTranslator:
         self._last_call_time = time.time()
 
     def _clean_result(self, text: str) -> str:
-        """清理 LLM 输出中的编号前缀"""
+        """清理 LLM 输出中的编号前缀及常见的思考/推理标签 (CoT)"""
         text = text.strip()
-        text = re.sub(r'^\d+[.)\-]\s*', '', text)
-        return text.strip('"\'')
+        
+        # 移除常见的思考标签: <think>...</think>, <thought>...</thought>, [reasoning]...[/reasoning]
+        # 使用 DOTALL 确保匹配跨行内容
+        text = re.sub(r'<(think|thought)>.*?</\1>', '', text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r'\[reasoning\].*?\[/reasoning\]', '', text, flags=re.IGNORECASE | re.DOTALL)
+        
+        # 清理编号前缀 (e.g., "1. ", "1)")
+        text = re.sub(r'^\d+[.)\-]\s*', '', text.strip())
+        return text.strip('"\' ')
 
     def _get_client(self) -> httpx.Client:
         """延迟获取/创建客户端"""
@@ -392,9 +399,15 @@ class BuiltinTranslator(BaseTranslator):
             "temperature": self.temperature,
             "stream": stream,
         }
-        if "qwen3" in self.model.lower() or "Qwen3" in self.model:
-            # 兼容 OpenAI 的 extra_body，在 json 里直接放在顶层
+        
+        # 针对不同模型/框架尝试关闭 thinking 功能
+        model_lower = self.model.lower()
+        if "qwen" in model_lower:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
+        elif "r1" in model_lower or "thinking" in model_lower:
+             # 部分后端框架支持直接在 payload 中关闭
+             payload["enable_thinking"] = False
+             
         return payload
 
     def _call_api(self, system_prompt: str, user_content: str) -> str:
@@ -423,9 +436,8 @@ class BuiltinTranslator(BaseTranslator):
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
-                if "<think>" in content:
-                    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-                content = content.strip()
+                # 统一交由 BaseTranslator 的清理逻辑处理
+                content = self._clean_result(content)
 
                 # 记录 usage 信息和计时
                 usage = data.get("usage", {})
@@ -519,9 +531,7 @@ class BuiltinTranslator(BaseTranslator):
 
         t_end = time.perf_counter()
         content = "".join(chunks_content)
-        if "<think>" in content:
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-        content = content.strip()
+        content = self._clean_result(content)
 
         total_ms = (t_end - t0) * 1000
         ttft_ms = (t_first_token - t0) * 1000 if t_first_token else total_ms
@@ -628,9 +638,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
-                if "<think>" in content:
-                    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
-                return content
+                return self._clean_result(content)
             except Exception as e:
                 if attempt == self.max_retries - 1:
                     raise
@@ -682,6 +690,9 @@ class AnthropicTranslator(BaseTranslator):
             ],
             "temperature": self.temperature,
         }
+        
+        # Claude 3.7+ 支持 thinking，不传参数即为不启用，但有些 provider 可能会默认开启
+        # 这里显式不包含 thinking 相关的配置
 
         for attempt in range(self.max_retries):
             try:

@@ -16,7 +16,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 
 DEFAULT_CONFIG = {
-    "version": "v1.1.0",
+    "version": "v1.1.1",
     "translation_engine": "builtin",  # "ollama", "gemini", "zhipu", "builtin"
     "gemini_api_key": "",
     "gemini_url": "https://generativelanguage.googleapis.com",
@@ -61,8 +61,8 @@ DEFAULT_CONFIG = {
     "custom_api_key": "",
     "custom_url": "http://localhost:8000",
     "custom_model": "custom-model",
-    "system_prompt": "You are a professional game dialogue translator. Translate the user's message into {target_lang}. Keep it natural and concise for a visual novel. Output ONLY the translated text. No numbering, no quotes, no explanations.",
-    "batch_prompt": "You are a professional game dialogue translator. Translate ALL numbered dialogues into {target_lang}. Keep translations natural and concise. Output ONLY translations in the same numbered format [1]...[2]... No extra text.",
+    "system_prompt": "You are a game localization expert specializing in visual novels. LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text.",
+    "batch_prompt": "You are a game localization expert specializing in visual novels. LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text.",
     "temperature": 0.3,
     "keep_original_names": True,  # 保留原文人名不翻译
     "source_lang": "English",
@@ -92,9 +92,20 @@ def load_config() -> dict:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
+            
+            # --- 版本升级：提示词迁移 ---
+            # 如果用户的本地配置依然是旧版的默认提示词，则静默升级到新版默认提示词
+            # 如果用户曾经自定义过，则保持用户的自定义内容不变
+            _OLD_SYS = "You are a professional game dialogue translator. Translate the user's message into {target_lang}. Keep it natural and concise for a visual novel. Output ONLY the translated text. No numbering, no quotes, no explanations."
+            _OLD_BAT = "You are a professional game dialogue translator. Translate ALL numbered dialogues into {target_lang}. Keep translations natural and concise. Output ONLY translations in the same numbered format [1]...[2]... No extra text."
+            if saved.get("system_prompt") == _OLD_SYS:
+                saved["system_prompt"] = DEFAULT_CONFIG["system_prompt"]
+            if saved.get("batch_prompt") == _OLD_BAT:
+                saved["batch_prompt"] = DEFAULT_CONFIG["batch_prompt"]
+
             merged = {**DEFAULT_CONFIG, **saved}
             # 强制覆盖为代码库中的最新版本号，防止旧缓存覆盖导致永远显示旧版本
-            merged["version"] = DEFAULT_CONFIG.get("version", "v1.1.0")
+            merged["version"] = DEFAULT_CONFIG.get("version", "v1.1.1")
             # 如果优先使用本文件配置，则用 DEFAULT_CONFIG 覆盖 saved
             if PRIORITY_CONFIG_PY:
                 merged.update(DEFAULT_CONFIG)

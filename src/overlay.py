@@ -17,9 +17,11 @@ class OutlinedLabel(QLabel):
         super().__init__(text, parent)
         self._outline_width = 2
         self._font_size = 22
+        self._font_family = "Microsoft YaHei"
+        self._font_bold = True
         self._text_color = QColor(255, 255, 255)
         self._outline_color = QColor(0, 0, 0)
-        self.setFont(QFont("Microsoft YaHei", self._font_size, QFont.Bold))
+        self.setFont(QFont(self._font_family, self._font_size, QFont.Bold if self._font_bold else QFont.Normal))
         # QLabel 本身也支持富文本，不过我们要手动接管绘制
         self.setTextFormat(Qt.RichText)
         self.setWordWrap(True)
@@ -29,7 +31,21 @@ class OutlinedLabel(QLabel):
 
     def set_font_size(self, size: int):
         self._font_size = size
-        self.setFont(QFont("Microsoft YaHei", size, QFont.Bold))
+        self.setFont(QFont(self._font_family, size, QFont.Bold if self._font_bold else QFont.Normal))
+        self.update()
+
+    def set_font_family(self, family: str):
+        self._font_family = family
+        self.setFont(QFont(family, self._font_size, QFont.Bold if self._font_bold else QFont.Normal))
+        self.update()
+
+    def set_font_bold(self, bold: bool):
+        self._font_bold = bold
+        self.setFont(QFont(self._font_family, self._font_size, QFont.Bold if bold else QFont.Normal))
+        self.update()
+
+    def set_text_color(self, color_str: str):
+        self._text_color = QColor(color_str)
         self.update()
 
     def paintEvent(self, event):
@@ -171,7 +187,10 @@ class TranslationOverlay(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
 
         self.label = OutlinedLabel("等待游戏文本...", self)
+        self.label.set_font_family(config.get("font_family", "Microsoft YaHei"))
         self.label.set_font_size(config.get("font_size", 22))
+        self.label.set_font_bold(config.get("font_bold", True))
+        self.label.set_text_color(config.get("font_color", "#FFFFFF"))
         layout.addWidget(self.label)
 
         # 初始位置和大小
@@ -202,7 +221,10 @@ class TranslationOverlay(QWidget):
     def update_config(self, new_config: dict):
         """当主界面保存设置时被调用"""
         self.config = new_config
+        self.label.set_font_family(self.config.get("font_family", "Microsoft YaHei"))
         self.set_font_size(self.config.get("font_size", 22))
+        self.label.set_font_bold(self.config.get("font_bold", True))
+        self.label.set_text_color(self.config.get("font_color", "#FFFFFF"))
         self._set_width(self.config.get("overlay_width", 800))
         self._enforce_topmost()
 
@@ -220,6 +242,29 @@ class TranslationOverlay(QWidget):
         self.config["font_size"] = size
         self.label.set_font_size(size)
         self._adjust_height()
+
+    def set_font_family(self, family: str):
+        self.config["font_family"] = family
+        self.label.set_font_family(family)
+        from config import save_config
+        save_config(self.config)
+        self.config_updated.emit(self.config)
+        self._adjust_height()
+
+    def set_font_bold(self, bold: bool):
+        self.config["font_bold"] = bold
+        self.label.set_font_bold(bold)
+        from config import save_config
+        save_config(self.config)
+        self.config_updated.emit(self.config)
+        self._adjust_height()
+
+    def set_text_color(self, color_str: str):
+        self.config["font_color"] = color_str
+        self.label.set_text_color(color_str)
+        from config import save_config
+        save_config(self.config)
+        self.config_updated.emit(self.config)
 
     # --- 拖拽 ---
     def mousePressEvent(self, event):
@@ -284,16 +329,65 @@ class TranslationOverlay(QWidget):
             act.setData(s)
             act.triggered.connect(lambda checked, sz=s: self.set_font_size(sz))
 
+        # 字体选项
+        family_menu = menu.addMenu("字体")
+        families = [
+            ("微软雅黑", "Microsoft YaHei"),
+            ("等线", "DengXian"),
+            ("黑体", "SimHei"),
+            ("宋体", "SimSun"),
+            ("楷体", "KaiTi"),
+            ("仿宋", "FangSong"),
+        ]
+        current_family = self.config.get("font_family", "Microsoft YaHei")
+        for name, f_val in families:
+            act = family_menu.addAction(name + (" ✓" if f_val == current_family else ""))
+            act.setData(f_val)
+            act.triggered.connect(lambda checked, f=f_val: self.set_font_family(f))
+            
+        family_menu.addSeparator()
+        bold_action = family_menu.addAction("粗体")
+        bold_action.setCheckable(True)
+        bold_action.setChecked(self.config.get("font_bold", True))
+        bold_action.triggered.connect(self.set_font_bold)
+
+        # 字体颜色选项
+        color_menu = menu.addMenu("字体颜色")
+        colors = [
+            ("白色", "#FFFFFF"),
+            ("灰色", "#AAAAAA"),
+            ("红色", "#FF5555"),
+            ("绿色", "#32CD32"),
+            ("黄色", "#FFD700"),
+            ("蓝色", "#55A0FF"),
+            ("粉色", "#FF80DF"),
+        ]
+        current_color = self.config.get("font_color", "#FFFFFF")
+        for name, hex_val in colors:
+            act = color_menu.addAction(name + (" ✓" if hex_val == current_color else ""))
+            act.setData(hex_val)
+            act.triggered.connect(lambda checked, c=hex_val: self.set_text_color(c))
+
         # 宽度选项
         width_menu = menu.addMenu("文本框宽度")
         # 获取当前屏幕宽度
         screen = QApplication.desktop().screenGeometry(self)
         screen_width = screen.width()
+        current_w = self.config.get("overlay_width", self.width())
         
-        for pct in [30, 40, 50, 60, 80, 100]:
+        pcts = [30, 40, 50, 60, 80, 100]
+        closest_pct = None
+        min_diff = float('inf')
+        for pct in pcts:
+            diff = abs(current_w - int(screen_width * pct / 100))
+            if diff < min_diff:
+                min_diff = diff
+                closest_pct = pct
+        
+        for pct in pcts:
             target_w = int(screen_width * pct / 100)
-            # 判断当前宽度是否匹配该百分比(容差 10px)
-            is_checked = abs(self.width() - target_w) < 10
+            # 容差为屏幕宽度的 5%，如果在这个范围内，就给最接近的画勾
+            is_checked = (pct == closest_pct) and (min_diff < screen_width * 0.05)
             act = width_menu.addAction(f"{pct}%" + (" ✓" if is_checked else ""))
             act.setData(target_w)
             act.triggered.connect(lambda checked, ww=target_w: self._set_width(ww))
