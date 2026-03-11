@@ -10,7 +10,15 @@ def build_exe():
                         help="指定用于打包的 Python 解释器路径 (默认使用当前运行的 Python)")
     args = parser.parse_args()
 
-    print("开始打包 RenpyLens...")
+    # 获取版本号
+    sys.path.append(os.path.join(os.getcwd(), "src"))
+    try:
+        from config import DEFAULT_CONFIG
+        version = DEFAULT_CONFIG.get("version", "v1.0.0")
+    except ImportError:
+        version = "v1.0.0"
+
+    print(f"开始打包 RenpyLens {version}...")
     
     # 确保在当前目录
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -24,7 +32,7 @@ def build_exe():
     # 构建 PyInstaller 命令
     command = [
         python_exe, "-m", "PyInstaller",
-        "--name", "RenpyLens",
+        "--name", f"RenpyLens_{version}",
         "--windowed", # 隐藏控制台窗口
         "--onefile",   # --onedir 可以打包成一个目录
         "--paths", "src", # 将 src 目录添加到模块搜索路径
@@ -94,8 +102,8 @@ def build_exe():
     
     if result.returncode == 0:
         print("\n[OK] 打包成功！")
-        print("打包生成的文件 'RenpyLens.exe' 已经直接放在当前代码目录下。")
-        print("您可以直接双击 'RenpyLens.exe' 运行，或者将其发给用户（无需安装 Python）。")
+        print(f"打包生成的文件 'RenpyLens_{version}.exe' 已经直接放在当前代码目录下。")
+        print(f"您可以直接双击 'RenpyLens_{version}.exe' 运行，或者将其发给用户（无需安装 Python）。")
     else:
         print("\n[ERROR] 打包失败，请查看上面的错误信息。")
 
@@ -112,7 +120,7 @@ def build_exe():
             print(f"[WARN] 删除 build 目录失败: {e}")
             
     # 2. 清理产生的 .spec 文件
-    spec_file = os.path.join(os.getcwd(), "RenpyLens.spec")
+    spec_file = os.path.join(os.getcwd(), f"RenpyLens_{version}.spec")
     if os.path.exists(spec_file):
         try:
             os.remove(spec_file)

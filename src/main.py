@@ -227,7 +227,7 @@ class MainWindow(QWidget):
         self.drop_label.setWordWrap(True)
         layout.addWidget(self.drop_label)
 
-        # 状态
+        # ״̬
         self.status_label = QLabel("就绪 - 等待拖入游戏")
         self.status_label.setObjectName("status")
         self.status_label.setAlignment(Qt.AlignCenter)
@@ -600,9 +600,13 @@ class MainWindow(QWidget):
         what = self._last_displayed_data.get("what", "")
         trans = self._last_displayed_data.get("translation", "")
         italic = self._last_displayed_data.get("italic", False)
+        choices = self._last_displayed_data.get("choices", [])
+        choice_translations = self._last_displayed_data.get("choice_translations", [])
         
-        if trans:
-            display = self._format_display(who, what, trans, italic)
+        if trans or choice_translations:
+            display = self._format_display(
+                who, what, trans, italic, choices=choices, choice_translations=choice_translations
+            )
             self.overlay.set_text(display)
 
     def _on_settings(self):
@@ -830,7 +834,14 @@ class MainWindow(QWidget):
         self.overlay.config_updated.connect(self._on_overlay_config_changed)
         
         # 保存最后一句显示的原文和翻译
-        self._last_displayed_data = {"who": "", "what": "", "translation": "", "italic": False}
+        self._last_displayed_data = {
+            "who": "",
+            "what": "",
+            "translation": "",
+            "italic": False,
+            "choices": [],
+            "choice_translations": [],
+        }
 
     # --- 拖放 ---
     def dragEnterEvent(self, event: QDragEnterEvent):
@@ -1133,78 +1144,194 @@ class MainWindow(QWidget):
             else:
                 QMessageBox.warning(self, "卸载失败", msg)
 
+    @property
+    def game_title(self) -> str:
+        """从当前游戏 EXE 路径提取游戏名称（去除 .exe 扩展名）"""
+        if not self._current_game_exe:
+            return "Unknown Game"
+        name = os.path.basename(self._current_game_exe)
+        if name.lower().endswith(".exe"):
+            return name[:-4]
+        return name
+
     # --- 文本处理 ---
-    def _on_text_received(self, who: str, what: str, italic: bool = False):
+    def _on_text_received(
+        self,
+        who: str,
+        what: str,
+        italic: bool = False,
+        choices: list = None,
+        menu_active: bool = False,
+    ):
         """收到游戏内当前显示的文本"""
         # 递增 generation，使旧的翻译请求过时
         self._text_generation += 1
-        self._process_text(who, what, italic)
+        self._process_text(who, what, italic, choices or [], menu_active)
 
-    def _process_text(self, who: str, what: str, italic: bool = False):
-        """实际处理文本：查缓存 / 触发翻译 / 触发预取"""
+    def _process_text(
+        self,
+        who: str,
+        what: str,
+        italic: bool = False,
+        choices: list = None,
+        menu_active: bool = False,
+    ):
+        """实际处理文本：查缓存 / 触发翻译 / 触发预取（含菜单选项）"""
         import time as _time
+        what = what or ""
+        who = who or ""
+        choices = [c for c in (choices or []) if c]
+        visible_choices = choices if menu_active else []
         timing_enabled = self.config.get("enable_timing_log", False)
         t_start = _time.perf_counter()
         gen = self._text_generation
-        print(f"[Main] Processing text (gen={gen}): who={who}, what={what[:80]}")
-        # 1) 处理当前句
-        cached = self.cache.get(what)
-        if cached:
-            display = self._format_display(who, what, cached, italic)
+        print(
+            f"[Main] Processing text (gen={gen}): who={who}, what={what[:80]}, "
+            f"choices={len(choices)}, menu_active={menu_active}"
+        )
+
+        # 1) 处理当前句与菜单选项缓存
+        current_cached = self.cache.get(what) if what else ""
+        choice_translation_map = {}
+        unresolved_choices = []
+        for choice in choices:
+            translated = self.cache.get(choice)
+            if translated:
+                choice_translation_map[choice] = translated
+            else:
+                choice_translation_map[choice] = ""
+                unresolved_choices.append(choice)
+
+        has_current = bool(what)
+        need_async = (has_current and not current_cached) or bool(unresolved_choices)
+        visible_choice_translations = [choice_translation_map.get(choice, "") for choice in visible_choices]
+
+        if not need_async:
+            display = self._format_display(
+                who,
+                what,
+                current_cached if has_current else "",
+                italic,
+                choices=visible_choices,
+                choice_translations=visible_choice_translations,
+            )
             self.translation_ready.emit(display)
             if timing_enabled:
                 hit_ms = (_time.perf_counter() - t_start) * 1000
                 print(f"[Timing] Cache hit: {hit_ms:.1f}ms (text received -> displayed)")
         else:
-            # 未缓存 → 统一走批量翻译路径（当前句 + 预取项合并为一批）
-            self.overlay.set_text(self._format_display(who, what, "翻译中...", italic))
+            # 未缓存 → 统一走批量翻译路径（当前句 + 菜单选项 + 预取项合并为一批）
+            display_choices = [
+                choice_translation_map.get(choice, "") or "选项翻译中..."
+                for choice in visible_choices
+            ]
+            display_current = current_cached if current_cached else ("翻译中..." if has_current else "")
+            self.overlay.set_text(
+                self._format_display(
+                    who,
+                    what,
+                    display_current,
+                    italic,
+                    choices=visible_choices,
+                    choice_translations=display_choices,
+                )
+            )
             threading.Thread(
                 target=self._translate_batch_with_current,
-                args=(who, what, gen, italic), daemon=True
+                args=(who, what, choices, menu_active, gen, italic), daemon=True
             ).start()
 
         # 2) 无论缓存命中与否，都检查预取缓冲区是否充裕
         #    inflight 的句子会被视为已就绪而跳过
         self._ensure_prefetch_buffer(gen)
 
-    def _translate_batch_with_current(self, who: str, what: str, gen: int, italic: bool = False):
-        """将当前句与预取项合并为一个批量翻译请求"""
+    def _translate_batch_with_current(
+        self,
+        who: str,
+        what: str,
+        choices: list,
+        menu_active: bool,
+        gen: int,
+        italic: bool = False,
+    ):
+        """将当前句、菜单选项与预取项合并为一个批量翻译请求"""
         import time as _time
+        choices = [c for c in (choices or []) if c]
+        visible_choices = choices if menu_active else []
         timing_enabled = self.config.get("enable_timing_log", False)
         t_pipeline_start = _time.perf_counter()
-
-        # 如果当前句已被其他线程翻译中，等待缓存就绪而非重复翻译
-        with self._inflight_lock:
-            current_inflight = what in self._inflight_texts
-        if current_inflight:
-            print(f"[Batch] Current sentence already being translated, waiting for cache...")
-            for _ in range(100):  # 最多等 10 秒
-                _time.sleep(0.1)
-                # 如果用户已翻页，放弃等待
-                if self._text_generation != gen:
-                    print(f"[Batch] ⏭ User turned page (gen={gen}→{self._text_generation}), abandoning wait")
-                    return
-                cached = self.cache.get(what)
-                if cached:
-                    display = self._format_display(who, what, cached, italic)
-                    self.translation_ready.emit(display)
-                    print(f"[Batch] Wait successful, cache hit: {cached[:30]}")
-                    return
-            # 超时仍未就绪 → 继续走翻译流程
+        batch_texts = []
 
         # 用户已翻页 → 跳过翻译（不浪费 API 调用）
         if self._text_generation != gen:
             print(f"[Batch] ⏭ Skipping outdated translation (gen={gen}→{self._text_generation}): {what[:40]}")
             return
 
+        # 当前页面必须先保证当前句与菜单选项（required）可得
+        required_texts = []
+        seen_required = set()
+        if what and self.cache.get(what) is None:
+            required_texts.append(what)
+            seen_required.add(what)
+        for choice in choices:
+            if choice in seen_required:
+                continue
+            if self.cache.get(choice) is None:
+                required_texts.append(choice)
+                seen_required.add(choice)
+
+        if not required_texts:
+            if self._text_generation == gen:
+                current_result = self.cache.get(what) if what else ""
+                choice_results = [self.cache.get(choice) or "" for choice in visible_choices]
+                display = self._format_display(
+                    who, what, current_result, italic, choices=visible_choices, choice_translations=choice_results
+                )
+                self.translation_ready.emit(display)
+            return
+
+        # 如果当前句和菜单选项都被其他线程翻译中，则等待缓存就绪而非重复翻译
+        with self._inflight_lock:
+            required_inflight = [t for t in required_texts if t in self._inflight_texts]
+        if required_inflight and len(required_inflight) == len(required_texts):
+            print("[Batch] Current/choice texts already being translated, waiting for cache...")
+            for _ in range(100):  # 最多等 10 秒
+                _time.sleep(0.1)
+                # 如果用户已翻页，放弃等待
+                if self._text_generation != gen:
+                    print(f"[Batch] ⏭ User turned page (gen={gen}→{self._text_generation}), abandoning wait")
+                    return
+                ready = True
+                for text in required_texts:
+                    if self.cache.get(text) is None:
+                        ready = False
+                        break
+                if ready:
+                    current_result = self.cache.get(what) if what else ""
+                    choice_results = [self.cache.get(choice) or "" for choice in visible_choices]
+                    display = self._format_display(
+                        who, what, current_result, italic, choices=visible_choices, choice_translations=choice_results
+                    )
+                    self.translation_ready.emit(display)
+                    print("[Batch] Wait successful, cache hit for current/choices")
+                    return
+            # 超时仍未就绪 → 继续走翻译流程
+
         t_build_start = _time.perf_counter()
         prefetch_count = self.config.get("prefetch_count", 5)
-        # 构建批量列表：当前句 + 预取项中未缓存且未在翻译中的
-        batch_texts = [what]
-        seen = {what}
+        prefetch_added = 0
+        # 构建批量列表：当前句 + 菜单选项（优先）+ 预取项中未缓存且未在翻译中的
+        seen = set()
         with self._inflight_lock:
+            for text in required_texts:
+                if text and text not in seen \
+                        and self.cache.get(text) is None \
+                        and text not in self._inflight_texts:
+                    batch_texts.append(text)
+                    seen.add(text)
+
             for item in self._latest_prefetch_items:
-                if len(batch_texts) >= prefetch_count:
+                if prefetch_added >= prefetch_count:
                     break
                 text = item.get("what", "")
                 if text and text not in seen \
@@ -1212,12 +1339,35 @@ class MainWindow(QWidget):
                         and text not in self._inflight_texts:
                     batch_texts.append(text)
                     seen.add(text)
+                    prefetch_added += 1
             # 标记 inflight（在锁内完成，防止其他线程同时标记）
             for t in batch_texts:
                 self._inflight_texts.add(t)
         t_build_end = _time.perf_counter()
 
-        print(f"[Batch] Batch translating {len(batch_texts)} items (incl. current, gen={gen})")
+        # 若 required 都在 inflight，当前线程只需等待其结果，不再重复请求
+        missing_required = [t for t in required_texts if self.cache.get(t) is None]
+        if missing_required and not any(t in batch_texts for t in required_texts):
+            print("[Batch] Required texts still inflight, waiting without duplicate API call...")
+            for _ in range(50):  # 最多等 5 秒
+                _time.sleep(0.1)
+                if self._text_generation != gen:
+                    print(f"[Batch] ⏭ User turned page while waiting (gen={gen}→{self._text_generation})")
+                    return
+                if all(self.cache.get(t) is not None for t in required_texts):
+                    current_result = self.cache.get(what) if what else ""
+                    choice_results = [self.cache.get(choice) or "" for choice in visible_choices]
+                    display = self._format_display(
+                        who, what, current_result, italic, choices=visible_choices, choice_translations=choice_results
+                    )
+                    self.translation_ready.emit(display)
+                    return
+            return
+
+        if not batch_texts:
+            return
+
+        print(f"[Batch] Batch translating {len(batch_texts)} items (current+choices+prefetch, gen={gen})")
 
         # 防抖：万事俱备，等待一小段时间，如果用户翻页了就跳过 API 调用
         debounce_ms = self.config.get("debounce_ms", 200)
@@ -1236,24 +1386,52 @@ class MainWindow(QWidget):
                 batch_texts,
                 source_lang=self.config["source_lang"],
                 target_lang=self.config["target_lang"],
+                game_title=self.game_title,
             )
             t_api_end = _time.perf_counter()
+            result_map = {text: translation for text, translation in zip(batch_texts, results)}
 
             t_parse_start = _time.perf_counter()
             for text, translation in zip(batch_texts, results):
-                if not translation.startswith("[翻译失败"):
+                clean_translation = translation
+                if isinstance(clean_translation, str):
+                    for _ in range(3):
+                        new_t = re.sub(r'\{[^{}]*\}', '', clean_translation)
+                        if new_t == clean_translation:
+                            break
+                        clean_translation = new_t
+                    clean_translation = re.sub(
+                        r'\{/?(?:color|alpha|font|size|b|i|u|s|a|cps|w|p|nw|fast|k|rt|rb|space|vspace)\b[^}\n]*\}?',
+                        '',
+                        clean_translation,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                if not clean_translation.startswith("[翻译失败"):
                     # 不覆盖已有缓存（先到先得，保证一致性）
                     if self.cache.get(text) is None:
-                        self.cache.put(text, translation)
-                    print(f"[Batch] ✅ {text[:30]} -> {translation[:30]}")
+                        self.cache.put(text, clean_translation)
+                    print(f"[Batch] ✅ {text[:30]} -> {clean_translation[:30]}")
                 else:
-                    print(f"[Batch] ❌ {text[:30]} -> {translation[:30]}")
+                    print(f"[Batch] ❌ {text[:30]} -> {clean_translation[:30]}")
             t_parse_end = _time.perf_counter()
 
             # 只有仍是最新文本时才显示到弹窗
             if self._text_generation == gen:
-                current_result = self.cache.get(what) or (results[0] if results else "[翻译失败]")
-                display = self._format_display(who, what, current_result, italic)
+                current_result = ""
+                if what:
+                    current_result = self.cache.get(what) or result_map.get(what, "[翻译失败]")
+                choice_results = [
+                    self.cache.get(choice) or result_map.get(choice, "[翻译失败]")
+                    for choice in visible_choices
+                ]
+                display = self._format_display(
+                    who,
+                    what,
+                    current_result,
+                    italic,
+                    choices=visible_choices,
+                    choice_translations=choice_results,
+                )
                 self.translation_ready.emit(display)
             else:
                 print(f"[Batch] Translation done but user turned page, result cached only (gen={gen}→{self._text_generation})")
@@ -1282,12 +1460,30 @@ class MainWindow(QWidget):
                 print(f"{'='*60}\n")
         except KeyExpiredError as e:
             if self._text_generation == gen:
-                display = self._format_display(who, what, f"[{e}]", italic)
+                current_result = f"[{e}]" if what else ""
+                choice_results = [self.cache.get(choice) or f"[{e}]" for choice in visible_choices]
+                display = self._format_display(
+                    who,
+                    what,
+                    current_result,
+                    italic,
+                    choices=visible_choices,
+                    choice_translations=choice_results,
+                )
                 self.translation_ready.emit(display)
             self._key_expired_signal.emit()
         except Exception as e:
             if self._text_generation == gen:
-                display = self._format_display(who, what, f"[翻译失败: {e}]", italic)
+                current_result = f"[翻译失败: {e}]" if what else ""
+                choice_results = [self.cache.get(choice) or f"[翻译失败: {e}]" for choice in visible_choices]
+                display = self._format_display(
+                    who,
+                    what,
+                    current_result,
+                    italic,
+                    choices=visible_choices,
+                    choice_translations=choice_results,
+                )
                 self.translation_ready.emit(display)
         finally:
             with self._inflight_lock:
@@ -1362,16 +1558,30 @@ class MainWindow(QWidget):
                 texts,
                 source_lang=self.config["source_lang"],
                 target_lang=self.config["target_lang"],
+                game_title=self.game_title,
             )
             t_api_end = _time.perf_counter()
 
             for text, translation in zip(texts, results):
-                if not translation.startswith("[翻译失败"):
+                clean_translation = translation
+                if isinstance(clean_translation, str):
+                    for _ in range(3):
+                        new_t = re.sub(r'\{[^{}]*\}', '', clean_translation)
+                        if new_t == clean_translation:
+                            break
+                        clean_translation = new_t
+                    clean_translation = re.sub(
+                        r'\{/?(?:color|alpha|font|size|b|i|u|s|a|cps|w|p|nw|fast|k|rt|rb|space|vspace)\b[^}\n]*\}?',
+                        '',
+                        clean_translation,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                if not clean_translation.startswith("[翻译失败"):
                     if self.cache.get(text) is None:
-                        self.cache.put(text, translation)
-                    print(f"[Prefetch] ✅ {text[:30]} -> {translation[:30]}")
+                        self.cache.put(text, clean_translation)
+                    print(f"[Prefetch] ✅ {text[:30]} -> {clean_translation[:30]}")
                 else:
-                    print(f"[Prefetch] ❌ {text[:30]} -> {translation[:30]}")
+                    print(f"[Prefetch] ❌ {text[:30]} -> {clean_translation[:30]}")
 
             if timing_enabled:
                 t_end = _time.perf_counter()
@@ -1421,23 +1631,63 @@ class MainWindow(QWidget):
             "获取更多授权。"
         )
 
-    def _format_display(self, who: str, original: str, translation: str, italic: bool = False) -> str:
+    def _format_display(
+        self,
+        who: str,
+        original: str,
+        translation: str,
+        italic: bool = False,
+        choices: list = None,
+        choice_translations: list = None,
+    ) -> str:
+        choices = choices or []
+        choice_translations = choice_translations or []
+
         # 记录最后一次要被渲染的数据，以便设置变更时可以瞬间重绘
         self._last_displayed_data["who"] = who
         self._last_displayed_data["what"] = original
         self._last_displayed_data["translation"] = translation
         self._last_displayed_data["italic"] = italic
-        
-        # 最终清理 LLM 编号前缀: "1. ", "1) ", "1- ", "- " 等
-        translation = re.sub(r'^\s*\d+[.)\-:、]\s*', '', translation)
-        translation = re.sub(r'^\s*[\-\*]\s+', '', translation)
-        
-        if italic:
-            translation = f"<i>{translation}</i>"
-            
-        if who and self.config.get("show_character_name", True):
-            return f"【{who}】{translation}"
-        return translation
+        self._last_displayed_data["choices"] = list(choices)
+        self._last_displayed_data["choice_translations"] = list(choice_translations)
+
+        def _clean_line(text: str) -> str:
+            # 最终清理 LLM 编号前缀: "1. ", "1) ", "1- ", "- " 等
+            text = str(text or "")
+            # 清理可能漏出的 Ren'Py 标签（含部分不完整标签）
+            for _ in range(3):
+                new_text = re.sub(r'\{[^{}]*\}', '', text)
+                if new_text == text:
+                    break
+                text = new_text
+            text = re.sub(
+                r'\{/?(?:color|alpha|font|size|b|i|u|s|a|cps|w|p|nw|fast|k|rt|rb|space|vspace)\b[^}\n]*\}?',
+                '',
+                text,
+                flags=re.IGNORECASE,
+            )
+            text = re.sub(r'^\s*\d+[.)\-:、]\s*', '', text)
+            text = re.sub(r'^\s*[\-\*]\s+', '', text)
+            return text.strip()
+
+        lines = []
+        for idx, _choice in enumerate(choices):
+            trans = choice_translations[idx] if idx < len(choice_translations) else ""
+            clean_trans = _clean_line(trans)
+            if clean_trans:
+                lines.append(f"[{idx + 1}] {clean_trans}")
+
+        dialogue_line = _clean_line(translation)
+        # 菜单出现时，默认仅显示选项，避免把上一句对白残留在底部。
+        show_dialogue_line = bool(dialogue_line) and not choices
+        if show_dialogue_line:
+            if italic:
+                dialogue_line = f"<i>{dialogue_line}</i>"
+            if who and self.config.get("show_character_name", True):
+                dialogue_line = f"【{who}】{dialogue_line}"
+            lines.append(dialogue_line)
+
+        return "\n".join(lines)
 
     # --- 关闭 ---
     def closeEvent(self, event):

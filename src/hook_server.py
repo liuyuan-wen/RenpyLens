@@ -10,7 +10,7 @@ from PyQt5.QtNetwork import QTcpServer, QHostAddress
 class HookServer(QObject):
     """监听来自游戏内 _translator_hook.rpy 的 TCP 连接"""
 
-    text_received = pyqtSignal(str, str, bool)  # who, what, italic
+    text_received = pyqtSignal(str, str, bool, list, bool)  # who, what, italic, choices, menu_active
     prefetch_received = pyqtSignal(list)  # [{"who": ..., "what": ...}, ...]
 
     def __init__(self, port: int = 19876, parent=None):
@@ -63,15 +63,27 @@ class HookServer(QObject):
                 msg = json.loads(data.decode("utf-8"))
                 who = msg.get("who", "")
                 what = msg.get("what", "")
+                raw_choices = msg.get("choices", [])
+                choices = []
+                if isinstance(raw_choices, list):
+                    for item in raw_choices:
+                        text = item if isinstance(item, str) else str(item or "")
+                        text = text.strip()
+                        if text:
+                            choices.append(text)
+                menu_active = bool(msg.get("menu_active", False))
                 # 先发射预取信号（让 _latest_prefetch_items 先更新）
                 prefetch = msg.get("prefetch", [])
                 if prefetch:
                     print(f"[HookServer] Prefetch {len(prefetch)} items")
                     self.prefetch_received.emit(prefetch)
                 # 再发射当前文本信号
-                if what:
+                if what or choices:
                     italic = msg.get("italic", False)
-                    print(f"[HookServer] Signal emitted: who={who}, what={what[:50]}, italic={italic}")
-                    self.text_received.emit(who, what, italic)
+                    print(
+                        f"[HookServer] Signal emitted: who={who}, what={what[:50]}, "
+                        f"italic={italic}, choices={len(choices)}, menu_active={menu_active}"
+                    )
+                    self.text_received.emit(who, what, italic, choices, menu_active)
             except Exception as e:
                 print(f"[HookServer] JSON parse error: {e}")

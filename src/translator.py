@@ -19,13 +19,13 @@ class BaseTranslator:
         self.config = config
         self.source_lang = config.get("source_lang", "English")
         self.target_lang = config.get("target_lang", "Chinese")
-        self.system_prompt = config.get("system_prompt", "You are a game localization expert specializing in visual novels. LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text.")
-        self.batch_prompt = config.get("batch_prompt", "You are a game localization expert specializing in visual novels. LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text.")
+        self.system_prompt = config.get("system_prompt", "You are a game localization expert specializing in visual novels. You are currently localizing the game \"{game_title}\". LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text.")
+        self.batch_prompt = config.get("batch_prompt", "You are a game localization expert specializing in visual novels. You are currently localizing the game \"{game_title}\". LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text.")
         self.temperature = float(config.get("temperature", 0.3))
         self._last_call_time = 0
         self._timing_enabled = config.get("enable_timing_log", False)
         self._keep_names = config.get("keep_original_names", True)
-        self._name_instruction = "\nRule:\nALL character names MUST remain in {source_lang} exactly as they appear in the original text. (e.g. Eileen -> Eileen, Kaelen -> Kaelen)."
+        self._name_instruction = "\nRule:\nKeep all character names EXACTLY as they appear in the source text. Do not translate or transliterate them. (Examples: Eileen -> Eileen, 桜 -> 桜, Артём -> Артём)."
         # 线程锁与延迟初始化的客户端
         self._client = None
         self._client_lock = threading.Lock()
@@ -68,22 +68,22 @@ class BaseTranslator:
         """子类必须实现此 API 调用逻辑"""
         raise NotImplementedError
 
-    def translate(self, text: str, source_lang=None, target_lang=None) -> str:
+    def translate(self, text: str, source_lang=None, target_lang=None, game_title="Unknown Game") -> str:
         tl = target_lang or self.target_lang
         sl = source_lang or self.source_lang
-        system_prompt = self.system_prompt.format(target_lang=tl)
+        system_prompt = self.system_prompt.format(target_lang=tl, game_title=game_title)
         if self._keep_names:
             system_prompt += self._name_instruction.format(target_lang=tl, source_lang=sl)
         result = self._call_api(system_prompt, text)
         return self._clean_result(result)
 
-    def translate_batch(self, texts: list, source_lang=None, target_lang=None) -> list:
+    def translate_batch(self, texts: list, source_lang=None, target_lang=None, game_title="Unknown Game") -> list:
         if len(texts) == 1:
-            return [self.translate(texts[0], source_lang=source_lang, target_lang=target_lang)]
+            return [self.translate(texts[0], source_lang=source_lang, target_lang=target_lang, game_title=game_title)]
         tl = target_lang or self.target_lang
         sl = source_lang or self.source_lang
         numbered = "\n".join(f"[{i+1}] {t}" for i, t in enumerate(texts))
-        system_prompt = self.batch_prompt.format(target_lang=tl)
+        system_prompt = self.batch_prompt.format(target_lang=tl, game_title=game_title)
         if self._keep_names:
             system_prompt += self._name_instruction.format(target_lang=tl, source_lang=sl)
         

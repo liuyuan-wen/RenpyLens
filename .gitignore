@@ -8,6 +8,7 @@
 !/build.py
 !/requirements.txt
 !/upx.exe
+!/LICENSE
 
 # ==================================
 # 3. “放行”必要的文件夹及其内部内容
