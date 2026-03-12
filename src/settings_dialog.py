@@ -494,13 +494,13 @@ class SettingsDialog(QDialog):
 
         qq_image_label = QLabel()
         qq_image_label.setAlignment(Qt.AlignCenter)
-        qq_pixmap = QPixmap(self._get_asset_path("qq群.jpg"))
+        qq_pixmap = QPixmap(self._get_asset_path("qq.jpg"))
         if not qq_pixmap.isNull():
             qq_image_label.setPixmap(
                 qq_pixmap.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
         else:
-            qq_image_label.setText("官方群二维码图片加载失败")
+            qq_image_label.setText("群二维码图片加载失败")
         vbox.addWidget(qq_image_label)
 
         vbox.addStretch()

@@ -39,6 +39,7 @@ def build_exe():
         "--add-data", "assets/_translator_hook.rpy;.", # 包含必须的资源文件
         "--add-data", "assets/icon.ico;.", # 包含图标以便程序运行时提取
         "--add-data", "assets/icon.png;.", 
+        "--add-data", "assets/qq.jpg;.",
         "--icon", "assets/icon.ico", # 指定程序本身的图标
         
         # 排除体积巨大且程序明显用不到的科学计算和系统级大包
