@@ -16,7 +16,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 
 DEFAULT_CONFIG = {
-    "version": "v1.1.2",
+    "version": "v1.1.3",
     "translation_engine": "builtin",  # "ollama", "gemini", "zhipu", "builtin"
     "gemini_api_key": "",
     "gemini_url": "https://generativelanguage.googleapis.com",
@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     "builtin_url": "http://localhost:8000",
     "builtin_model": "模型1",
     "builtin_api_key": "",
+    "builtin_api_expiry": "",
     "builtin_nodes": [
         {"name": "中国大陆节点", "url": "https://frp-bar.com:50588/"},
         {"name": "海外/备用节点", "url": "https://flush-communities-maintained-polyester.trycloudflare.com"}
@@ -112,7 +113,7 @@ def load_config() -> dict:
 
             merged = {**DEFAULT_CONFIG, **saved}
             # 强制覆盖为代码库中的最新版本号，防止旧缓存覆盖导致永远显示旧版本
-            merged["version"] = DEFAULT_CONFIG.get("version", "v1.1.1")
+            merged["version"] = DEFAULT_CONFIG.get("version", "v1.1.3")
             # 如果优先使用本文件配置，则用 DEFAULT_CONFIG 覆盖 saved
             if PRIORITY_CONFIG_PY:
                 merged.update(DEFAULT_CONFIG)

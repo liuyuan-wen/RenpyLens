@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """设置对话框 - 将所有配置项以 GUI 方式呈现"""
 
+import os
+import sys
+
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QLineEdit, QComboBox, QSpinBox, QCheckBox,
@@ -8,6 +11,7 @@ from PyQt5.QtWidgets import (
     QScrollArea
 )
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPixmap
 
 # 通用暗色样式
 _DARK_STYLE = """
@@ -144,7 +148,7 @@ class SettingsDialog(QDialog):
         self._changed = False  # 标记是否有修改
 
         self.setWindowTitle("⚙️ 设置")
-        self.setMinimumSize(560, 520)
+        self.setMinimumSize(640, 520)
         self.setStyleSheet(_DARK_STYLE)
 
         layout = QVBoxLayout(self)
@@ -463,26 +467,51 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout(tab)
         vbox.setSpacing(16)
         
-        version = self.config.get("version", "v1.1.1")
+        version = self.config.get("version", "v1.1.3")
         
         info_label = QLabel(
             f'<div style="font-size: 20px; font-weight: bold; margin-bottom: 10px;">RenpyLens {version}</div>'
             '<div style="line-height: 1.5; color: #ddd; font-size: 18px;">'
-            "一款专为 Ren'Py 引擎打造的 AI 悬浮翻译器。<br><br>"
+            "一款专为 Ren'Py 引擎打造的 AI 悬浮翻译器。<br>"
             "<b>开发者：</b>wenliuyuan<br>"
             "<b>开源协议：</b>GPLv3<br>"
             '<b>开源项目：</b><a href="https://github.com/liuyuan-wen/RenpyLens" style="color: #4a9eff; text-decoration: none;">https://github.com/liuyuan-wen/RenpyLens</a><br>'
-            "<b>联系微信：</b>renpytrans<br><br>"
-            '<span style="color: #aaa; font-size: 18px;">有任何问题，欢迎联系，欢迎提issue。</span><br>'
-            '<span style="color: #aaa; font-size: 18px;">免责声明：本软件代码开源，翻译由 AI 大语言模型驱动，结果仅供参考。</span>'
+            "<b>官方交流QQ群：</b>1058127921<br>"
+            '<span style="color: #aaa; font-size: 18px;">欢迎入群交流视觉小说、GalGame或任何游戏。</span><br>'
+            '<span style="color: #aaa; font-size: 18px;">有任何问题/意见/建议 ☞ 随时联系群主。</span><br>'
+            '<span style="color: #aaa; font-size: 18px;">祝大家玩得开心~</span>'
             '</div>'
         )
         info_label.setOpenExternalLinks(True)
         info_label.setWordWrap(True)
         
         vbox.addWidget(info_label)
+        
+        qq_title = QLabel("官方交流QQ群")
+        qq_title.setAlignment(Qt.AlignCenter)
+        qq_title.setStyleSheet("color: #4a9eff; font-size: 18px; font-weight: bold;")
+        vbox.addWidget(qq_title)
+
+        qq_image_label = QLabel()
+        qq_image_label.setAlignment(Qt.AlignCenter)
+        qq_pixmap = QPixmap(self._get_asset_path("qq群.jpg"))
+        if not qq_pixmap.isNull():
+            qq_image_label.setPixmap(
+                qq_pixmap.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        else:
+            qq_image_label.setText("官方群二维码图片加载失败")
+        vbox.addWidget(qq_image_label)
+
         vbox.addStretch()
         return tab
+
+    def _get_asset_path(self, filename: str) -> str:
+        if getattr(sys, "frozen", False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
+        return os.path.join(base_path, filename)
 
     # ── 保存 ──────────────────────────────────────
 

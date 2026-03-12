@@ -18,7 +18,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QColor, QPalette, QTextCursor, QPixmap
 
 from config import load_config, save_config
-from hwid_utils import get_hwid, register_trial_key
+from hwid_utils import get_hwid, register_trial_key, fetch_trial_key_expiry
 from hook_server import HookServer
 from translator import create_translator, KeyExpiredError
 from cache import TranslationCache
@@ -54,7 +54,8 @@ class MainWindow(QWidget):
     """主窗口 - 拖入游戏 EXE 的界面"""
 
     translation_ready = pyqtSignal(str)  # 翻译结果信号
-    _trial_key_signal = pyqtSignal(str)   # 试用 Key 申请结果信号
+    _trial_key_signal = pyqtSignal(object)   # 试用 Key 申请结果信号
+    _trial_expiry_signal = pyqtSignal(object)  # API 到期时间刷新结果
     _key_expired_signal = pyqtSignal()     # Key 过期信号
 
     def __init__(self):
@@ -87,6 +88,7 @@ class MainWindow(QWidget):
         self._setup_services()
 
         self.translation_ready.connect(self._on_translation_ready)
+        self._trial_expiry_signal.connect(self._on_trial_expiry_result)
         self._key_expired_signal.connect(self._on_key_expired)
         self._key_expired_shown = False  # 防止重复弹窗
 
@@ -407,10 +409,16 @@ class MainWindow(QWidget):
         self.node_combo.setFixedHeight(48)
         self.node_layout.addWidget(self.node_combo)
 
-        # "获取试用API" 按钮 (紧挨着线路选择)
-        self.btn_trial_key = QPushButton("🔑 获取试用API")
-        self.btn_trial_key.setCursor(Qt.PointingHandCursor)
-        self.btn_trial_key.setStyleSheet("""
+        self.node_layout.addStretch()
+        _es_layout.addWidget(self.node_row)
+
+        # 内置通道 API 操作行
+        self.builtin_api_row = QWidget()
+        self.builtin_api_layout = QHBoxLayout(self.builtin_api_row)
+        self.builtin_api_layout.setContentsMargins(0, 0, 0, 0)
+        self.builtin_api_layout.setSpacing(10)
+
+        builtin_api_btn_style = """
             QPushButton {
                 background-color: #16213e; color: #4a9eff;
                 border: 1px solid #4a9eff; border-radius: 4px;
@@ -418,17 +426,53 @@ class MainWindow(QWidget):
             }
             QPushButton:hover { background-color: #1a2744; color: #6bb5ff; border-color: #6bb5ff; }
             QPushButton:disabled { color: #555; border-color: #444; }
-        """)
-        self.btn_trial_key.clicked.connect(self._on_request_trial_key)
-        self.node_layout.addWidget(self.btn_trial_key)
+        """
 
-        # API 状态指示器
+        self.builtin_api_layout.addStretch() # 占位
+        self.btn_trial_key = QPushButton("🔑 获取试用API")
+        self.btn_trial_key.setCursor(Qt.PointingHandCursor)
+        self.btn_trial_key.setStyleSheet(builtin_api_btn_style)
+        self.btn_trial_key.clicked.connect(self._on_request_trial_key)
+        self.builtin_api_layout.addWidget(self.btn_trial_key)
+
         self.api_status_label = QLabel()
         self.api_status_label.setStyleSheet("font-size: 18px; padding-left: 8px;")
-        self.node_layout.addWidget(self.api_status_label)
+        self.builtin_api_layout.addWidget(self.api_status_label)
 
-        self.node_layout.addStretch()
-        _es_layout.addWidget(self.node_row)
+        self.expiry_group = QWidget()
+        self.expiry_group_layout = QHBoxLayout(self.expiry_group)
+        self.expiry_group_layout.setContentsMargins(0, 0, 0, 0)
+        self.expiry_group_layout.setSpacing(2)
+
+        self.api_expiry_label = QLabel()
+        self.api_expiry_label.setAlignment(Qt.AlignVCenter)
+        self.api_expiry_label.setStyleSheet("font-size: 18px; color: #aaa;")
+        self.expiry_group_layout.addWidget(self.api_expiry_label)
+
+        self.btn_refresh_expiry = QPushButton("⟳")
+        self.btn_refresh_expiry.setCursor(Qt.PointingHandCursor)
+        self.btn_refresh_expiry.setToolTip("刷新到期时间")
+        self.btn_refresh_expiry.setFixedSize(22, 22)
+        self.btn_refresh_expiry.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #4a9eff;
+                border: none;
+                font-size: 20px;
+                padding: 0px;
+                font-weight: bold;
+            }
+            QPushButton:hover { color: #6bb5ff; }
+            QPushButton:disabled { color: #555; }
+        """)
+        self.btn_refresh_expiry.clicked.connect(self._on_refresh_trial_expiry_clicked)
+        self.expiry_group_layout.addWidget(self.btn_refresh_expiry)
+
+        self.builtin_api_layout.addWidget(self.expiry_group)
+        self.builtin_api_layout.setAlignment(self.expiry_group, Qt.AlignVCenter)
+
+        self.builtin_api_layout.addStretch()
+        _es_layout.addWidget(self.builtin_api_row)
 
         # API 地址行 — 包在 QWidget 中便于整行隐藏
         self.url_row = QWidget()
@@ -631,6 +675,9 @@ class MainWindow(QWidget):
                 if idx >= 0:
                     self.node_combo.setCurrentIndex(idx)
                 self.node_combo.blockSignals(False)
+                self._update_api_status_label()
+                self._update_api_expiry_label()
+                self.btn_refresh_expiry.setEnabled(bool(self.config.get("builtin_api_key", "").strip()))
             else:
                 # 所有其它引擎统一用前缀处理
                 self.url_input.setText(self.config.get(f"{engine}_url", ""))
@@ -697,6 +744,10 @@ class MainWindow(QWidget):
         save_config(self.config)
         # 重建翻译器
         self.translator = create_translator(engine, self.config)
+        if engine == "builtin":
+            self._update_api_status_label()
+            self._update_api_expiry_label()
+            self.btn_refresh_expiry.setEnabled(bool(key))
         print(f"[Main] API Key updated (saved)")
 
     def _on_request_trial_key(self):
@@ -709,20 +760,25 @@ class MainWindow(QWidget):
         def _request():
             # 从配置中读取获取试用 Key 的 API 地址，若无则使用默认值
             trial_url = self.config.get("trial_key_url", "https://frp-bar.com:58385/get_trial_key")
-            key = register_trial_key(get_hwid(), trial_url)
-            self._trial_key_signal.emit(key or "")
+            result = register_trial_key(get_hwid(), trial_url)
+            self._trial_key_signal.emit(result or {})
 
         threading.Thread(target=_request, daemon=True).start()
 
-    def _on_trial_key_result(self, key):
+    def _on_trial_key_result(self, result):
         """处理试用 Key 申请结果（主线程回调）"""
         self._trial_key_signal.disconnect(self._on_trial_key_result)
         self.btn_trial_key.setEnabled(True)
         self.btn_trial_key.setText("🔑 获取试用API")
 
+        result = result or {}
+        key = str(result.get("key", "") or "").strip()
+        expiry_text = str(result.get("expires", "") or "").strip()
+
         if key:
             # 同步写入 config 并保存
             self.config["builtin_api_key"] = key
+            self.config["builtin_api_expiry"] = expiry_text
             save_config(self.config)
             # 同步更新 UI 文本框
             self.key_input.setText(key)
@@ -730,11 +786,15 @@ class MainWindow(QWidget):
             engine = self.config.get("translation_engine", "builtin")
             self.translator = create_translator(engine, self.config)
             self.status_label.setText("✅ 试用 Key 已获取并填入")
+            self._update_api_expiry_label()
+            self.btn_refresh_expiry.setEnabled(True)
             print(f"[Main] Trial Key obtained and auto-filled")
         else:
             self.status_label.setText("❌ 获取试用 Key 失败，请检查网络")
         # 更新 API 状态标识
         self._update_api_status_label()
+        if not key:
+            self._update_api_expiry_label()
 
     def _update_api_status_label(self):
         """更新内置通道的 API 状态指示器"""
@@ -746,6 +806,65 @@ class MainWindow(QWidget):
             self.api_status_label.setText("❌ 未获取API")
             self.api_status_label.setStyleSheet("font-size: 18px; padding-left: 8px; color: #ff5252;")
 
+    def _update_api_expiry_label(self, text: str | None = None, loading: bool = False):
+        """更新内置通道 API 到期时间显示"""
+        if loading:
+            display_text = "刷新中..."
+            color = "#4a9eff"
+        else:
+            cached = self.config.get("builtin_api_expiry", "").strip()
+            display_text = (text if text is not None else cached).strip()
+            if not display_text:
+                display_text = "未获取"
+                color = "#888"
+            elif display_text in ("获取失败", "待接入"):
+                color = "#ffb74d"
+            else:
+                color = "#ddd"
+        self.api_expiry_label.setText(f"API到期时间：{display_text}")
+        self.api_expiry_label.setStyleSheet(f"font-size: 18px; color: {color}; padding-left: 12px;")
+
+    def _set_expiry_refresh_loading(self, loading: bool):
+        self.btn_refresh_expiry.setEnabled(not loading)
+        self.btn_refresh_expiry.setText("⟳")
+
+    def _on_refresh_trial_expiry_clicked(self):
+        self._refresh_trial_expiry()
+
+    def _refresh_trial_expiry(self):
+        """刷新内置通道 API 到期时间"""
+        if not self.config.get("builtin_api_key", "").strip():
+            self._update_api_expiry_label()
+            return
+
+        self._set_expiry_refresh_loading(True)
+        self._update_api_expiry_label(loading=True)
+
+        def _request():
+            expiry_text = self._request_trial_expiry_text()
+            self._trial_expiry_signal.emit(expiry_text)
+
+        threading.Thread(target=_request, daemon=True).start()
+
+    def _request_trial_expiry_text(self):
+        """查询真实 API 到期时间"""
+        trial_url = self.config.get("trial_key_url", "https://frp-bar.com:58385/get_trial_key")
+        api_key = self.config.get("builtin_api_key", "").strip()
+        if not api_key:
+            return ""
+        return fetch_trial_key_expiry(get_hwid(), api_key, trial_url)
+
+    def _on_trial_expiry_result(self, expiry_text):
+        self._set_expiry_refresh_loading(False)
+        expiry_text = str(expiry_text or "").strip()
+        if expiry_text:
+            self.config["builtin_api_expiry"] = expiry_text
+            save_config(self.config)
+            self._update_api_expiry_label(expiry_text)
+            print(f"[Main] Trial API expiry refreshed: {expiry_text}")
+        else:
+            self._update_api_expiry_label("获取失败")
+
     def _update_url_visibility(self):
         """控制 API 地址、API 密钥、线路选择框的可见性"""
         engine = self.config.get("translation_engine", "builtin")
@@ -753,6 +872,7 @@ class MainWindow(QWidget):
         
         # Node 行: 仅内置通道显示
         self.node_row.setVisible(is_builtin)
+        self.builtin_api_row.setVisible(is_builtin)
         
         # URL 行: 内置通道隐藏（用线路选择代替），其余引擎显示
         self.url_row.setVisible(not is_builtin)
@@ -767,6 +887,8 @@ class MainWindow(QWidget):
         # 更新内置通道的 API 状态指示
         if is_builtin:
             self._update_api_status_label()
+            self._update_api_expiry_label()
+            self.btn_refresh_expiry.setEnabled(bool(self.config.get("builtin_api_key", "").strip()))
 
     def _on_node_changed(self):
         """修改内置通道节点下拉框时，自动填入API地址并保存配置"""
@@ -1004,6 +1126,8 @@ class MainWindow(QWidget):
             self.url_input.setPlaceholderText("如 http://localhost:8000")
             self.key_input.setText(self.config.get("builtin_api_key", ""))
             self.key_input.setPlaceholderText("可选，认证密钥")
+            self._update_api_status_label()
+            self._update_api_expiry_label()
         else:
             # 对于其他受支持的引擎 (openai, deepseek, anthropic, zhipu 等)，使用统一的前缀处理
             self.url_input.setText(self.config.get(f"{engine}_url", ""))
