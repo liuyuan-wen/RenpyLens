@@ -57,12 +57,14 @@ class MainWindow(QWidget):
     _trial_key_signal = pyqtSignal(object)   # 试用 Key 申请结果信号
     _trial_expiry_signal = pyqtSignal(object)  # API 到期时间刷新结果
     _key_expired_signal = pyqtSignal()     # Key 过期信号
+    _status_signal = pyqtSignal(str)       # 状态栏更新信号 (用于非 UI 线程更新)
+    SUPPORT_QQ_GROUP = "1058127921"
 
     def __init__(self):
         super().__init__()
         self.config = load_config()
 
-        version = self.config.get("version", "v1.1.1")
+        version = self.config.get("version", "v1.1.4")
         self.setWindowTitle(f"RenpyLens {version} - Ren'Py 实时翻译")
         self.resize(800, 10)
         self.setAcceptDrops(True)
@@ -79,6 +81,7 @@ class MainWindow(QWidget):
         self._current_game_exe = None
         self._game_process = None
         self._hook_installed = False
+        self._translator_lock = threading.RLock() # 保护翻译器实例的切换与访问
 
         # 2. UI 组件初始化
         self._setup_ui()
@@ -90,6 +93,7 @@ class MainWindow(QWidget):
         self.translation_ready.connect(self._on_translation_ready)
         self._trial_expiry_signal.connect(self._on_trial_expiry_result)
         self._key_expired_signal.connect(self._on_key_expired)
+        self._status_signal.connect(self.status_label.setText)
         self._key_expired_shown = False  # 防止重复弹窗
 
         # 游戏进程监控定时器
@@ -580,6 +584,30 @@ class MainWindow(QWidget):
 
         # 日志面板
         log_toggle_layout = QHBoxLayout()
+        log_toggle_layout.setContentsMargins(0, 0, 0, 0)
+        log_toggle_layout.setSpacing(8)
+        self.btn_overlay_toggle = QPushButton("🪟 显示浮窗")
+        self.btn_overlay_toggle.setStyleSheet("""
+            QPushButton {
+                background-color: transparent; color: #888;
+                border: 1px solid #444; border-radius: 4px;
+                padding: 6px 16px; font-size: 18px; font-weight: normal;
+            }
+            QPushButton:hover { color: #ccc; border-color: #666; }
+        """)
+        self.btn_overlay_toggle.clicked.connect(self._toggle_overlay_visibility)
+        
+        # 使用容器包装左侧按钮，容器宽度设为 200 以对齐右侧，但按钮本身保持 140 宽度
+        left_container = QWidget()
+        left_container.setFixedWidth(200)
+        left_layout = QHBoxLayout(left_container)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        self.btn_overlay_toggle.setFixedWidth(140)
+        left_layout.addWidget(self.btn_overlay_toggle)
+        left_layout.addStretch() # 确保按钮靠左
+        
+        log_toggle_layout.addWidget(left_container)
+        log_toggle_layout.addStretch()
         self.btn_log_toggle = QPushButton("📋 日志 ▲")
         self.btn_log_toggle.setStyleSheet("""
             QPushButton {
@@ -590,9 +618,16 @@ class MainWindow(QWidget):
             QPushButton:hover { color: #ccc; border-color: #666; }
         """)
         self.btn_log_toggle.clicked.connect(self._toggle_log)
-        log_toggle_layout.addStretch()
         log_toggle_layout.addWidget(self.btn_log_toggle)
         log_toggle_layout.addStretch()
+        
+        # 右侧添加 QLabel 显示群号，并保持与左侧按钮等宽，确保中间按钮处于窗口绝对中心
+        self.qq_group_label = QLabel("QQ群: 1058127921")
+        self.qq_group_label.setFixedWidth(200)
+        self.qq_group_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.qq_group_label.setStyleSheet("color: #666; font-size: 20px; margin-right: 5px;")
+        log_toggle_layout.addWidget(self.qq_group_label)
+        
         layout.addLayout(log_toggle_layout)
 
         self.log_text = QTextEdit()
@@ -790,7 +825,12 @@ class MainWindow(QWidget):
             self.btn_refresh_expiry.setEnabled(True)
             print(f"[Main] Trial Key obtained and auto-filled")
         else:
-            self.status_label.setText("❌ 获取试用 Key 失败，请检查网络")
+            self.status_label.setText(f"❌ 获取试用 Key 失败，请检查网络。{self._support_tip()}")
+            QMessageBox.warning(
+                self,
+                "获取试用 Key 失败",
+                f"请检查网络后重试。\n\n{self._support_tip()}",
+            )
         # 更新 API 状态标识
         self._update_api_status_label()
         if not key:
@@ -864,6 +904,7 @@ class MainWindow(QWidget):
             print(f"[Main] Trial API expiry refreshed: {expiry_text}")
         else:
             self._update_api_expiry_label("获取失败")
+            self.status_label.setText(f"❌ API 到期时间获取失败。{self._support_tip()}")
 
     def _update_url_visibility(self):
         """控制 API 地址、API 密钥、线路选择框的可见性"""
@@ -917,6 +958,19 @@ class MainWindow(QWidget):
             self.resize(self.width(), target_h)
             self.btn_log_toggle.setText("📋 日志 ▼")
 
+    def _update_overlay_toggle_button(self, *_):
+        visible = hasattr(self, "overlay") and self.overlay and self.overlay.isVisible()
+        self.btn_overlay_toggle.setText("🪟 隐藏浮窗" if visible else "🪟 显示浮窗")
+
+    def _toggle_overlay_visibility(self):
+        if not hasattr(self, "overlay") or not self.overlay:
+            return
+        if self.overlay.isVisible():
+            self.overlay.hide()
+        else:
+            self.overlay.reset_to_default_position()
+            self.overlay.show()
+
     def _append_log(self, text: str):
         """向日志面板追加文本"""
         cursor = self.log_text.textCursor()
@@ -930,6 +984,9 @@ class MainWindow(QWidget):
             cursor = QTextCursor(doc.begin())
             cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, doc.blockCount() - 400)
             cursor.removeSelectedText()
+
+    def _support_tip(self) -> str:
+        return f"如需协助，请加入官方交流QQ群：{self.SUPPORT_QQ_GROUP}"
 
     def _setup_log_redirect(self):
         """将 stdout/stderr 重定向到日志面板"""
@@ -954,6 +1011,8 @@ class MainWindow(QWidget):
         # 翻译弹窗
         self.overlay = TranslationOverlay(self.config)
         self.overlay.config_updated.connect(self._on_overlay_config_changed)
+        self.overlay.visibility_changed.connect(self._update_overlay_toggle_button)
+        self._update_overlay_toggle_button()
         
         # 保存最后一句显示的原文和翻译
         self._last_displayed_data = {
@@ -1008,8 +1067,9 @@ class MainWindow(QWidget):
         if not is_renpy_game(exe_path):
             QMessageBox.warning(self, "不是 Ren'Py 游戏",
                                 f"未检测到 Ren'Py 游戏结构：\n{exe_path}\n\n"
-                                "请确认该 .exe 是一个 Ren'Py 游戏。")
-            self.status_label.setText("检测失败 - 不是 Ren'Py 游戏")
+                                "请确认该 .exe 是一个 Ren'Py 游戏。\n\n"
+                                f"{self._support_tip()}")
+            self.status_label.setText(f"检测失败 - 不是 Ren'Py 游戏。{self._support_tip()}")
             return
 
         self._current_game_exe = exe_path
@@ -1040,8 +1100,8 @@ class MainWindow(QWidget):
 
         ok, msg = inject_hook(exe_path, HOOK_SCRIPT)
         if not ok:
-            QMessageBox.critical(self, "注入失败", msg)
-            self.status_label.setText(f"注入失败: {msg}")
+            QMessageBox.critical(self, "注入失败", f"{msg}\n\n{self._support_tip()}")
+            self.status_label.setText(f"注入失败: {msg}。{self._support_tip()}")
             return
 
         name = os.path.basename(exe_path)
@@ -1062,22 +1122,39 @@ class MainWindow(QWidget):
             self._on_install_hook()
             if not self._hook_installed:
                 return  # 装载失败，中止
+        
+        # 启动游戏时，禁用引擎切换，防止竞态冲突
+        self.engine_combo.setEnabled(False)
+        self.model_combo.setEnabled(False)
+        self.btn_refresh_expiry.setEnabled(False)
+        
         exe_path = self._current_game_exe
         self.status_label.setText("正在启动游戏...")
 
         self._game_process = launch_game(exe_path)
         if self._game_process:
-            if hasattr(self.translator, 'warmup'):
+            has_warmup = False
+            with self._translator_lock:
+                if self.translator and hasattr(self.translator, 'warmup'):
+                    has_warmup = True
+            
+            if has_warmup:
                 self.status_label.setText("🎮 游戏已启动 - 正在预加载翻译模型...")
                 threading.Thread(target=self._warmup_model, daemon=True).start()
             else:
                 self.status_label.setText("🎮 游戏已启动 - 等待游戏内对话...")
             self.overlay.show()
+            self._update_overlay_toggle_button()
             self.showMinimized()
             self.game_timer.start(1000)
             self.btn_start_game.setEnabled(False)
         else:
-            self.status_label.setText("⚠️ 游戏启动失败，请手动启动游戏 EXE")
+            self.status_label.setText(f"⚠️ 游戏启动失败，请手动启动游戏 EXE。{self._support_tip()}")
+            QMessageBox.warning(
+                self,
+                "游戏启动失败",
+                f"请手动启动游戏 EXE。\n\n{self._support_tip()}",
+            )
             self.overlay.show()
 
     def _check_game_status(self):
@@ -1093,8 +1170,15 @@ class MainWindow(QWidget):
                 self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}<br><span style="color:#4a9eff;">Hook 已装载</span>')
                 self.btn_start_game.setEnabled(True)
             self._game_process = None
+            # 游戏结束，恢复引擎切换
+            self.engine_combo.setEnabled(True)
+            self.model_combo.setEnabled(True)
+            self._update_url_visibility() # 恢复按钮状态
+            
             # 关闭翻译器连接池，释放 TCP 连接（下次注入时 warmup 会重建）
-            self.translator.close()
+            with self._translator_lock:
+                if self.translator:
+                    self.translator.close()
             # 同步清除缓存按钮状态
             self.btn_clear_cache.setEnabled(not self.cache.is_empty())
             # 重置 Key 过期弹窗标志（下次游戏可再弹）
@@ -1105,7 +1189,9 @@ class MainWindow(QWidget):
     def _warmup_model(self):
         """后台预加载 Ollama 模型"""
         try:
-            self.translator.warmup()
+            with self._translator_lock:
+                if self.translator:
+                    self.translator.warmup()
             self.translation_ready.emit("✅ 模型已就绪")
         except Exception as e:
             print(f"[Warmup] Failed: {e}")
@@ -1146,24 +1232,27 @@ class MainWindow(QWidget):
         self.status_label.setText(f"⏳ 正在切换 {engine_name}...")
 
         def _switch_thread():
-            if old_translator:
-                old_translator.close()
+            # 获取当前快照，防止切换期间 index 变化
+            with self._translator_lock:
+                if old_translator:
+                    old_translator.close()
+                
+                # 创建新翻译器 (现在是延迟初始化的，其实很快，但在线程里更稳)
+                new_translator = create_translator(engine, self.config)
+                
+                # 清理缓存 (磁盘 IO)
+                self.cache.clear()
+                
+                # 保存配置 (磁盘 IO)
+                save_config(self.config)
+                
+                # 更新实例
+                self.translator = new_translator
             
-            # 创建新翻译器 (现在是延迟初始化的，其实很快，但在线程里更稳)
-            new_translator = create_translator(engine, self.config)
-            
-            # 清理缓存 (磁盘 IO)
-            self.cache.clear()
-            
-            # 保存配置 (磁盘 IO)
-            save_config(self.config)
-            
-            # 更新实例
-            self.translator = new_translator
             print(f"[Main] Async engine switch complete: {engine}, model: {model_name}")
+            self._status_signal.emit(f"✅ {engine_name} / {model_name}")
 
         threading.Thread(target=_switch_thread, daemon=True).start()
-        self.status_label.setText(f"✅ {engine_name} / {model_name}")
 
     def _update_model_combo(self):
         """根据当前引擎更新模型下拉框"""
@@ -1265,8 +1354,9 @@ class MainWindow(QWidget):
                 self._hook_installed = False
                 self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{os.path.basename(self._current_game_exe)}')
                 self.overlay.hide()
+                self._update_overlay_toggle_button()
             else:
-                QMessageBox.warning(self, "卸载失败", msg)
+                QMessageBox.warning(self, "卸载失败", f"{msg}\n\n{self._support_tip()}")
 
     @property
     def game_title(self) -> str:
@@ -1425,11 +1515,18 @@ class MainWindow(QWidget):
                 if self._text_generation != gen:
                     print(f"[Batch] ⏭ User turned page (gen={gen}→{self._text_generation}), abandoning wait")
                     return
+                
+                # 同时检查缓存是否就绪，以及原来的翻译线程是否还在运行 (inflight)
                 ready = True
-                for text in required_texts:
-                    if self.cache.get(text) is None:
-                        ready = False
-                        break
+                still_inflight = False
+                with self._inflight_lock:
+                    for text in required_texts:
+                        if self.cache.get(text) is None:
+                            ready = False
+                            if text in self._inflight_texts:
+                                still_inflight = True
+                            break
+                
                 if ready:
                     current_result = self.cache.get(what) if what else ""
                     choice_results = [self.cache.get(choice) or "" for choice in visible_choices]
@@ -1439,6 +1536,10 @@ class MainWindow(QWidget):
                     self.translation_ready.emit(display)
                     print("[Batch] Wait successful, cache hit for current/choices")
                     return
+                
+                if not still_inflight:
+                    print("[Batch] Waiting target no longer inflight, proceeding to translate locally")
+                    break
             # 超时仍未就绪 → 继续走翻译流程
 
         t_build_start = _time.perf_counter()
@@ -1478,7 +1579,18 @@ class MainWindow(QWidget):
                 if self._text_generation != gen:
                     print(f"[Batch] ⏭ User turned page while waiting (gen={gen}→{self._text_generation})")
                     return
-                if all(self.cache.get(t) is not None for t in required_texts):
+                
+                ready = True
+                still_inflight = False
+                with self._inflight_lock:
+                    for t in required_texts:
+                        if self.cache.get(t) is None:
+                            ready = False
+                            if t in self._inflight_texts:
+                                still_inflight = True
+                            break
+                
+                if ready:
                     current_result = self.cache.get(what) if what else ""
                     choice_results = [self.cache.get(choice) or "" for choice in visible_choices]
                     display = self._format_display(
@@ -1486,6 +1598,10 @@ class MainWindow(QWidget):
                     )
                     self.translation_ready.emit(display)
                     return
+                
+                if not still_inflight:
+                    print("[Batch] Required items no longer inflight elsewhere, giving up waiting")
+                    break
             return
 
         if not batch_texts:
@@ -1506,12 +1622,15 @@ class MainWindow(QWidget):
 
         try:
             t_api_start = _time.perf_counter()
-            results = self.translator.translate_batch(
-                batch_texts,
-                source_lang=self.config["source_lang"],
-                target_lang=self.config["target_lang"],
-                game_title=self.game_title,
-            )
+            with self._translator_lock:
+                if not self.translator:
+                    return
+                results = self.translator.translate_batch(
+                    batch_texts,
+                    source_lang=self.config["source_lang"],
+                    target_lang=self.config["target_lang"],
+                    game_title=self.game_title,
+                )
             t_api_end = _time.perf_counter()
             result_map = {text: translation for text, translation in zip(batch_texts, results)}
 
@@ -1568,7 +1687,10 @@ class MainWindow(QWidget):
                 parse_ms = (t_parse_end - t_parse_start) * 1000
                 total_ms = (t_pipeline_end - t_pipeline_start) * 1000
                 # 从 translator 获取更细粒度的 API 计时
-                api_timing = getattr(self.translator, 'last_timing', {})
+                api_timing = {}
+                with self._translator_lock:
+                    if self.translator:
+                        api_timing = getattr(self.translator, 'last_timing', {})
                 api_detail = ""
                 if api_timing:
                     pt = api_timing.get('prompt_tokens', 0)
@@ -1609,6 +1731,7 @@ class MainWindow(QWidget):
                     choice_translations=choice_results,
                 )
                 self.translation_ready.emit(display)
+            self._status_signal.emit(f"❌ 翻译失败，请检查网络或配置。{self._support_tip()}")
         finally:
             with self._inflight_lock:
                 for t in batch_texts:
@@ -1728,6 +1851,7 @@ class MainWindow(QWidget):
             self._key_expired_signal.emit()
         except Exception as e:
             print(f"[Prefetch] Batch translation failed: {e}")
+            self._status_signal.emit(f"❌ 预取翻译失败，请检查网络或配置。{self._support_tip()}")
         finally:
             self._prefetch_running = False
             with self._inflight_lock:
@@ -1741,6 +1865,11 @@ class MainWindow(QWidget):
 
     def _on_translation_ready(self, display_text: str):
         self.overlay.set_text(display_text)
+        # 如果是状态信息（带勾选信号），或者主窗口还在显示“预加载”状态，则同步更新状态栏
+        if display_text.startswith("✅"):
+            self.status_label.setText(display_text)
+        elif "预加载" in self.status_label.text():
+            self.status_label.setText("✅ 正在游玩 - 等待对话...")
 
     def _on_key_expired(self):
         """试用 Key 过期弹窗（仅弹一次）"""
@@ -1751,8 +1880,7 @@ class MainWindow(QWidget):
             self,
             "RenpyLens",
             "您的内置通道试用 API Key 已到期。\n\n"
-            "如需继续使用内置通道，请联系微信：renpytrans\n"
-            "获取更多授权。"
+            f"{self._support_tip()}"
         )
 
     def _format_display(
@@ -1789,27 +1917,46 @@ class MainWindow(QWidget):
                 '',
                 text,
                 flags=re.IGNORECASE,
-            )
-            text = re.sub(r'^\s*\d+[.)\-:、]\s*', '', text)
+            ).strip()
+            # 增强型清理：支持各种括号编号 [1] (1) 【1】 1. 等
+            text = re.sub(r'^\s*[\[(（【]?\d+[\])）】]?\s*[.)\-:、\s]\s*', '', text)
             text = re.sub(r'^\s*[\-\*]\s+', '', text)
             return text.strip()
 
+        # 记录处理逻辑：
+        # 1. 检测第一个对话项或选项项是否为菜单说明（Caption）
+        # 很多游戏会将说明文字作为 choices[0] 发送，或放在 original (what) 中
+        first_is_caption = False
+        if choices and original and choices[0].strip() == original.strip():
+            first_is_caption = True
+
         lines = []
-        for idx, _choice in enumerate(choices):
-            trans = choice_translations[idx] if idx < len(choice_translations) else ""
+
+        # 2. 提取说明文本 (Caption) 并显示
+        if first_is_caption:
+            # 如果 choices[0] 就是说明，则直接显示翻译后的它，且不带编号
+            trans = choice_translations[0] if choice_translations else ""
+            clean_c = _clean_line(trans)
+            if clean_c:
+                lines.append(clean_c)
+        else:
+            # 否则，如果 original (what) 有翻译结果，将其作为说明/对话显示
+            d_line = _clean_line(translation)
+            if d_line:
+                if italic:
+                    d_line = f"<i>{d_line}</i>"
+                if who and self.config.get("show_character_name", True):
+                    d_line = f"【{who}】{d_line}"
+                lines.append(d_line)
+
+        # 3. 处理后续（真正的）选择项，从 [1] 开始编号
+        choice_start_idx = 1 if first_is_caption else 0
+        for i in range(choice_start_idx, len(choices)):
+            trans = choice_translations[i] if i < len(choice_translations) else ""
             clean_trans = _clean_line(trans)
             if clean_trans:
-                lines.append(f"[{idx + 1}] {clean_trans}")
-
-        dialogue_line = _clean_line(translation)
-        # 菜单出现时，默认仅显示选项，避免把上一句对白残留在底部。
-        show_dialogue_line = bool(dialogue_line) and not choices
-        if show_dialogue_line:
-            if italic:
-                dialogue_line = f"<i>{dialogue_line}</i>"
-            if who and self.config.get("show_character_name", True):
-                dialogue_line = f"【{who}】{dialogue_line}"
-            lines.append(dialogue_line)
+                idx_num = i + 1 - choice_start_idx
+                lines.append(f"[{idx_num}] {clean_trans}")
 
         return "\n".join(lines)
 

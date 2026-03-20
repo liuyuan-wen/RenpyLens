@@ -252,8 +252,25 @@ init python:
         seen = set()
         if not menu_node or menu_node.__class__.__name__ != 'Menu' or not hasattr(menu_node, 'items'):
             return choices
+        def _menu_item_is_visible(item):
+            if not item or len(item) < 2:
+                return True
+            condition = item[1]
+            if condition in (None, True):
+                return True
+            if condition is False:
+                return False
+            try:
+                if isinstance(condition, str):
+                    if hasattr(renpy, "python") and hasattr(renpy.python, "py_eval"):
+                        return bool(renpy.python.py_eval(condition))
+                return bool(condition)
+            except Exception:
+                return True
         for item in (menu_node.items or []):
             if not item or len(item) < 1:
+                continue
+            if not _menu_item_is_visible(item):
                 continue
             clean_choice = _translator_clean_text(renpy, item[0])
             if clean_choice and clean_choice not in seen:
@@ -364,15 +381,8 @@ init python:
             seen_choices = set()
 
             def _collect_menu_choices(menu_node):
-                if not menu_node or menu_node.__class__.__name__ != 'Menu' or not hasattr(menu_node, 'items'):
-                    return
-                items = menu_node.items or []
-                for item in items:
-                    if not item or len(item) < 1:
-                        continue
-                    raw_choice = item[0]
-                    clean_choice = _clean_game_text(raw_choice)
-                    if clean_choice and clean_choice not in seen_choices:
+                for clean_choice in _translator_extract_menu_choices(renpy, menu_node):
+                    if clean_choice not in seen_choices:
                         choices.append(clean_choice)
                         seen_choices.add(clean_choice)
 

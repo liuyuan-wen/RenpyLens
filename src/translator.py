@@ -129,6 +129,20 @@ class BaseTranslator:
                 print(f"[Translator] Connection pool closed")
 
 
+def _normalize_openai_chat_url(base_url: str, prefer_v1: bool = True) -> str:
+    """Accept root URLs, `/v1`, or full chat-completions endpoints without double-appending."""
+    base = (base_url or "").strip().rstrip('/')
+    if not base:
+        return ""
+    if base.endswith("/v1/chat/completions") or base.endswith("/chat/completions"):
+        return base
+    if base.endswith("/v1"):
+        return base + "/chat/completions"
+    if prefer_v1:
+        return base + "/v1/chat/completions"
+    return base + "/chat/completions"
+
+
 class GeminiTranslator(BaseTranslator):
     """Gemini API 翻译"""
 
@@ -346,11 +360,7 @@ class BuiltinTranslator(BaseTranslator):
         
         self.api_key = config.get("builtin_api_key", "")
         # 如果 URL 已经以 /v1 结尾，则直接拼 /chat/completions，避免重复
-        base = self.base_url.rstrip('/')
-        if base.endswith('/v1'):
-            self.api_url = base + "/chat/completions"
-        else:
-            self.api_url = base + "/v1/chat/completions"
+        self.api_url = _normalize_openai_chat_url(self.base_url, prefer_v1=True)
         self.max_retries = 3
         # models 端点 URL（用于预热连接）
         self._models_url = self.api_url.replace("/chat/completions", "/models")
@@ -428,7 +438,7 @@ class BuiltinTranslator(BaseTranslator):
                     try:
                         err_data = resp.json().get("error", {})
                         if err_data.get("type") == "expired_key":
-                            raise KeyExpiredError("试用 API Key 已到期，请联系微信 renpytrans 获取正式授权。")
+                            raise KeyExpiredError("试用 API Key 已到期，如需协助请加入官方交流QQ群：1058127921。")
                     except KeyExpiredError:
                         raise
                     except Exception:
@@ -593,6 +603,12 @@ class OpenAICompatibleTranslator(BaseTranslator):
              self.api_url = "https://api.openai.com/v1/chat/completions"
         if "api.deepseek.com" in self.base_url:
              self.api_url = "https://api.deepseek.com/chat/completions"
+        if "api.openai.com" not in self.base_url and "api.deepseek.com" not in self.base_url:
+             prefer_v1 = not any(
+                 host in self.base_url
+                 for host in ("dashscope.aliyuncs.com", "volces.com", "api.deepseek.com")
+             )
+             self.api_url = _normalize_openai_chat_url(self.base_url, prefer_v1=prefer_v1)
 
         self.max_retries = 3
 

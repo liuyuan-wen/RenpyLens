@@ -166,6 +166,7 @@ class OutlinedLabel(QLabel):
 class TranslationOverlay(QWidget):
     # 当悬浮窗尺寸或其他配置发生改变时（内部触发），向外发送包含新配置的信号
     config_updated = pyqtSignal(dict)
+    visibility_changed = pyqtSignal(bool)
     
     def __init__(self, config: dict):
         super().__init__()
@@ -195,8 +196,8 @@ class TranslationOverlay(QWidget):
 
         # 初始位置和大小
         self.setGeometry(
-            config.get("overlay_x", 100),
-            config.get("overlay_y", 100),
+            config.get("overlay_x", 560),
+            config.get("overlay_y", 800),
             config.get("overlay_width", 800),
             80,
         )
@@ -204,6 +205,14 @@ class TranslationOverlay(QWidget):
         # 右键菜单
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.visibility_changed.emit(True)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.visibility_changed.emit(False)
 
     def _enforce_topmost(self):
         """使用 Win32 API 狠狠地把窗口拉到最顶层（仅当开启强力置顶时）"""
@@ -233,6 +242,30 @@ class TranslationOverlay(QWidget):
         self._enforce_topmost()  # 每次更新文本时尝试拉回最顶层
         # 延迟调整高度，等 paintEvent 先执行
         QTimer.singleShot(20, self._adjust_height)
+
+    def reset_to_default_position(self):
+        from config import DEFAULT_CONFIG, save_config
+
+        # 动态计算屏幕正中间偏下的位置
+        primary_screen = QApplication.primaryScreen()
+        if primary_screen:
+            screen = primary_screen.geometry()
+            screen_w = screen.width()
+            screen_h = screen.height()
+            
+            w = self.config.get("overlay_width", 800)
+            # X 居中，Y 处于屏幕 75% 高度处（正中间偏下）
+            x = (screen_w - w) // 2
+            y = int(screen_h * 0.75)
+        else:
+            # 兜底 fallback (1080p 参考)
+            x, y = 560, 800
+        
+        self.move(x, y)
+        self.config["overlay_x"] = x
+        self.config["overlay_y"] = y
+        save_config(self.config)
+        self.config_updated.emit(self.config)
 
     def _adjust_height(self):
         needed = self.label.height() + 12
@@ -371,8 +404,8 @@ class TranslationOverlay(QWidget):
         # 宽度选项
         width_menu = menu.addMenu("文本框宽度")
         # 获取当前屏幕宽度
-        screen = QApplication.desktop().screenGeometry(self)
-        screen_width = screen.width()
+        primary_screen = QApplication.primaryScreen()
+        screen_width = primary_screen.geometry().width() if primary_screen else 1920
         current_w = self.config.get("overlay_width", self.width())
         
         pcts = [30, 40, 50, 60, 80, 100]
@@ -407,7 +440,7 @@ class TranslationOverlay(QWidget):
         menu.addAction(force_topmost_action)
 
         menu.addSeparator()
-        quit_action = menu.addAction("关闭弹窗")
+        quit_action = menu.addAction("关闭浮窗")
         quit_action.triggered.connect(self.hide)
 
         menu.exec_(self.mapToGlobal(pos))
