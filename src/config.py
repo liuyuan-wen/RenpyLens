@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""配置管理"""
+"""Configuration loading and persistence."""
+
+from __future__ import annotations
 
 import json
 import os
 import sys
 
-# 当使用 PyInstaller打包成单文件时，__file__ 指向的是每次解压的临时目录 _MEIPASS
-# 因此需要将配置和缓存保存到用户目录下，保证持久化
 if sys.platform == "win32":
     CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "RenpyLens")
 else:
@@ -14,10 +14,9 @@ else:
 
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
-
 DEFAULT_CONFIG = {
-    "version": "v1.1.4",
-    "translation_engine": "builtin",  # "ollama", "gemini", "zhipu", "builtin"
+    "version": "v1.2.0",
+    "translation_engine": "builtin",
     "gemini_api_key": "",
     "gemini_url": "https://generativelanguage.googleapis.com",
     "gemini_model": "gemini-2.5-flash-lite",
@@ -33,7 +32,7 @@ DEFAULT_CONFIG = {
     "builtin_api_expiry": "",
     "builtin_nodes": [
         {"name": "中国大陆节点", "url": "https://frp-bar.com:50588/"},
-        {"name": "海外/备用节点", "url": "https://flush-communities-maintained-polyester.trycloudflare.com"}
+        {"name": "海外/备用节点", "url": "https://flush-communities-maintained-polyester.trycloudflare.com"},
     ],
     "openai_api_key": "",
     "openai_url": "https://api.openai.com",
@@ -62,10 +61,25 @@ DEFAULT_CONFIG = {
     "custom_api_key": "",
     "custom_url": "http://localhost:8000",
     "custom_model": "custom-model",
-    "system_prompt": "You are a game localization expert specializing in visual novels. You are currently localizing the game \"{game_title}\". LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text.",
-    "batch_prompt": "You are a game localization expert specializing in visual novels. You are currently localizing the game \"{game_title}\". LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text.",
+    "system_prompt": (
+        'You are a game localization expert specializing in visual novels. '
+        'You are currently localizing the game "{game_title}". '
+        "LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. "
+        "Key principles: - Dialogue should sound like real people talking. "
+        "- Narration should flow like polished prose. "
+        "- Dramatic or poetic lines should carry weight and beauty. "
+        "- Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. "
+        "- Output ONLY the localized text."
+    ),
+    "batch_prompt": (
+        'You are a game localization expert specializing in visual novels. '
+        'You are currently localizing the game "{game_title}". '
+        "LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. "
+        "Dialogue should sound natural, narration should flow like polished prose. "
+        "Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text."
+    ),
     "temperature": 0.3,
-    "keep_original_names": True,  # 保留原文人名不翻译
+    "keep_original_names": True,
     "source_lang": "English",
     "target_lang": "简体中文",
     "socket_port": 19876,
@@ -74,18 +88,26 @@ DEFAULT_CONFIG = {
     "overlay_x": 100,
     "overlay_y": 100,
     "overlay_width": 800,
+    "overlay_edit_width": 480,
+    "overlay_edit_height": 150,
+    "overlay_edit_ui_version": 5,
     "prefetch_count": 5,
-    "debounce_ms": 100,  # 防抖延迟(毫秒)，快速翻页时只翻译最后停下的句子
-    "enable_timing_log": True,  # 是否打印翻译各阶段耗时日志
+    "debounce_ms": 100,
+    "bulk_translate_batch_size": 5,
+    "bulk_translate_rpm": 60,
+    "enable_timing_log": True,
     "trial_key_url": "https://frp-bar.com:58385/get_trial_key",
-    "force_topmost": True,  # 强制置顶拉回
-    "show_character_name": False,  # 是否在翻译浮窗显示角色名字
+    "github_repo": "liuyuan-wen/RenpyLens",
+    "force_topmost": True,
+    "show_character_name": False,
+    "workbench_x": 120,
+    "workbench_y": 120,
+    "workbench_width": 960,
+    "workbench_height": 640,
 }
 
-
-
-# 设为 True 则启动时强制使用本文件配置覆盖 config.json（适合手动改代码配置）
 PRIORITY_CONFIG_PY = False
+
 
 def load_config() -> dict:
     os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -93,28 +115,27 @@ def load_config() -> dict:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            
-            # --- 版本升级：提示词迁移 ---
-            # 如果用户的本地配置依然是旧版的默认提示词，则静默升级到新版默认提示词
-            # 如果用户曾经自定义过，则保持用户的自定义内容不变
-            _OLD_SYS_LIST = [
+
+            old_system_prompts = [
                 "You are a professional game dialogue translator. Translate the user's message into {target_lang}. Keep it natural and concise for a visual novel. Output ONLY the translated text. No numbering, no quotes, no explanations.",
-                "You are a game localization expert specializing in visual novels. LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text."
+                "You are a game localization expert specializing in visual novels. LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text.",
             ]
-            _OLD_BAT_LIST = [
+            old_batch_prompts = [
                 "You are a professional game dialogue translator. Translate ALL numbered dialogues into {target_lang}. Keep translations natural and concise. Output ONLY translations in the same numbered format [1]...[2]... No extra text.",
-                "You are a game localization expert specializing in visual novels. LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text."
+                "You are a game localization expert specializing in visual novels. LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text.",
             ]
-            
-            if saved.get("system_prompt") in _OLD_SYS_LIST:
+
+            if saved.get("system_prompt") in old_system_prompts:
                 saved["system_prompt"] = DEFAULT_CONFIG["system_prompt"]
-            if saved.get("batch_prompt") in _OLD_BAT_LIST:
+            if saved.get("batch_prompt") in old_batch_prompts:
                 saved["batch_prompt"] = DEFAULT_CONFIG["batch_prompt"]
+            if saved.get("overlay_edit_ui_version", 0) < DEFAULT_CONFIG["overlay_edit_ui_version"]:
+                saved["overlay_edit_width"] = DEFAULT_CONFIG["overlay_edit_width"]
+                saved["overlay_edit_height"] = DEFAULT_CONFIG["overlay_edit_height"]
+                saved["overlay_edit_ui_version"] = DEFAULT_CONFIG["overlay_edit_ui_version"]
 
             merged = {**DEFAULT_CONFIG, **saved}
-            # 强制覆盖为代码库中的最新版本号，防止旧缓存覆盖导致永远显示旧版本
-            merged["version"] = DEFAULT_CONFIG.get("version", "v1.1.4")
-            # 如果优先使用本文件配置，则用 DEFAULT_CONFIG 覆盖 saved
+            merged["version"] = DEFAULT_CONFIG["version"]
             if PRIORITY_CONFIG_PY:
                 merged.update(DEFAULT_CONFIG)
             return merged

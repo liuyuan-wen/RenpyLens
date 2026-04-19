@@ -423,7 +423,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(20, 12, 20, 20)
 
         # 性能设置
-        perf_group = QGroupBox("性能")
+        perf_group = QGroupBox("实时翻译")
         perf_form = QFormLayout(perf_group)
         perf_form.setSpacing(10)
 
@@ -441,23 +441,55 @@ class SettingsDialog(QDialog):
         self.debounce_spin.setToolTip("快速翻页时等待多久后才发送翻译请求")
         perf_form.addRow("防抖延迟:", self.debounce_spin)
 
+        layout.addWidget(perf_group)
+
+        # 一键翻译全游戏
+        bulk_group = QGroupBox("一键翻译全游戏")
+        bulk_form = QFormLayout(bulk_group)
+        bulk_form.setSpacing(10)
+
+        self.bulk_translate_batch_size_spin = QSpinBox()
+        self.bulk_translate_batch_size_spin.setRange(1, 100)
+        self.bulk_translate_batch_size_spin.setValue(
+            self.config.get("bulk_translate_batch_size", 5)
+        )
+        self.bulk_translate_batch_size_spin.setSuffix(" 条/次")
+        self.bulk_translate_batch_size_spin.setToolTip(
+            "一键翻译时每次打包发送多少条文本。越大速度通常越快，但更容易触发模型格式错误。"
+        )
+        bulk_form.addRow("单次请求条数:", self.bulk_translate_batch_size_spin)
+
+        self.bulk_translate_rpm_spin = QSpinBox()
+        self.bulk_translate_rpm_spin.setRange(1, 600)
+        self.bulk_translate_rpm_spin.setValue(self.config.get("bulk_translate_rpm", 60))
+        self.bulk_translate_rpm_spin.setSuffix(" 次/分钟")
+        self.bulk_translate_rpm_spin.setToolTip("一键翻译全游戏时的最大请求频率")
+        bulk_form.addRow("请求频率上限:", self.bulk_translate_rpm_spin)
+
+        layout.addWidget(bulk_group)
+
+        # 运行与显示
+        runtime_group = QGroupBox("运行与显示")
+        runtime_form = QFormLayout(runtime_group)
+        runtime_form.setSpacing(10)
+
         self.socket_port_spin = QSpinBox()
         self.socket_port_spin.setRange(1024, 65535)
         self.socket_port_spin.setValue(self.config.get("socket_port", 19876))
         self.socket_port_spin.setToolTip("与游戏 Hook 通信的本地端口")
-        perf_form.addRow("通信端口:", self.socket_port_spin)
+        runtime_form.addRow("通信端口:", self.socket_port_spin)
 
         self.show_character_name_check = QCheckBox("显示说话人名称")
         self.show_character_name_check.setChecked(self.config.get("show_character_name", True))
         self.show_character_name_check.setToolTip("如果关闭，浮窗上将只显示翻译后的对话内容，不再带有【名字】前缀。")
-        perf_form.addRow("", self.show_character_name_check)
+        runtime_form.addRow("", self.show_character_name_check)
 
         self.force_topmost_check = QCheckBox("强力置顶 (解决全屏被挡)")
         self.force_topmost_check.setChecked(self.config.get("force_topmost", True))
         self.force_topmost_check.setToolTip("强制将翻译浮窗拉到最顶层")
-        perf_form.addRow("", self.force_topmost_check)
+        runtime_form.addRow("", self.force_topmost_check)
 
-        layout.addWidget(perf_group)
+        layout.addWidget(runtime_group)
         layout.addStretch()
         return tab
 
@@ -467,7 +499,7 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout(tab)
         vbox.setSpacing(16)
         
-        version = self.config.get("version", "v1.1.3")
+        version = self.config.get("version", "v1.2.0")
         
         info_label = QLabel(
             f'<div style="font-size: 20px; font-weight: bold; margin-bottom: 10px;">RenpyLens {version}</div>'
@@ -553,6 +585,8 @@ class SettingsDialog(QDialog):
 
         self.config["prefetch_count"] = self.prefetch_spin.value()
         self.config["debounce_ms"] = self.debounce_spin.value()
+        self.config["bulk_translate_batch_size"] = self.bulk_translate_batch_size_spin.value()
+        self.config["bulk_translate_rpm"] = self.bulk_translate_rpm_spin.value()
         self.config["socket_port"] = self.socket_port_spin.value()
         self.config["force_topmost"] = self.force_topmost_check.isChecked()
         self.config["show_character_name"] = self.show_character_name_check.isChecked()
