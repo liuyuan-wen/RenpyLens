@@ -13,6 +13,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import deque
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QComboBox, QLineEdit, QTextEdit, QFileDialog,
@@ -78,12 +79,14 @@ class MainWindow(QWidget):
     _update_download_signal = pyqtSignal(object)
     _bulk_ui_signal = pyqtSignal(object)
     SUPPORT_QQ_GROUP = "1058127921"
+    TRANSLATION_REPEAT_CHAR_LIMIT = 12
+    TRANSLATION_LENGTH_RATIO_LIMIT = 3.0
 
     def __init__(self):
         super().__init__()
         self.config = load_config()
 
-        version = self.config.get("version", "v1.2.0")
+        version = self.config.get("version", "v1.2.1")
         self.setWindowTitle(f"RenpyLens {version} - Ren'Py 实时翻译")
         self.resize(800, 10)
         self.setAcceptDrops(True)
@@ -108,7 +111,9 @@ class MainWindow(QWidget):
         self._bulk_job_lock = threading.RLock()
         self._bulk_job = self._new_bulk_job_state()
         self._hook_ready_event = threading.Event()
+        self._hook_runtime_ready_event = threading.Event()
         self._hook_session_ready = False
+        self._hook_runtime_ready = False
         self._workbench_refresh_pending_source = ""
 
         # 2. UI 组件初始化
@@ -163,6 +168,12 @@ class MainWindow(QWidget):
     def _reset_hook_session_state(self):
         self._hook_session_ready = False
         self._hook_ready_event.clear()
+        self._hook_runtime_ready = False
+        self._hook_runtime_ready_event.clear()
+
+    def _mark_hook_runtime_ready(self):
+        self._hook_runtime_ready = True
+        self._hook_runtime_ready_event.set()
 
     def _rebuild_translator(self, clear_cache: bool = False):
         engine = self.config.get("translation_engine", "builtin")
@@ -692,12 +703,12 @@ class MainWindow(QWidget):
         self.btn_overlay_toggle.clicked.connect(self._toggle_overlay_visibility)
         log_toggle_layout.addWidget(self.btn_overlay_toggle)
 
-        # 2. 显示工作台
-        self.btn_workbench_toggle = QPushButton("🗂️ 显示工作台")
+        # 2. 译文工作台
+        self.btn_workbench_toggle = QPushButton("🗂️ 译文工作台")
         self.btn_workbench_toggle.setFixedWidth(150)
         self.btn_workbench_toggle.setEnabled(False)
         self.btn_workbench_toggle.setStyleSheet(_footer_btn_style)
-        self.btn_workbench_toggle.clicked.connect(self._toggle_workbench_visibility)
+        self.btn_workbench_toggle.clicked.connect(self._show_workbench)
         log_toggle_layout.addWidget(self.btn_workbench_toggle)
 
         # 3. 日志展开/收起
@@ -900,15 +911,18 @@ class MainWindow(QWidget):
         self._save_manual_translation_entry(payload, refresh_workbench=False)
 
     def _update_workbench_toggle_button(self, *_):
-        visible = hasattr(self, "workbench") and self.workbench and self.workbench.isVisible()
-        self.btn_workbench_toggle.setText("🗂️ 隐藏工作台" if visible else "🗂️ 显示工作台")
+        self.btn_workbench_toggle.setText("🗂️ 译文工作台")
 
     def _show_workbench(self, focus_source: str = ""):
         if not hasattr(self, "workbench") or not self.workbench:
             return
         self._refresh_workbench_entries(selected_source=focus_source)
-        self.workbench.show()
+        if self.workbench.isMinimized():
+            self.workbench.showNormal()
+        else:
+            self.workbench.show()
         self.workbench.raise_()
+        self.workbench.activateWindow()
         if focus_source:
             self.workbench.focus_entry(focus_source)
         self._update_workbench_toggle_button()
@@ -918,14 +932,6 @@ class MainWindow(QWidget):
             if not self.workbench.hide_with_autosave(parent=self.workbench):
                 return
         self._update_workbench_toggle_button()
-
-    def _toggle_workbench_visibility(self):
-        if not hasattr(self, "workbench") or not self.workbench:
-            return
-        if self.workbench.isVisible():
-            self._hide_workbench()
-        else:
-            self._show_workbench()
 
     def _on_settings(self):
         """打开设置对话框"""
@@ -1511,6 +1517,135 @@ class MainWindow(QWidget):
         ).strip()
         return clean_text
 
+    def _find_repeated_char_cutoff(self, text: str) -> tuple[int | None, str]:
+        limit = int(self.TRANSLATION_REPEAT_CHAR_LIMIT)
+        if limit <= 0:
+            return None, ""
+
+        last_char = ""
+        run_length = 0
+        for index, char in enumerate(str(text or "")):
+            if char == last_char:
+                run_length += 1
+            else:
+                last_char = char
+                run_length = 1
+            if run_length > limit:
+                return index, char
+        return None, ""
+
+    def _guard_translation_result(self, source_text: str, raw_translation: str) -> dict:
+        source_clean = self._clean_translation_result(source_text)
+        clean_translation = self._clean_translation_result(raw_translation)
+        original_translation_length = len(clean_translation)
+
+        if clean_translation.startswith("[翻译失败"):
+            return {
+                "source": str(source_text or ""),
+                "source_clean": source_clean,
+                "translation": clean_translation,
+                "truncated": False,
+                "reason": "",
+                "cutoff_index": None,
+                "source_length": len(source_clean),
+                "translation_length": original_translation_length,
+                "repeat_char": "",
+            }
+
+        repeat_cutoff, repeat_char = self._find_repeated_char_cutoff(clean_translation)
+        ratio_cutoff = None
+        source_length = len(source_clean)
+        if source_length > 0:
+            ratio_limit = max(1, int(source_length * self.TRANSLATION_LENGTH_RATIO_LIMIT))
+            if original_translation_length > ratio_limit:
+                ratio_cutoff = ratio_limit
+
+        candidates: list[tuple[str, int]] = []
+        if repeat_cutoff is not None:
+            candidates.append(("repeat_char", repeat_cutoff))
+        if ratio_cutoff is not None:
+            candidates.append(("length_ratio", ratio_cutoff))
+
+        truncated = False
+        cutoff_index = None
+        reason = ""
+        if candidates:
+            truncated = True
+            cutoff_index = min(index for _, index in candidates)
+            reason = "+".join(rule for rule, index in candidates if index == cutoff_index)
+            clean_translation = clean_translation[:cutoff_index].rstrip()
+
+        return {
+            "source": str(source_text or ""),
+            "source_clean": source_clean,
+            "translation": clean_translation,
+            "truncated": truncated,
+            "reason": reason,
+            "cutoff_index": cutoff_index,
+            "source_length": source_length,
+            "translation_length": original_translation_length,
+            "repeat_char": repeat_char,
+        }
+
+    def _guard_batch_translation_results(
+        self,
+        source_texts: list[str],
+        raw_results: list[str],
+        log_prefix: str,
+    ) -> dict:
+        source_texts = [str(text or "") for text in (source_texts or [])]
+        raw_results = list(raw_results or [])
+
+        accepted_results = []
+        result_map: dict[str, str] = {}
+        truncation_index = None
+        deferred_sources: list[str] = []
+
+        for index, source_text in enumerate(source_texts):
+            if index >= len(raw_results):
+                break
+
+            record = self._guard_translation_result(source_text, raw_results[index])
+            accepted_results.append(record)
+            result_map[record["source"]] = record["translation"]
+
+            if record["truncated"]:
+                truncation_index = index
+                deferred_sources = [
+                    text for text in source_texts[index + 1 :] if str(text or "").strip()
+                ]
+                preview = record["source_clean"] or record["source"]
+                print(
+                    f"[{log_prefix}] Truncated item {index + 1}/{len(source_texts)} "
+                    f"({record['reason']}) src='{preview[:30]}' "
+                    f"src_len={record['source_length']} out_len={record['translation_length']} "
+                    f"cut={record['cutoff_index']} deferred={len(deferred_sources)}"
+                )
+                break
+
+        return {
+            "accepted_results": accepted_results,
+            "accepted_count": len(accepted_results),
+            "result_map": result_map,
+            "truncation_index": truncation_index,
+            "deferred_sources": deferred_sources,
+        }
+
+    def _get_cached_or_batch_translation(
+        self,
+        text: str,
+        batch_result_map: dict[str, str] | None,
+        default: str = "",
+    ) -> str:
+        if not text:
+            return default
+        cached = self.cache.get(text)
+        if cached is not None:
+            return cached
+        if batch_result_map and text in batch_result_map:
+            return batch_result_map[text]
+        return default
+
     def _send_hook_control_command(self, command: str, payload: dict | None = None) -> tuple[bool, str | None]:
         message = {"command": command}
         if payload:
@@ -1698,15 +1833,15 @@ class MainWindow(QWidget):
             warning_layout.setContentsMargins(14, 12, 14, 12)
             warning_layout.setSpacing(6)
 
-            warning_title = QLabel("⚠ 内置通道提醒")
-            warning_title.setStyleSheet("font-size: 17px; font-weight: bold; color: #ffd27a;")
             warning_text = QLabel(
+                '<div style="font-size: 17px; line-height: 1.45;">'
+                '<span style="font-weight: bold; color: #ffd27a;">⚠ 内置通道提醒</span><br>'
+                '<span style="color: #f0c987;">'
                 "如果使用的是内置通道，请先联系 QQ 群群主获取打开 TPM/RPM 上限的 API Key，"
                 "否则全量翻译过程中可能触发限额并报错。"
+                "</span></div>"
             )
             warning_text.setWordWrap(True)
-            warning_text.setStyleSheet("font-size: 17px; color: #f0c987;")
-            warning_layout.addWidget(warning_title)
             warning_layout.addWidget(warning_text)
             layout.addWidget(warning)
 
@@ -1816,6 +1951,31 @@ class MainWindow(QWidget):
                 )
                 return
 
+        if not self._hook_runtime_ready:
+            with self._bulk_job_lock:
+                if self._bulk_job.get("job_id") != job_id:
+                    return
+                self._bulk_job["stage_message"] = "0% · 正在等待游戏进入主菜单或第一段对白..."
+            self._bulk_ui_signal.emit({"action": "sync"})
+
+            deadline = time.time() + 45.0
+            while time.time() < deadline:
+                with self._bulk_job_lock:
+                    if self._bulk_job.get("job_id") != job_id:
+                        return
+                    if self._bulk_job.get("cancel_requested"):
+                        self._finish_bulk_job(job_id, "cancelled", "⚠️ 已取消全游戏翻译。")
+                        return
+                if self._hook_runtime_ready_event.wait(0.2):
+                    break
+            else:
+                self._finish_bulk_job(
+                    job_id,
+                    "failed",
+                    "❌ 等待游戏进入可扫描状态超时。请等游戏进入主菜单或第一段对白后再试。",
+                )
+                return
+
         with self._bulk_job_lock:
             if self._bulk_job.get("job_id") != job_id:
                 return
@@ -1845,6 +2005,16 @@ class MainWindow(QWidget):
             self._hook_ready_event.set()
             print(f"[Hook] Hook ready on control port {message.get('control_port', '')}")
             return
+
+        if msg_type in {"runtime_ready", "current"}:
+            if not self._hook_session_ready:
+                self._hook_session_ready = True
+                self._hook_ready_event.set()
+            if not self._hook_runtime_ready:
+                self._mark_hook_runtime_ready()
+                print("[Hook] Runtime ready for bulk scan")
+            if msg_type == "runtime_ready":
+                return
 
         job_id = str((message or {}).get("job_id") or "").strip()
         with self._bulk_job_lock:
@@ -1963,11 +2133,11 @@ class MainWindow(QWidget):
             with self._bulk_job_lock:
                 if self._bulk_job.get("job_id") != job_id:
                     return
-                pending_entries = list(self._bulk_job.get("pending_entries", []))
+                pending_entries = deque(self._bulk_job.get("pending_entries", []))
                 total_texts = int(self._bulk_job.get("total_texts") or 0)
 
             batch_size = max(1, int(self.config.get("bulk_translate_batch_size", 5)))
-            for start in range(0, len(pending_entries), batch_size):
+            while pending_entries:
                 with self._bulk_job_lock:
                     if self._bulk_job.get("job_id") != job_id:
                         return
@@ -1978,7 +2148,9 @@ class MainWindow(QWidget):
                     self._bulk_job["stage_message"] = "正在批量翻译..."
                 self._bulk_ui_signal.emit({"action": "sync"})
 
-                batch_entries = pending_entries[start : start + batch_size]
+                batch_entries = []
+                while pending_entries and len(batch_entries) < batch_size:
+                    batch_entries.append(pending_entries.popleft())
                 uncovered_entries = [
                     entry for entry in batch_entries if not self._is_source_covered(entry["source"])
                 ]
@@ -1997,9 +2169,16 @@ class MainWindow(QWidget):
                             game_title=self.game_title,
                         )
 
+                    guard_result = self._guard_batch_translation_results(texts, results, "BulkGuard")
                     batch_payload = []
-                    for entry, translation in zip(uncovered_entries, results):
-                        clean_translation = self._clean_translation_result(translation)
+                    accepted_by_source = {
+                        record["source"]: record for record in guard_result["accepted_results"]
+                    }
+                    for entry in uncovered_entries:
+                        record = accepted_by_source.get(entry["source"])
+                        if not record:
+                            continue
+                        clean_translation = record["translation"]
                         if clean_translation and not clean_translation.startswith("[翻译失败"):
                             batch_payload.append(
                                 {
@@ -2011,6 +2190,16 @@ class MainWindow(QWidget):
                             )
                     if batch_payload:
                         self.cache.save_machine_translations_if_absent(batch_payload)
+                    if guard_result["deferred_sources"]:
+                        deferred_lookup = {
+                            entry["source"]: entry for entry in uncovered_entries
+                        }
+                        deferred_entries = [
+                            deferred_lookup[source]
+                            for source in guard_result["deferred_sources"]
+                            if source in deferred_lookup
+                        ]
+                        pending_entries.extendleft(reversed(deferred_entries))
 
                 covered_in_batch = sum(
                     1 for entry in batch_entries if self._is_source_covered(entry["source"])
@@ -2022,6 +2211,7 @@ class MainWindow(QWidget):
                         total_texts,
                         int(self._bulk_job.get("covered_count") or 0) + covered_in_batch,
                     )
+                    self._bulk_job["pending_entries"] = list(pending_entries)
                 self._bulk_ui_signal.emit({"action": "sync"})
                 self._bulk_ui_signal.emit({"action": "refresh_workbench"})
 
@@ -2709,32 +2899,23 @@ class MainWindow(QWidget):
                     game_title=self.game_title,
                 )
             t_api_end = _time.perf_counter()
-            result_map = {text: translation for text, translation in zip(batch_texts, results)}
+            guard_result = self._guard_batch_translation_results(batch_texts, results, "BatchGuard")
+            result_map = dict(guard_result["result_map"])
 
             t_parse_start = _time.perf_counter()
-            for text, translation in zip(batch_texts, results):
-                clean_translation = translation
-                if isinstance(clean_translation, str):
-                    for _ in range(3):
-                        new_t = re.sub(r'\{[^{}]*\}', '', clean_translation)
-                        if new_t == clean_translation:
-                            break
-                        clean_translation = new_t
-                    clean_translation = re.sub(
-                        r'\{/?(?:color|alpha|font|size|b|i|u|s|a|cps|w|p|nw|fast|k|rt|rb|space|vspace)\b[^}\n]*\}?',
-                        '',
-                        clean_translation,
-                        flags=re.IGNORECASE,
-                    ).strip()
+            for record in guard_result["accepted_results"]:
+                text = record["source"]
+                clean_translation = record["translation"]
                 if not clean_translation.startswith("[翻译失败"):
                     entry_type = ENTRY_TYPE_CHOICE if text in visible_choices else ENTRY_TYPE_DIALOGUE
                     speaker_for_text = who if text == what else prefetch_speaker_map.get(text, "")
-                    self.cache.save_machine_translation_if_absent(
-                        text,
-                        clean_translation,
-                        entry_type=entry_type,
-                        speaker=speaker_for_text,
-                    )
+                    if clean_translation:
+                        self.cache.save_machine_translation_if_absent(
+                            text,
+                            clean_translation,
+                            entry_type=entry_type,
+                            speaker=speaker_for_text,
+                        )
                     print(f"[Batch] ✅ {text[:30]} -> {clean_translation[:30]}")
                 else:
                     print(f"[Batch] ❌ {text[:30]} -> {clean_translation[:30]}")
@@ -2744,9 +2925,9 @@ class MainWindow(QWidget):
             if self._text_generation == gen:
                 current_result = ""
                 if what:
-                    current_result = self.cache.get(what) or result_map.get(what, "[翻译失败]")
+                    current_result = self._get_cached_or_batch_translation(what, result_map, "")
                 choice_results = [
-                    self.cache.get(choice) or result_map.get(choice, "[翻译失败]")
+                    self._get_cached_or_batch_translation(choice, result_map, "")
                     for choice in visible_choices
                 ]
                 display = self._format_display(
@@ -2922,29 +3103,20 @@ class MainWindow(QWidget):
                     game_title=self.game_title,
                 )
             t_api_end = _time.perf_counter()
+            guard_result = self._guard_batch_translation_results(texts, results, "PrefetchGuard")
+            prefetch_item_map = {item["what"]: item for item in prefetch_items}
 
-            for item, translation in zip(prefetch_items, results):
-                text = item["what"]
-                clean_translation = translation
-                if isinstance(clean_translation, str):
-                    for _ in range(3):
-                        new_t = re.sub(r'\{[^{}]*\}', '', clean_translation)
-                        if new_t == clean_translation:
-                            break
-                        clean_translation = new_t
-                    clean_translation = re.sub(
-                        r'\{/?(?:color|alpha|font|size|b|i|u|s|a|cps|w|p|nw|fast|k|rt|rb|space|vspace)\b[^}\n]*\}?',
-                        '',
-                        clean_translation,
-                        flags=re.IGNORECASE,
-                    ).strip()
+            for record in guard_result["accepted_results"]:
+                text = record["source"]
+                clean_translation = record["translation"]
                 if not clean_translation.startswith("[翻译失败"):
-                    self.cache.save_machine_translation_if_absent(
-                        text,
-                        clean_translation,
-                        entry_type=ENTRY_TYPE_DIALOGUE,
-                        speaker=item.get("who", ""),
-                    )
+                    if clean_translation:
+                        self.cache.save_machine_translation_if_absent(
+                            text,
+                            clean_translation,
+                            entry_type=ENTRY_TYPE_DIALOGUE,
+                            speaker=prefetch_item_map.get(text, {}).get("who", ""),
+                        )
                     print(f"[Prefetch] ✅ {text[:30]} -> {clean_translation[:30]}")
                 else:
                     print(f"[Prefetch] ❌ {text[:30]} -> {clean_translation[:30]}")

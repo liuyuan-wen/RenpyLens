@@ -947,7 +947,10 @@ class TranslationWorkbench(QWidget):
         if not item:
             return
         self.list_widget.setCurrentItem(item)
-        self.show()
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
         self.raise_()
         self.activateWindow()
 

@@ -711,6 +711,25 @@ class TranslationOverlay(QWidget):
             return
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        if self.editor_container.isVisible():
+            return super().mouseDoubleClickEvent(event)
+        if event.button() != Qt.LeftButton:
+            return super().mouseDoubleClickEvent(event)
+        if event.pos().x() >= self.width() - self.RESIZE_HOTZONE:
+            return super().mouseDoubleClickEvent(event)
+
+        # 双击正文时直接进入当前对白的编辑模式，不影响右侧拖拽调宽热区。
+        target = self._edit_context.get("dialogue")
+        if not target:
+            return super().mouseDoubleClickEvent(event)
+
+        self._drag_pos = None
+        self._is_resizing = False
+        self.setCursor(Qt.OpenHandCursor)
+        self.start_edit(target)
+        event.accept()
+
     def mouseMoveEvent(self, event):
         if self.editor_container.isVisible():
             return super().mouseMoveEvent(event)

@@ -12,6 +12,7 @@ init python:
     _translator_last_current_msg = None
     _translator_scan_running = False
     _translator_scan_cancel_requested = False
+    _translator_runtime_ready_sent = False
     _translator_scan_lock = _tthread.Lock()
 
     def _translator_start_thread(target, args=()):
@@ -40,6 +41,50 @@ init python:
         msg = {"type": message_type}
         msg.update(payload)
         _translator_start_thread(_translator_send, (msg,))
+
+    def _translator_schedule_on_main_thread(callback, *args):
+        try:
+            import renpy
+        except Exception as e:
+            return False, str(e)
+
+        exports_module = None
+        invoke = getattr(renpy, "invoke_in_main_thread", None)
+
+        if invoke is None:
+            try:
+                import renpy.exports as exports_module
+            except Exception:
+                exports_module = None
+
+            if exports_module is not None:
+                invoke = getattr(exports_module, "invoke_in_main_thread", None)
+
+        if invoke is not None:
+            try:
+                invoke(callback, *args)
+                return True, None
+            except Exception as e:
+                return False, str(e)
+
+        try:
+            interface = getattr(getattr(renpy, "display", None), "interface", None)
+            invoke_queue = getattr(interface, "invoke_queue", None)
+            if invoke_queue is None:
+                raise AttributeError("main-thread invoke queue is unavailable")
+            invoke_queue.append((callback, args, {}))
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    def _translator_mark_runtime_ready():
+        global _translator_runtime_ready_sent
+
+        if _translator_runtime_ready_sent:
+            return
+
+        _translator_runtime_ready_sent = True
+        _translator_send_type("runtime_ready")
 
     def _expand_name_vars(text):
         import re
@@ -567,7 +612,13 @@ init python:
             job_id = str(message.get("job_id", "") or "").strip()
 
             if command == "scan_all":
-                _translator_start_thread(_translator_scan_all, (job_id,))
+                ok, err = _translator_schedule_on_main_thread(_translator_scan_all, job_id)
+                if not ok:
+                    _translator_send_type(
+                        "bulk_scan_error",
+                        job_id=job_id,
+                        message=str(err or "Failed to schedule bulk scan on the main thread."),
+                    )
             elif command == "cancel_scan":
                 with _translator_scan_lock:
                     _translator_scan_cancel_requested = True
@@ -604,6 +655,7 @@ init python:
 
         global _translator_last_menu_signature
         try:
+            _translator_mark_runtime_ready()
             cur = _translator_get_current_node(renpy)
             if cur and cur.__class__.__name__ == "Menu":
                 choices = _translator_extract_menu_choices(renpy, cur)
