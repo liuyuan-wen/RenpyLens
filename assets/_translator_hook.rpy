@@ -115,6 +115,61 @@ init python:
                     current = renpy.game.script.lookup(current_name)
         return current
 
+    def _translator_debug_value(value, limit=160):
+        try:
+            text = str(value)
+        except Exception:
+            text = "<unprintable>"
+        text = text.replace("\n", " ").replace("\r", " ")
+        return text[:limit]
+
+    def _translator_node_debug(node):
+        if node is None:
+            return {
+                "type": "",
+                "name": "",
+                "filename": "",
+                "line": "",
+            }
+        return {
+            "type": node.__class__.__name__,
+            "name": _translator_debug_value(getattr(node, "name", "")),
+            "filename": _translator_debug_value(getattr(node, "filename", "")),
+            "line": _translator_debug_value(getattr(node, "linenumber", "")),
+        }
+
+    def _translator_stack_debug(stack):
+        try:
+            depth = len(stack or [])
+        except Exception:
+            return {"depth": -1, "top": "<unavailable>"}
+        top = ""
+        if depth:
+            try:
+                top = _translator_debug_value(stack[-1])
+            except Exception:
+                top = "<unavailable>"
+        return {"depth": depth, "top": top}
+
+    def _translator_context_debug(renpy):
+        result = {
+            "current": "",
+            "return_stack": {"depth": -1, "top": "<unavailable>"},
+            "call_location_stack": {"depth": -1, "top": "<unavailable>"},
+        }
+        try:
+            context = renpy.game.context()
+            result["current"] = _translator_debug_value(getattr(context, "current", ""))
+            result["return_stack"] = _translator_stack_debug(
+                getattr(context, "return_stack", None)
+            )
+            result["call_location_stack"] = _translator_stack_debug(
+                getattr(context, "call_location_stack", None)
+            )
+        except Exception as e:
+            result["error"] = _translator_debug_value(e)
+        return result
+
     def _translator_clean_text(renpy, text):
         import re as _tre
 
@@ -145,9 +200,19 @@ init python:
 
     def _translator_normalize_speaker(value):
         import ast as _tast
+        import re as _tre
 
         if value is None:
             return ""
+
+        # Ren'Py may supply a displayable class as `who` (notably Movie).
+        # Showing its Python repr leaks "<class 'renpy....'>" into the
+        # overlay, so reduce class objects to their human-facing class name.
+        try:
+            if isinstance(value, type):
+                return value.__name__
+        except Exception:
+            pass
 
         if isinstance(value, (list, tuple, set)):
             parts = []
@@ -178,6 +243,13 @@ init python:
                 parsed = None
             if isinstance(parsed, (list, tuple, set)):
                 return _translator_normalize_speaker(parsed)
+
+        class_match = _tre.match(
+            r"^<(?:class|type) ['\"](?:[^'\"]*\.)?([^.'\"]+)['\"]>$",
+            text,
+        )
+        if class_match:
+            return class_match.group(1)
 
         return " ".join(text.split())
 
@@ -371,6 +443,40 @@ init python:
             return bool(condition)
         except Exception:
             return True
+
+    def _translator_select_if_branch(renpy, if_node):
+        entries = getattr(if_node, "entries", None) or []
+        for index, entry in enumerate(entries):
+            if not entry or len(entry) < 2:
+                continue
+
+            condition = entry[0]
+            if condition in (None, True):
+                matches = True
+            elif condition is False:
+                matches = False
+            elif isinstance(condition, str):
+                matches = bool(renpy.python.py_eval(condition))
+            else:
+                matches = bool(condition)
+
+            if not matches:
+                continue
+
+            block = entry[1] or []
+            next_node = block[0] if block else getattr(if_node, "next", None)
+            return next_node, {
+                "index": index,
+                "condition": _translator_debug_value(condition),
+                "target": _translator_node_debug(next_node),
+            }
+
+        next_node = getattr(if_node, "next", None)
+        return next_node, {
+            "index": -1,
+            "condition": "<no-match>",
+            "target": _translator_node_debug(next_node),
+        }
 
     def _translator_extract_menu_choices(renpy, menu_node):
         choices = []
@@ -773,22 +879,55 @@ init python:
             }
             _translator_last_current_msg = dict(msg)
 
+            prefetch_debug = {
+                "current_node": _translator_node_debug(cur),
+                "start_node": _translator_node_debug(
+                    cur.next if cur and hasattr(cur, "next") else None
+                ),
+                "stop_reason": "not-started",
+                "stop_node": _translator_node_debug(None),
+                "visited_nodes": 0,
+                "prefetch_items": 0,
+                "if_branches": [],
+                "context": _translator_context_debug(renpy),
+            }
             try:
                 upcoming = []
                 prefetch_seen = set()
                 node = cur.next if cur and hasattr(cur, "next") else None
                 visited = set()
                 count = 0
+                last_node = None
+
+                if cur is None:
+                    prefetch_debug["stop_reason"] = "current-node-missing"
+                elif node is None:
+                    prefetch_debug["stop_reason"] = "current-next-none"
 
                 while node and count < 60:
                     node_id = id(node)
                     if node_id in visited:
+                        prefetch_debug["stop_reason"] = "cycle"
+                        prefetch_debug["stop_node"] = _translator_node_debug(node)
                         break
                     visited.add(node_id)
+                    last_node = node
 
                     node_type = node.__class__.__name__
-                    if node_type in ("Menu", "If"):
+                    if node_type == "Menu":
+                        prefetch_debug["stop_reason"] = "menu-boundary"
+                        prefetch_debug["stop_node"] = _translator_node_debug(node)
                         break
+                    if node_type == "If":
+                        try:
+                            node, branch_debug = _translator_select_if_branch(renpy, node)
+                            prefetch_debug["if_branches"].append(branch_debug)
+                            continue
+                        except Exception as e:
+                            prefetch_debug["stop_reason"] = "if-eval-error"
+                            prefetch_debug["stop_node"] = _translator_node_debug(node)
+                            prefetch_debug["error"] = _translator_debug_value(e)
+                            break
 
                     if hasattr(node, "what") and hasattr(node, "who"):
                         text = str(node.what) if node.what else ""
@@ -816,10 +955,23 @@ init python:
 
                     node = getattr(node, "next", None)
 
+                if prefetch_debug["stop_reason"] == "not-started":
+                    if node is not None and count >= 60:
+                        prefetch_debug["stop_reason"] = "prefetch-limit"
+                        prefetch_debug["stop_node"] = _translator_node_debug(node)
+                    else:
+                        prefetch_debug["stop_reason"] = "next-none"
+                        prefetch_debug["stop_node"] = _translator_node_debug(last_node)
+
+                prefetch_debug["visited_nodes"] = len(visited)
+                prefetch_debug["prefetch_items"] = len(upcoming)
+
                 if upcoming:
                     msg["prefetch"] = upcoming
-            except Exception:
-                pass
+            except Exception as e:
+                prefetch_debug["stop_reason"] = "exception"
+                prefetch_debug["error"] = _translator_debug_value(e)
+            msg["prefetch_debug"] = prefetch_debug
 
             _translator_start_thread(_translator_send, (msg,))
         elif event in ("show", "show_done", "slow_done"):

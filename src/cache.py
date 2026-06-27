@@ -23,6 +23,13 @@ def normalize_speaker_name(value: Any) -> str:
     if value is None:
         return ""
 
+    # Some Ren'Py games pass a displayable class as the `who` value.  Its
+    # default representation (for example
+    # ``<class 'renpy.display.video.Movie'>``) is implementation detail, not
+    # a character name; retain only the useful class name.
+    if isinstance(value, type):
+        return value.__name__
+
     if isinstance(value, (list, tuple, set)):
         parts = []
         seen = set()
@@ -48,6 +55,10 @@ def normalize_speaker_name(value: Any) -> str:
             parsed = None
         if isinstance(parsed, (list, tuple, set)):
             return normalize_speaker_name(parsed)
+
+    class_match = re.fullmatch(r"<(?:class|type) ['\"](?:[^'\"]*\.)?([^.'\"]+)['\"]>", text)
+    if class_match:
+        return class_match.group(1)
 
     text = re.sub(r"\s+", " ", text).strip()
     return text

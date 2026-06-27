@@ -22,6 +22,7 @@ class BaseTranslator:
         self.system_prompt = config.get("system_prompt", "You are a game localization expert specializing in visual novels. You are currently localizing the game \"{game_title}\". LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text.")
         self.batch_prompt = config.get("batch_prompt", "You are a game localization expert specializing in visual novels. You are currently localizing the game \"{game_title}\". LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text.")
         self.temperature = float(config.get("temperature", 0.3))
+        self.api_timeout_seconds = max(10.0, float(config.get("api_timeout_seconds", 120)))
         self._last_call_time = 0
         self._timing_enabled = config.get("enable_timing_log", False)
         self._keep_names = config.get("keep_original_names", True)
@@ -159,7 +160,7 @@ class GeminiTranslator(BaseTranslator):
         self.max_retries = 3
     def _create_client(self) -> httpx.Client:
         return httpx.Client(
-            timeout=30,
+            timeout=self.api_timeout_seconds,
             trust_env=False,
             limits=httpx.Limits(
                 max_connections=5,
@@ -219,7 +220,7 @@ class ZhipuTranslator(BaseTranslator):
         self.max_retries = 3
     def _create_client(self) -> httpx.Client:
         return httpx.Client(
-            timeout=30,
+            timeout=self.api_timeout_seconds,
             trust_env=False,
             limits=httpx.Limits(
                 max_connections=5,
@@ -280,7 +281,7 @@ class OllamaTranslator(BaseTranslator):
         self.max_retries = 3
     def _create_client(self) -> httpx.Client:
         return httpx.Client(
-            timeout=120,
+            timeout=self.api_timeout_seconds,
             trust_env=False,
             limits=httpx.Limits(
                 max_connections=5,
@@ -367,7 +368,7 @@ class BuiltinTranslator(BaseTranslator):
     def _create_client(self) -> httpx.Client:
         """创建 httpx 客户端（支持关闭后重建）"""
         return httpx.Client(
-            timeout=120,
+            timeout=self.api_timeout_seconds,
             verify=False,  # 忽略 SSL 证书校验（SakuraFRP 等自签名证书）
             trust_env=False,
             limits=httpx.Limits(
@@ -614,7 +615,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
 
     def _create_client(self) -> httpx.Client:
         return httpx.Client(
-            timeout=120,
+            timeout=self.api_timeout_seconds,
             trust_env=False,
             limits=httpx.Limits(
                 max_connections=5,
@@ -679,7 +680,7 @@ class AnthropicTranslator(BaseTranslator):
 
     def _create_client(self) -> httpx.Client:
         return httpx.Client(
-            timeout=120,
+            timeout=self.api_timeout_seconds,
             trust_env=False,
             limits=httpx.Limits(
                 max_connections=5,

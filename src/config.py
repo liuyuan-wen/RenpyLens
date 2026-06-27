@@ -15,7 +15,7 @@ else:
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "v1.2.1",
+    "version": "v1.2.2",
     "translation_engine": "builtin",
     "gemini_api_key": "",
     "gemini_url": "https://generativelanguage.googleapis.com",
@@ -95,6 +95,7 @@ DEFAULT_CONFIG = {
     "debounce_ms": 100,
     "bulk_translate_batch_size": 5,
     "bulk_translate_rpm": 60,
+    "api_timeout_seconds": 120,
     "enable_timing_log": True,
     "trial_key_url": "https://frp-bar.com:58385/get_trial_key",
     "github_repo": "liuyuan-wen/RenpyLens",

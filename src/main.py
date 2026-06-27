@@ -78,6 +78,7 @@ class MainWindow(QWidget):
     _update_check_signal = pyqtSignal(object)
     _update_download_signal = pyqtSignal(object)
     _bulk_ui_signal = pyqtSignal(object)
+    _cache_state_signal = pyqtSignal(bool)
     SUPPORT_QQ_GROUP = "1058127921"
     TRANSLATION_REPEAT_CHAR_LIMIT = 12
     TRANSLATION_LENGTH_RATIO_LIMIT = 3.0
@@ -86,7 +87,7 @@ class MainWindow(QWidget):
         super().__init__()
         self.config = load_config()
 
-        version = self.config.get("version", "v1.2.1")
+        version = self.config.get("version", "v1.2.2")
         self.setWindowTitle(f"RenpyLens {version} - Ren'Py 实时翻译")
         self.resize(800, 10)
         self.setAcceptDrops(True)
@@ -98,6 +99,7 @@ class MainWindow(QWidget):
         self._latest_prefetch_items = []
         self._is_pinned = self.config.get("window_pinned", False)
         self._inflight_texts = set()
+        self._inflight_meta = {}
         self._inflight_lock = threading.Lock()
         self._text_generation = 0
         self._current_game_exe = None
@@ -130,6 +132,7 @@ class MainWindow(QWidget):
         self._update_check_signal.connect(self._on_update_check_result)
         self._update_download_signal.connect(self._on_update_download_result)
         self._bulk_ui_signal.connect(self._on_bulk_ui_event)
+        self._cache_state_signal.connect(self.btn_clear_cache.setEnabled)
         self._key_expired_shown = False  # 防止重复弹窗
 
         # 游戏进程监控定时器
@@ -203,6 +206,10 @@ class MainWindow(QWidget):
             )
         else:
             self.btn_refresh_expiry.setEnabled(False)
+
+    def _sync_clear_cache_button(self):
+        """Refresh the clear-cache action safely from any worker thread."""
+        self._cache_state_signal.emit(not self.cache.is_empty())
 
     def _center_window(self):
         self.adjustSize()
@@ -951,7 +958,11 @@ class MainWindow(QWidget):
             "temperature",
             "keep_original_names",
         }
-        active_connection_keys = {f"{engine}_url", f"{engine}_api_key"}
+        active_connection_keys = {
+            f"{engine}_url",
+            f"{engine}_api_key",
+            "api_timeout_seconds",
+        }
         clear_cache = any(previous_config.get(key) != self.config.get(key) for key in semantic_keys)
         translator_needs_rebuild = clear_cache or any(
             previous_config.get(key) != self.config.get(key) for key in active_connection_keys
@@ -2190,6 +2201,7 @@ class MainWindow(QWidget):
                             )
                     if batch_payload:
                         self.cache.save_machine_translations_if_absent(batch_payload)
+                        self._sync_clear_cache_button()
                     if guard_result["deferred_sources"]:
                         deferred_lookup = {
                             entry["source"]: entry for entry in uncovered_entries
@@ -2658,6 +2670,8 @@ class MainWindow(QWidget):
             self.cache.mark_seen(what, entry_type=ENTRY_TYPE_DIALOGUE, speaker=who)
         for choice in visible_choices:
             self.cache.mark_seen(choice, entry_type=ENTRY_TYPE_CHOICE, speaker="")
+        if what or visible_choices:
+            self._sync_clear_cache_button()
         self._refresh_workbench_entries()
 
         # 1) 处理当前句与菜单选项缓存
@@ -2716,6 +2730,66 @@ class MainWindow(QWidget):
         if not self._is_bulk_job_active():
             self._ensure_prefetch_buffer(gen)
 
+    def _preview_text(self, text: str, limit: int = 60) -> str:
+        text = str(text or "").replace("\n", " ").strip()
+        return text[:limit]
+
+    def _mark_inflight(self, texts: list[str], owner: str, gen: int):
+        now = time.perf_counter()
+        for text in texts:
+            if not text:
+                continue
+            self._inflight_texts.add(text)
+            self._inflight_meta[text] = {
+                "owner": owner,
+                "gen": gen,
+                "started": now,
+            }
+
+    def _clear_inflight(self, texts: list[str], owner=None):
+        now = time.perf_counter()
+        for text in texts:
+            if not text:
+                continue
+            meta = self._inflight_meta.get(text, {})
+            if owner and not meta:
+                continue
+            if owner and meta and meta.get("owner") != owner:
+                continue
+            self._inflight_texts.discard(text)
+            self._inflight_meta.pop(text, None)
+            if meta:
+                age = now - float(meta.get("started", now))
+                print(
+                    f"[Inflight] clear owner={meta.get('owner', '?')} gen={meta.get('gen', '?')} "
+                    f"age={age:.1f}s text={self._preview_text(text)}"
+                )
+
+    def _inflight_snapshot(self, text: str) -> str:
+        meta = self._inflight_meta.get(text)
+        if not meta:
+            return "owner=?, gen=?, age=?"
+        age = time.perf_counter() - float(meta.get("started", time.perf_counter()))
+        return f"owner={meta.get('owner', '?')}, gen={meta.get('gen', '?')}, age={age:.1f}s"
+
+    def _steal_inflight_for_retry(self, texts: list[str], reason: str) -> int:
+        now = time.perf_counter()
+        stolen = 0
+        for text in texts:
+            if not text or self.cache.get(text) is not None or text not in self._inflight_texts:
+                continue
+            meta = self._inflight_meta.get(text, {})
+            age = now - float(meta.get("started", now))
+            print(
+                f"[Inflight] stale takeover reason={reason} "
+                f"owner={meta.get('owner', '?')} gen={meta.get('gen', '?')} "
+                f"age={age:.1f}s text={self._preview_text(text)}"
+            )
+            self._inflight_texts.discard(text)
+            self._inflight_meta.pop(text, None)
+            stolen += 1
+        return stolen
+
     def _translate_batch_with_current(
         self,
         who: str,
@@ -2771,7 +2845,11 @@ class MainWindow(QWidget):
         with self._inflight_lock:
             required_inflight = [t for t in required_texts if t in self._inflight_texts]
         if required_inflight and len(required_inflight) == len(required_texts):
-            print("[Batch] Current/choice texts already being translated, waiting for cache...")
+            details = "; ".join(
+                f"{self._preview_text(t)} ({self._inflight_snapshot(t)})"
+                for t in required_inflight
+            )
+            print(f"[Batch] Current/choice texts already inflight, waiting for cache: {details}")
             for _ in range(100):  # 最多等 10 秒
                 _time.sleep(0.1)
                 # 如果用户已翻页，放弃等待
@@ -2803,6 +2881,9 @@ class MainWindow(QWidget):
                 if not still_inflight:
                     print("[Batch] Waiting target no longer inflight, proceeding to translate locally")
                     break
+            else:
+                with self._inflight_lock:
+                    self._steal_inflight_for_retry(required_texts, "current-wait-timeout")
             # 超时仍未就绪 → 继续走翻译流程
 
         t_build_start = _time.perf_counter()
@@ -2829,14 +2910,24 @@ class MainWindow(QWidget):
                     seen.add(text)
                     prefetch_added += 1
             # 标记 inflight（在锁内完成，防止其他线程同时标记）
-            for t in batch_texts:
-                self._inflight_texts.add(t)
+            self._mark_inflight(batch_texts, owner="batch-current", gen=gen)
+            if batch_texts:
+                print(
+                    f"[Inflight] mark owner=batch-current gen={gen} count={len(batch_texts)} "
+                    f"required={sum(1 for t in batch_texts if t in required_texts)} "
+                    f"first={self._preview_text(batch_texts[0])}"
+                )
         t_build_end = _time.perf_counter()
 
         # 若 required 都在 inflight，当前线程只需等待其结果，不再重复请求
         missing_required = [t for t in required_texts if self.cache.get(t) is None]
-        if missing_required and not any(t in batch_texts for t in required_texts):
-            print("[Batch] Required texts still inflight, waiting without duplicate API call...")
+        blocked_required = [t for t in missing_required if t not in batch_texts]
+        if blocked_required:
+            details = "; ".join(
+                f"{self._preview_text(t)} ({self._inflight_snapshot(t)})"
+                for t in blocked_required
+            )
+            print(f"[Batch] Required texts still inflight, waiting without duplicate API call: {details}")
             should_retry_locally = False
             for _ in range(50):  # 最多等 5 秒
                 _time.sleep(0.1)
@@ -2847,7 +2938,7 @@ class MainWindow(QWidget):
                 ready = True
                 still_inflight = False
                 with self._inflight_lock:
-                    for t in required_texts:
+                    for t in blocked_required:
                         if self.cache.get(t) is None:
                             ready = False
                             if t in self._inflight_texts:
@@ -2868,8 +2959,22 @@ class MainWindow(QWidget):
                     should_retry_locally = True
                     break
             if not should_retry_locally:
-                return
+                print("[Batch] Required items still inflight after wait timeout, taking over locally")
+                should_retry_locally = True
             print("[Batch] Required items still missing after wait, retrying translation locally")
+            with self._inflight_lock:
+                self._steal_inflight_for_retry(blocked_required, "required-wait-timeout")
+                newly_claimed = []
+                for t in blocked_required:
+                    if t and self.cache.get(t) is None and t not in batch_texts:
+                        batch_texts.append(t)
+                        newly_claimed.append(t)
+                self._mark_inflight(newly_claimed, owner="batch-current-retry", gen=gen)
+                if newly_claimed:
+                    print(
+                        f"[Inflight] mark owner=batch-current-retry gen={gen} "
+                        f"count={len(newly_claimed)} first={self._preview_text(newly_claimed[0])}"
+                    )
 
         if not batch_texts:
             return
@@ -2883,8 +2988,8 @@ class MainWindow(QWidget):
             if self._text_generation != gen:
                 print(f"[Batch] ⏭ Debounce skip (gen={gen}→{self._text_generation}): {what[:40]}")
                 with self._inflight_lock:
-                    for t in batch_texts:
-                        self._inflight_texts.discard(t)
+                    self._clear_inflight(batch_texts, owner="batch-current")
+                    self._clear_inflight(batch_texts, owner="batch-current-retry")
                 return
 
         try:
@@ -2916,6 +3021,7 @@ class MainWindow(QWidget):
                             entry_type=entry_type,
                             speaker=speaker_for_text,
                         )
+                        self._sync_clear_cache_button()
                     print(f"[Batch] ✅ {text[:30]} -> {clean_translation[:30]}")
                 else:
                     print(f"[Batch] ❌ {text[:30]} -> {clean_translation[:30]}")
@@ -2997,8 +3103,8 @@ class MainWindow(QWidget):
             self._status_signal.emit(f"❌ 翻译失败，请检查网络或配置。{self._support_tip()}")
         finally:
             with self._inflight_lock:
-                for t in batch_texts:
-                    self._inflight_texts.discard(t)
+                self._clear_inflight(batch_texts, owner="batch-current")
+                self._clear_inflight(batch_texts, owner="batch-current-retry")
 
     def _ensure_prefetch_buffer(self, gen: int):
         """检查后续缓存是否满 prefetch_count 条，不满则从未翻译处开始翻译"""
@@ -3034,10 +3140,13 @@ class MainWindow(QWidget):
 
         # 标记整个 batch 为 inflight
         with self._inflight_lock:
-            for t in texts_to_translate:
-                self._inflight_texts.add(t)
+            self._mark_inflight(texts_to_translate, owner="prefetch", gen=gen)
 
-        print(f"[Prefetch] Cache insufficient (item {first_uncached_idx+1} not ready), triggering batch translation of {len(texts_to_translate)} items (gen={gen})")
+        print(
+            f"[Prefetch] Cache insufficient (item {first_uncached_idx+1} not ready), "
+            f"triggering batch translation of {len(texts_to_translate)} items "
+            f"(gen={gen}, first={self._preview_text(texts_to_translate[0])})"
+        )
         threading.Thread(
             target=self._prefetch_batch_async, args=(batch_to_translate, gen), daemon=True
         ).start()
@@ -3066,8 +3175,7 @@ class MainWindow(QWidget):
             return
         if self._is_bulk_job_active():
             with self._inflight_lock:
-                for t in texts:
-                    self._inflight_texts.discard(t)
+                self._clear_inflight(texts, owner="prefetch")
             return
         timing_enabled = self.config.get("enable_timing_log", False)
         t_pipeline_start = _time.perf_counter()
@@ -3081,13 +3189,11 @@ class MainWindow(QWidget):
         if self._text_generation != gen:
             print(f"[Prefetch] ⏭ Debounce skipping outdated prefetch (gen={gen}→{self._text_generation})")
             with self._inflight_lock:
-                for t in texts:
-                    self._inflight_texts.discard(t)
+                self._clear_inflight(texts, owner="prefetch")
             return
         if self._is_bulk_job_active():
             with self._inflight_lock:
-                for t in texts:
-                    self._inflight_texts.discard(t)
+                self._clear_inflight(texts, owner="prefetch")
             return
 
         self._prefetch_running = True
@@ -3117,6 +3223,7 @@ class MainWindow(QWidget):
                             entry_type=ENTRY_TYPE_DIALOGUE,
                             speaker=prefetch_item_map.get(text, {}).get("who", ""),
                         )
+                        self._sync_clear_cache_button()
                     print(f"[Prefetch] ✅ {text[:30]} -> {clean_translation[:30]}")
                 else:
                     print(f"[Prefetch] ❌ {text[:30]} -> {clean_translation[:30]}")
@@ -3147,8 +3254,7 @@ class MainWindow(QWidget):
         finally:
             self._prefetch_running = False
             with self._inflight_lock:
-                for t in texts:
-                    self._inflight_texts.discard(t)
+                self._clear_inflight(texts, owner="prefetch")
 
     def _on_prefetch_received(self, items: list):
         """存储预取列表（hook每次发来最新的后续对话）"""

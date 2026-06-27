@@ -422,6 +422,23 @@ class SettingsDialog(QDialog):
         layout.setSpacing(8)
         layout.setContentsMargins(20, 12, 20, 20)
 
+        # API 请求
+        api_group = QGroupBox("API 请求")
+        api_form = QFormLayout(api_group)
+        api_form.setSpacing(10)
+
+        self.api_timeout_spin = QSpinBox()
+        self.api_timeout_spin.setRange(10, 3600)
+        self.api_timeout_spin.setSingleStep(30)
+        self.api_timeout_spin.setValue(self.config.get("api_timeout_seconds", 120))
+        self.api_timeout_spin.setSuffix(" 秒")
+        self.api_timeout_spin.setToolTip(
+            "等待单次翻译请求完成的最长时间。大批量翻译或慢速模型可适当调高。"
+        )
+        api_form.addRow("请求超时:", self.api_timeout_spin)
+
+        layout.addWidget(api_group)
+
         # 性能设置
         perf_group = QGroupBox("实时翻译")
         perf_form = QFormLayout(perf_group)
@@ -449,7 +466,7 @@ class SettingsDialog(QDialog):
         bulk_form.setSpacing(10)
 
         self.bulk_translate_batch_size_spin = QSpinBox()
-        self.bulk_translate_batch_size_spin.setRange(1, 100)
+        self.bulk_translate_batch_size_spin.setRange(1, 1000)
         self.bulk_translate_batch_size_spin.setValue(
             self.config.get("bulk_translate_batch_size", 5)
         )
@@ -499,7 +516,7 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout(tab)
         vbox.setSpacing(16)
         
-        version = self.config.get("version", "v1.2.1")
+        version = self.config.get("version", "v1.2.2")
         
         info_label = QLabel(
             f'<div style="font-size: 20px; font-weight: bold; margin-bottom: 10px;">RenpyLens {version}</div>'
@@ -585,6 +602,7 @@ class SettingsDialog(QDialog):
 
         self.config["prefetch_count"] = self.prefetch_spin.value()
         self.config["debounce_ms"] = self.debounce_spin.value()
+        self.config["api_timeout_seconds"] = self.api_timeout_spin.value()
         self.config["bulk_translate_batch_size"] = self.bulk_translate_batch_size_spin.value()
         self.config["bulk_translate_rpm"] = self.bulk_translate_rpm_spin.value()
         self.config["socket_port"] = self.socket_port_spin.value()

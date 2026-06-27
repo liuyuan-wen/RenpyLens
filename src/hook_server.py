@@ -64,6 +64,12 @@ class HookServer(QObject):
     def _emit_current_text(self, msg: dict):
         who = str(msg.get("who", "") or "")
         what = str(msg.get("what", "") or "")
+        prefetch_debug = msg.get("prefetch_debug")
+        if isinstance(prefetch_debug, dict):
+            print(
+                "[HookServer][PrefetchDebug] "
+                + json.dumps(prefetch_debug, ensure_ascii=False, sort_keys=True)
+            )
         raw_choices = msg.get("choices", [])
         choices = []
         if isinstance(raw_choices, list):
