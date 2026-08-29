@@ -23,10 +23,8 @@ def normalize_speaker_name(value: Any) -> str:
     if value is None:
         return ""
 
-    # Some Ren'Py games pass a displayable class as the `who` value.  Its
-    # default representation (for example
-    # ``<class 'renpy.display.video.Movie'>``) is implementation detail, not
-    # a character name; retain only the useful class name.
+    # Some Ren'Py games pass a displayable class as the `who` value. Its
+    # default representation is implementation detail, not a character name.
     if isinstance(value, type):
         return value.__name__
 
@@ -58,9 +56,23 @@ def normalize_speaker_name(value: Any) -> str:
 
     class_match = re.fullmatch(r"<(?:class|type) ['\"](?:[^'\"]*\.)?([^.'\"]+)['\"]>", text)
     if class_match:
-        return class_match.group(1)
+        return ""
+
+    if re.search(r"\[[^\]]+\]", text):
+        return ""
+    if re.search(r"\bobject at 0x[0-9a-f]+\b", text, re.IGNORECASE):
+        return ""
+    if re.match(r"^<(?:function|bound method|renpy\.)", text, re.IGNORECASE):
+        return ""
+    if len(text) > 120:
+        return ""
 
     text = re.sub(r"\s+", " ", text).strip()
+    if text.lower() == "extend":
+        return ""
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", text):
+        text = re.sub(r"_t$", "", text, flags=re.IGNORECASE)
+        text = text.replace("_", " ")
     return text
 
 
@@ -305,14 +317,31 @@ class TranslationCache:
 
         return fallback
 
-    def set_game(self, game_exe: str):
+    def set_game(self, game_exe: str, game_id: str | None = None, migrate_legacy: bool = False):
         """Set current game and load all existing entries into memory."""
-        game_id = os.path.basename(game_exe) if game_exe else ""
+        legacy_id = os.path.basename(game_exe) if game_exe else ""
+        game_id = str(game_id or legacy_id)
         with self._lock:
             self._game_id = game_id
             self._mem_entries.clear()
         try:
             conn = self._connect()
+            if migrate_legacy and game_id and legacy_id and game_id != legacy_id:
+                existing = conn.execute(
+                    "SELECT 1 FROM cache WHERE game_id = ? LIMIT 1",
+                    (game_id,),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO cache ("
+                        "game_id, source, translation, entry_type, speaker, is_manual, "
+                        "created_at, updated_at, last_seen_at, seen_count"
+                        ") SELECT ?, source, translation, entry_type, speaker, is_manual, "
+                        "created_at, updated_at, last_seen_at, seen_count "
+                        "FROM cache WHERE game_id = ?",
+                        (game_id, legacy_id),
+                    )
+                    conn.commit()
             rows = conn.execute(
                 "SELECT game_id, source, translation, entry_type, speaker, is_manual, "
                 "created_at, updated_at, last_seen_at, seen_count "
@@ -382,7 +411,7 @@ class TranslationCache:
                 self._mem_entries[text] = entry
             else:
                 entry["entry_type"] = entry_type or entry.get("entry_type") or ENTRY_TYPE_DIALOGUE
-                if speaker and not entry.get("speaker"):
+                if speaker and speaker != entry.get("speaker"):
                     entry["speaker"] = speaker
                 entry["last_seen_at"] = now
                 entry["seen_count"] = int(entry.get("seen_count") or 0) + 1

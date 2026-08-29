@@ -11,6 +11,10 @@ from ctypes import wintypes
 from dataclasses import dataclass
 
 
+_HOOK_FILE_PREFIX = "_translator_hook"
+_HOOK_FILE_EXTENSIONS = {".rpy", ".rpyc"}
+
+
 if os.name == "nt":
     TH32CS_SNAPPROCESS = 0x00000002
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -120,6 +124,21 @@ def _query_process_image_path(pid: int) -> str | None:
         _kernel32.CloseHandle(handle)
 
     return None
+
+
+def is_game_running(exe_path: str) -> bool:
+    """Return whether the exact executable is already running."""
+    if os.name != "nt" or not exe_path:
+        return False
+
+    target_path = _normalize_path(exe_path)
+    expected_name = os.path.basename(target_path).lower()
+    for entry in _iter_process_entries():
+        if entry.name.lower() != expected_name:
+            continue
+        if _query_process_image_path(entry.pid) == target_path:
+            return True
+    return False
 
 
 class GameLaunchHandle:
@@ -246,6 +265,40 @@ def _render_hook_script(hook_rpy_path: str, socket_port: int) -> str:
     )
 
 
+def _find_hook_artifacts(game_dir: str) -> list[str]:
+    """Find RenpyLens Hook source/compiled files, including renamed copies."""
+    def raise_scan_error(error: OSError):
+        raise error
+
+    artifacts: list[str] = []
+    for root, dirs, files in os.walk(
+        game_dir,
+        topdown=True,
+        onerror=raise_scan_error,
+        followlinks=False,
+    ):
+        dirs[:] = [
+            name for name in dirs
+            if not os.path.islink(os.path.join(root, name))
+        ]
+        for filename in files:
+            stem, extension = os.path.splitext(filename)
+            if (
+                stem.casefold().startswith(_HOOK_FILE_PREFIX.casefold())
+                and extension.casefold() in _HOOK_FILE_EXTENSIONS
+            ):
+                artifacts.append(os.path.join(root, filename))
+
+    return sorted(
+        artifacts,
+        key=lambda path: os.path.relpath(path, game_dir).casefold(),
+    )
+
+
+def _hook_relative_path(path: str, game_dir: str) -> str:
+    return os.path.relpath(path, game_dir).replace(os.sep, "/")
+
+
 def inject_hook(exe_path: str, hook_rpy_path: str, socket_port: int) -> tuple[bool, str]:
     """Render and inject the hook script into the target game's game/ folder."""
     if not os.path.isfile(exe_path):
@@ -259,19 +312,38 @@ def inject_hook(exe_path: str, hook_rpy_path: str, socket_port: int) -> tuple[bo
         return False, "game/ directory not found"
 
     dest = os.path.join(game_dir, "_translator_hook.rpy")
-    dest_rpyc = os.path.join(game_dir, "_translator_hook.rpyc")
-
     try:
         rendered = _render_hook_script(hook_rpy_path, socket_port)
+    except Exception as e:
+        return False, f"Failed to read Hook script: {e}"
+
+    dest_normalized = _normalize_path(dest)
+    try:
+        residuals = [
+            path for path in _find_hook_artifacts(game_dir)
+            if _normalize_path(path) != dest_normalized
+        ]
+    except Exception as e:
+        return False, f"Failed to scan game directory for residual Hooks: {e}"
+    removed: list[str] = []
+    for path in residuals:
+        relative_path = _hook_relative_path(path, game_dir)
+        try:
+            os.remove(path)
+            removed.append(relative_path)
+        except Exception as e:
+            return False, f"Failed to remove residual Hook '{relative_path}': {e}"
+
+    try:
         with open(dest, "w", encoding="utf-8", newline="\n") as f:
             f.write(rendered)
-
-        if os.path.exists(dest_rpyc):
-            os.remove(dest_rpyc)
     except Exception as e:
-        return False, f"Failed to render hook script: {e}"
+        return False, f"Failed to write Hook script: {e}"
 
-    return True, f"Injected to: {dest}"
+    message = f"Injected to: {dest}"
+    if removed:
+        message += f"; cleaned {len(removed)} residual Hook file(s): {', '.join(removed)}"
+    return True, message
 
 
 def remove_hook(exe_path: str) -> tuple[bool, str]:
@@ -280,21 +352,23 @@ def remove_hook(exe_path: str) -> tuple[bool, str]:
     if not game_dir:
         return False, "game/ directory not found"
 
-    hook_file = os.path.join(game_dir, "_translator_hook.rpy")
-    hook_compiled = os.path.join(game_dir, "_translator_hook.rpyc")
+    try:
+        artifacts = _find_hook_artifacts(game_dir)
+    except Exception as e:
+        return False, f"Failed to scan game directory for Hooks: {e}"
 
-    removed = []
-    for path in (hook_file, hook_compiled):
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-                removed.append(os.path.basename(path))
-            except Exception as e:
-                return False, f"Failed to delete: {e}"
+    removed: list[str] = []
+    for path in artifacts:
+        relative_path = _hook_relative_path(path, game_dir)
+        try:
+            os.remove(path)
+            removed.append(relative_path)
+        except Exception as e:
+            return False, f"Failed to remove Hook '{relative_path}': {e}"
 
     if removed:
         return True, f"Removed: {', '.join(removed)}"
-    return True, "No files to remove"
+    return True, "No Hook files to remove"
 
 
 def launch_game(exe_path: str) -> GameLaunchHandle | None:

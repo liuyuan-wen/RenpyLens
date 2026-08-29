@@ -3,6 +3,7 @@
 
 import re
 import time
+import math
 import httpx
 import threading
 
@@ -10,6 +11,62 @@ import threading
 class KeyExpiredError(Exception):
     """试用 Key 已过期"""
     pass
+
+
+class RateLimitError(Exception):
+    """内置通道请求受限，并提供适合直接展示给用户的中文提示。"""
+
+    def __init__(self, limit_type="", current_limit=None, retry_after=None):
+        self.limit_type = str(limit_type or "").strip().lower()
+        self.current_limit = current_limit
+        self.retry_after = retry_after
+        super().__init__(self._build_user_message())
+
+    @classmethod
+    def from_response(cls, response):
+        message = ""
+        try:
+            error = response.json().get("error", {})
+            if isinstance(error, dict):
+                message = str(error.get("message", "") or "")
+        except Exception:
+            pass
+
+        limit_type_match = re.search(r"Limit type:\s*([A-Za-z0-9_]+)", message, re.IGNORECASE)
+        current_limit_match = re.search(r"Current limit:\s*(\d+)", message, re.IGNORECASE)
+        limit_type = limit_type_match.group(1) if limit_type_match else ""
+        current_limit = int(current_limit_match.group(1)) if current_limit_match else None
+
+        retry_after = None
+        try:
+            raw_retry_after = response.headers.get("Retry-After", "")
+            if raw_retry_after:
+                retry_after = max(1, int(math.ceil(float(raw_retry_after))))
+        except (TypeError, ValueError, OverflowError):
+            pass
+
+        return cls(limit_type, current_limit, retry_after)
+
+    def _retry_hint(self):
+        if self.retry_after is not None:
+            return f"请等待约 {self.retry_after} 秒后再试。"
+        return "请稍后再试。"
+
+    def _build_user_message(self):
+        retry_hint = self._retry_hint()
+        if self.limit_type == "tokens":
+            limit = self.current_limit or 5000
+            return (
+                f"本分钟翻译内容已达到 {limit} Token 上限，{retry_hint}"
+                "全量翻译时可调小每批翻译条数。"
+            )
+        if self.limit_type == "requests":
+            limit = self.current_limit or 60
+            return f"请求过于频繁，已达到每分钟 {limit} 次上限，{retry_hint}"
+        if self.limit_type == "max_parallel_requests":
+            limit = self.current_limit or 3
+            return f"同时进行的翻译请求过多，当前最多允许 {limit} 个，{retry_hint}"
+        return f"API 请求过于频繁，{retry_hint}"
 
 
 class BaseTranslator:
@@ -27,6 +84,10 @@ class BaseTranslator:
         self._timing_enabled = config.get("enable_timing_log", False)
         self._keep_names = config.get("keep_original_names", True)
         self._name_instruction = "\nRule:\nKeep all character names EXACTLY as they appear in the source text. Do not translate or transliterate them. (Examples: Eileen -> Eileen, 桜 -> 桜, Артём -> Артём)."
+        self._placeholder_instruction = (
+            "\nRule:\nPreserve every token shaped like ⟦RL_V_1⟧ or ⟦RL_G⟧ "
+            "exactly, including its spelling and number of occurrences."
+        )
         # 线程锁与延迟初始化的客户端
         self._client = None
         self._client_lock = threading.Lock()
@@ -75,6 +136,8 @@ class BaseTranslator:
         system_prompt = self.system_prompt.format(target_lang=tl, game_title=game_title)
         if self._keep_names:
             system_prompt += self._name_instruction.format(target_lang=tl, source_lang=sl)
+        if "⟦RL_" in str(text):
+            system_prompt += self._placeholder_instruction
         result = self._call_api(system_prompt, text)
         return self._clean_result(result)
 
@@ -87,6 +150,8 @@ class BaseTranslator:
         system_prompt = self.batch_prompt.format(target_lang=tl, game_title=game_title)
         if self._keep_names:
             system_prompt += self._name_instruction.format(target_lang=tl, source_lang=sl)
+        if any("⟦RL_" in str(text) for text in texts):
+            system_prompt += self._placeholder_instruction
         
         max_retries = 3
         for attempt in range(max_retries):
@@ -400,7 +465,15 @@ class BuiltinTranslator(BaseTranslator):
             headers["Authorization"] = f"Bearer {self.api_key.strip()}"
         return headers
 
+    @staticmethod
+    def _raise_for_rate_limit(response):
+        if response.status_code == 429:
+            raise RateLimitError.from_response(response)
     def _build_payload(self, system_prompt: str, user_content: str, stream: bool = False):
+        # Translation output should stay close to the source size.  A bounded,
+        # input-aware limit prevents a model repetition loop from monopolising
+        # the single translator connection for tens of seconds.
+        max_output_tokens = max(256, min(2048, len(user_content) * 2 + 128))
         payload = {
             "model": self.model,
             "messages": [
@@ -409,8 +482,9 @@ class BuiltinTranslator(BaseTranslator):
             ],
             "temperature": self.temperature,
             "stream": stream,
+            "max_tokens": max_output_tokens,
         }
-        
+
         # 针对不同模型/框架尝试关闭 thinking 功能
         model_lower = self.model.lower()
         if "qwen" in model_lower:
@@ -418,7 +492,7 @@ class BuiltinTranslator(BaseTranslator):
         elif "r1" in model_lower or "thinking" in model_lower:
              # 部分后端框架支持直接在 payload 中关闭
              payload["enable_thinking"] = False
-             
+
         return payload
 
     def _call_api(self, system_prompt: str, user_content: str) -> str:
@@ -444,6 +518,7 @@ class BuiltinTranslator(BaseTranslator):
                         raise
                     except Exception:
                         pass
+                self._raise_for_rate_limit(resp)
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
@@ -478,6 +553,8 @@ class BuiltinTranslator(BaseTranslator):
                 raise
             except KeyExpiredError:
                 raise
+            except RateLimitError:
+                raise
             except Exception as e:
                 if attempt == self.max_retries - 1:
                     raise RuntimeError(
@@ -510,6 +587,7 @@ class BuiltinTranslator(BaseTranslator):
                                 headers=headers) as resp:
             if resp.status_code == 403:
                 raise PermissionError("[Builtin] 403 Forbidden.")
+            self._raise_for_rate_limit(resp)
             resp.raise_for_status()
             t_headers = time.perf_counter()  # HTTP 响应头到达
 

@@ -165,6 +165,7 @@ class TranslationOverlay(QWidget):
     EDIT_MIN_WIDTH = 420
     EDIT_MIN_HEIGHT = 150
     RESIZE_HOTZONE = 16
+    TOPMOST_ENFORCE_INTERVAL_MS = 250
 
     def __init__(self, config: dict):
         super().__init__()
@@ -186,6 +187,13 @@ class TranslationOverlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setMouseTracking(True)
+
+        # Some games enter fullscreen after this window is first shown, which
+        # can move their render window above an existing TOPMOST window. Keep
+        # reasserting the native Z-order while "force topmost" is enabled.
+        self._topmost_timer = QTimer(self)
+        self._topmost_timer.setInterval(self.TOPMOST_ENFORCE_INTERVAL_MS)
+        self._topmost_timer.timeout.connect(self._enforce_topmost)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -327,9 +335,12 @@ class TranslationOverlay(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._sync_topmost_timer()
+        QTimer.singleShot(0, self._enforce_topmost)
         self.visibility_changed.emit(True)
 
     def hideEvent(self, event):
+        self._topmost_timer.stop()
         super().hideEvent(event)
         self.visibility_changed.emit(False)
 
@@ -582,6 +593,14 @@ class TranslationOverlay(QWidget):
         except Exception as e:
             print(f"[Overlay] Failed to enforce topmost: {e}")
 
+    def _sync_topmost_timer(self):
+        should_run = self.isVisible() and self.config.get("force_topmost", False)
+        if should_run:
+            if not self._topmost_timer.isActive():
+                self._topmost_timer.start()
+        else:
+            self._topmost_timer.stop()
+
     def update_config(self, new_config: dict):
         self.config = new_config
         self.label.set_font_family(self.config.get("font_family", "Microsoft YaHei"))
@@ -593,6 +612,7 @@ class TranslationOverlay(QWidget):
             self._restore_edit_window()
         else:
             self._restore_read_window()
+        self._sync_topmost_timer()
         self._enforce_topmost()
 
     def set_edit_context(self, dialogue_target: dict | None, choice_targets: list[dict]):
@@ -628,6 +648,32 @@ class TranslationOverlay(QWidget):
         self.label.setText(text)
         self._enforce_topmost()
         QTimer.singleShot(20, self._adjust_height)
+
+    def _original_text_for_clipboard(self) -> str:
+        dialogue_target = self._edit_context.get("dialogue") or {}
+        choice_targets = self._edit_context.get("choices", [])
+        original = str(dialogue_target.get("source") or "")
+        choices = [str(target.get("source") or "") for target in choice_targets]
+
+        first_is_caption = bool(
+            original
+            and choices
+            and choices[0].strip() == original.strip()
+        )
+        lines = []
+        if first_is_caption:
+            lines.append(original)
+        elif original:
+            speaker = str(dialogue_target.get("speaker") or "")
+            if speaker and self.config.get("show_character_name", True):
+                original = f"【{speaker}】{original}"
+            lines.append(original)
+
+        choice_start_index = 1 if first_is_caption else 0
+        for index in range(choice_start_index, len(choices)):
+            lines.append(f"[{index + 1 - choice_start_index}] {choices[index]}")
+
+        return "\n".join(lines)
 
     def start_edit(self, target: dict | None):
         if not target:
@@ -775,11 +821,17 @@ class TranslationOverlay(QWidget):
         if self._editing_target:
             cancel_action = menu.addAction("取消编辑")
             cancel_action.triggered.connect(self.cancel_edit)
-            menu.exec_(self.mapToGlobal(pos))
+            self._exec_context_menu(menu, pos)
             return
 
-        copy_action = menu.addAction("复制文本")
-        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(self.label.text()))
+        copy_translation_action = menu.addAction("复制翻译文本")
+        copy_translation_action.triggered.connect(
+            lambda: QApplication.clipboard().setText(self.label.text())
+        )
+        copy_original_action = menu.addAction("复制原始文本")
+        copy_original_action.triggered.connect(
+            lambda: QApplication.clipboard().setText(self._original_text_for_clipboard())
+        )
 
         if self._edit_context.get("dialogue"):
             menu.addSeparator()
@@ -877,10 +929,21 @@ class TranslationOverlay(QWidget):
         menu.addAction(force_topmost_action)
 
         menu.addSeparator()
-        quit_action = menu.addAction("关闭浮窗")
+        quit_action = menu.addAction("隐藏浮窗")
         quit_action.triggered.connect(self.hide)
 
-        menu.exec_(self.mapToGlobal(pos))
+        self._exec_context_menu(menu, pos)
+
+    def _exec_context_menu(self, menu: QMenu, pos):
+        # QMenu runs a nested event loop, so the regular topmost timer keeps
+        # firing while the menu is open. Reasserting the overlay's Z-order at
+        # that point places the overlay itself above its popup menu.
+        self._topmost_timer.stop()
+        try:
+            menu.exec_(self.mapToGlobal(pos))
+        finally:
+            self._sync_topmost_timer()
+            self._enforce_topmost()
 
     def _set_width(self, width: int):
         width = self._clamp_overlay_width(width)
@@ -895,5 +958,6 @@ class TranslationOverlay(QWidget):
 
     def _toggle_force_topmost(self, checked: bool):
         self.config["force_topmost"] = checked
+        self._sync_topmost_timer()
         self._enforce_topmost()
         self._save_config()

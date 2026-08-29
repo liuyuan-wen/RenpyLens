@@ -14,9 +14,9 @@ def build_exe():
     sys.path.append(os.path.join(os.getcwd(), "src"))
     try:
         from config import DEFAULT_CONFIG
-        version = DEFAULT_CONFIG.get("version", "v1.2.2")
+        version = DEFAULT_CONFIG.get("version", "v1.3.0")
     except ImportError:
-        version = "v1.2.2"
+        version = "v1.3.0"
 
     print(f"开始打包 RenpyLens {version}...")
     
@@ -37,6 +37,7 @@ def build_exe():
         "--onefile",   # --onedir 可以打包成一个目录
         "--paths", "src", # 将 src 目录添加到模块搜索路径
         "--add-data", "assets/_translator_hook.rpy;.", # 包含必须的资源文件
+        "--add-data", "assets/RenpyLensBridge.js;.", # RPG Maker MV/MZ 运行时桥接
         "--add-data", "assets/icon.ico;.", # 包含图标以便程序运行时提取
         "--add-data", "assets/icon.png;.", 
         "--add-data", "assets/qq.jpg;.",

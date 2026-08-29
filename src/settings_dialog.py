@@ -516,12 +516,12 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout(tab)
         vbox.setSpacing(16)
         
-        version = self.config.get("version", "v1.2.2")
+        version = self.config.get("version", "v1.3.0")
         
         info_label = QLabel(
             f'<div style="font-size: 20px; font-weight: bold; margin-bottom: 10px;">RenpyLens {version}</div>'
             '<div style="line-height: 1.5; color: #ddd; font-size: 18px;">'
-            "一款专为 Ren'Py 引擎打造的 AI 悬浮翻译器。<br>"
+            "一款支持 Ren'Py、RPG Maker MV/MZ 的 AI 悬浮翻译器。<br>"
             "<b>开发者：</b>wenliuyuan<br>"
             "<b>开源协议：</b>GPLv3<br>"
             '<b>开源项目：</b><a href="https://github.com/liuyuan-wen/RenpyLens" style="color: #4a9eff; text-decoration: none;">https://github.com/liuyuan-wen/RenpyLens</a><br>'

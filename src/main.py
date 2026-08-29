@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-RenpyLens - Ren'Py 游戏实时翻译弹窗工具
-主入口：拖入游戏 EXE → 自动注入 Hook → 启动游戏 → 实时翻译弹窗
+RenpyLens - 多引擎游戏实时翻译弹窗工具
+主入口：拖入游戏 EXE → 自动注入桥接脚本 → 启动游戏 → 实时翻译弹窗
 """
 
 import copy
@@ -13,6 +13,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from collections import deque
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -25,7 +26,7 @@ from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QColor, QPalette, QT
 from config import load_config, save_config
 from hwid_utils import get_hwid, register_trial_key, fetch_trial_key_expiry
 from hook_server import HookServer
-from translator import create_translator, KeyExpiredError
+from translator import create_translator, KeyExpiredError, RateLimitError
 from cache import (
     ENTRY_TYPE_CHOICE,
     ENTRY_TYPE_DIALOGUE,
@@ -33,7 +34,15 @@ from cache import (
     normalize_speaker_name,
 )
 from overlay import TranslationOverlay
-from injector import inject_hook, remove_hook, launch_game, is_renpy_game
+from injector import launch_game, is_game_running
+from engine_adapters import (
+    ENGINE_RENPY,
+    GameTarget,
+    detect_game,
+    install_hook,
+    scan_rpgmaker_game,
+    uninstall_hook,
+)
 from settings_dialog import SettingsDialog
 from workbench import TranslationWorkbench
 from updater import (
@@ -42,13 +51,13 @@ from updater import (
     download_release_asset,
     launch_windows_updater_script,
 )
-
-
 # 尝试从 ../assets 或 bundling 路径查找 hook script
 if getattr(sys, 'frozen', False):
     HOOK_SCRIPT = os.path.join(sys._MEIPASS, "_translator_hook.rpy")
+    RPGMAKER_BRIDGE_SCRIPT = os.path.join(sys._MEIPASS, "RenpyLensBridge.js")
 else:
     HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "_translator_hook.rpy")
+    RPGMAKER_BRIDGE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "RenpyLensBridge.js")
 
 
 class LogStream(QObject):
@@ -88,7 +97,7 @@ class MainWindow(QWidget):
         self.config = load_config()
 
         version = self.config.get("version", "v1.2.2")
-        self.setWindowTitle(f"RenpyLens {version} - Ren'Py 实时翻译")
+        self.setWindowTitle(f"RenpyLens {version} - 游戏实时翻译")
         self.resize(800, 10)
         self.setAcceptDrops(True)
 
@@ -103,7 +112,12 @@ class MainWindow(QWidget):
         self._inflight_lock = threading.Lock()
         self._text_generation = 0
         self._current_game_exe = None
+        self._current_game: GameTarget | None = None
+        self._hook_session_id = ""
+        self._runtime_token_values = {}
+        self._runtime_display_texts = {}
         self._game_process = None
+        self._selected_game_detected_running = False
         self._hook_installed = False
         self._translator_lock = threading.RLock() # 保护翻译器实例的切换与访问
         self._update_checking = False
@@ -138,6 +152,8 @@ class MainWindow(QWidget):
         # 游戏进程监控定时器
         self.game_timer = QTimer(self)
         self.game_timer.timeout.connect(self._check_game_status)
+        self.selected_game_timer = QTimer(self)
+        self.selected_game_timer.timeout.connect(self._check_selected_game_status)
         self._workbench_refresh_timer = QTimer(self)
         self._workbench_refresh_timer.setSingleShot(True)
         self._workbench_refresh_timer.timeout.connect(self._flush_workbench_refresh)
@@ -821,7 +837,7 @@ class MainWindow(QWidget):
                     else self._last_displayed_data.get("translation", "")
                 ),
                 "entry_type": ENTRY_TYPE_DIALOGUE,
-                "speaker": self._normalize_speaker(entry.get("speaker", "") or who),
+                "speaker": self._normalize_speaker(who or entry.get("speaker", "")),
             }
 
         for index, choice in enumerate(choices):
@@ -855,8 +871,8 @@ class MainWindow(QWidget):
         choices = list(self._last_displayed_data.get("choices", []))
         dialogue_entry = self.cache.get_entry(what) if what else None
         render_who = self._normalize_speaker(
-            dialogue_entry.get("speaker", "") if dialogue_entry is not None else who
-        ) or who
+            who or (dialogue_entry.get("speaker", "") if dialogue_entry is not None else "")
+        )
         current_translation = (
             dialogue_entry.get("translation", "")
             if dialogue_entry is not None
@@ -897,6 +913,17 @@ class MainWindow(QWidget):
         entry_type = payload.get("entry_type", ENTRY_TYPE_DIALOGUE)
         speaker = self._normalize_speaker(payload.get("speaker", ""))
         translation = str(payload.get("translation") or "").strip()
+        source_tokens = sorted(re.findall(r"⟦RL_(?:V|N|P|G)_\d+⟧", source))
+        translation_tokens = sorted(re.findall(r"⟦RL_(?:V|N|P|G)_\d+⟧", translation))
+        if translation and source_tokens != translation_tokens:
+            if refresh_workbench:
+                QMessageBox.warning(
+                    self,
+                    "无法保存译文",
+                    "译文中的 RPG Maker 动态占位符与原文不一致。\n"
+                    "请完整保留形如 ⟦RL_V_1⟧ 的占位符后再保存。",
+                )
+            return None
         saved_entry = self.cache.save_manual_translation(
             source,
             translation,
@@ -1467,11 +1494,14 @@ class MainWindow(QWidget):
     # --- 拖放 ---
     def _connect_hook_server_signals(self, server: HookServer):
         server.text_received.connect(self._on_text_received)
+        server.text_event_received.connect(self._on_text_event_received)
         server.prefetch_received.connect(self._on_prefetch_received)
         server.message_received.connect(self._on_hook_message_received)
 
     def _start_hook_server(self):
         self.server = HookServer(port=self.config["socket_port"])
+        if self._current_game and self._current_game.engine != ENGINE_RENPY:
+            self.server.set_expected_session(self._hook_session_id)
         self._connect_hook_server_signals(self.server)
         self.server.start()
         print(f"[Main] Socket server started, port: {self.config['socket_port']}")
@@ -1549,6 +1579,9 @@ class MainWindow(QWidget):
         source_clean = self._clean_translation_result(source_text)
         clean_translation = self._clean_translation_result(raw_translation)
         original_translation_length = len(clean_translation)
+        placeholder_pattern = r"⟦RL_[A-Z]+(?:_\d+)?⟧"
+        source_placeholders = sorted(re.findall(placeholder_pattern, source_clean))
+        result_placeholders = sorted(re.findall(placeholder_pattern, clean_translation))
 
         if clean_translation.startswith("[翻译失败"):
             return {
@@ -1572,6 +1605,8 @@ class MainWindow(QWidget):
                 ratio_cutoff = ratio_limit
 
         candidates: list[tuple[str, int]] = []
+        if source_placeholders != result_placeholders:
+            candidates.append(("placeholder_mismatch", 0))
         if repeat_cutoff is not None:
             candidates.append(("repeat_char", repeat_cutoff))
         if ratio_cutoff is not None:
@@ -1763,8 +1798,11 @@ class MainWindow(QWidget):
         return clean_detail or "未知错误"
 
     def _build_bulk_translate_message(self) -> str:
+        scan_description = "🧩 自动打开游戏，读取所有文本，分批进行大模型翻译。"
+        if self._current_game and self._current_game.capabilities.offline_scan:
+            scan_description = "🧩 离线读取 RPG Maker 数据文件，无需启动游戏，随后分批翻译。"
         parts = [
-            "🧩 自动打开游戏，读取所有文本，分批进行大模型翻译。",
+            scan_description,
             "💾 翻译结果会保存到配置目录中的 <code>translation_cache.db</code>。",
         ]
         return "<br><br>".join(parts)
@@ -1874,7 +1912,7 @@ class MainWindow(QWidget):
 
     def _on_workbench_bulk_translate_requested(self):
         if not self._current_game_exe:
-            QMessageBox.warning(self, "未选择游戏", "请先选择一个 Ren'Py 游戏后再使用“一键翻译全游戏”。")
+            QMessageBox.warning(self, "未选择游戏", "请先选择一个受支持的游戏后再使用“一键翻译全游戏”。")
             return
         if self._is_bulk_job_active():
             QMessageBox.information(self, "任务进行中", "一键翻译全游戏任务已经在进行中。")
@@ -1906,14 +1944,18 @@ class MainWindow(QWidget):
             self._bulk_job["stage_message"] = "0% · 正在取消..."
             job_id = str(self._bulk_job.get("job_id") or "")
         self._bulk_ui_signal.emit({"action": "sync"})
-        if job_id:
+        if job_id and self._current_game and self._current_game.engine == ENGINE_RENPY:
             ok, err = self._send_hook_control_command("cancel_scan", {"job_id": job_id})
             if not ok:
                 print(f"[Bulk] Failed to send cancel command: {err}")
 
     def _bootstrap_bulk_job(self, job_id: str):
-        if not self._current_game_exe:
+        if not self._current_game_exe or not self._current_game:
             self._finish_bulk_job(job_id, "failed", "❌ 未选择游戏，无法开始全量翻译。")
+            return
+
+        if self._current_game.capabilities.offline_scan:
+            self._bootstrap_rpgmaker_bulk_job(job_id)
             return
 
         with self._bulk_job_lock:
@@ -1922,11 +1964,18 @@ class MainWindow(QWidget):
             self._bulk_job["stage_message"] = "0% · 正在注入最新 Hook..."
         self._bulk_ui_signal.emit({"action": "sync"})
 
-        ok, msg = inject_hook(self._current_game_exe, HOOK_SCRIPT, self.config.get("socket_port", 19876))
+        ok, msg = install_hook(
+            self._current_game,
+            HOOK_SCRIPT,
+            RPGMAKER_BRIDGE_SCRIPT,
+            self.config.get("socket_port", 19876),
+            self._hook_session_id,
+        )
         if not ok:
             self._finish_bulk_job(job_id, "failed", f"❌ 注入 Hook 失败：{msg}")
             return
 
+        print(f"[Bulk] {msg}")
         self._hook_installed = True
         if not self._hook_session_ready:
             if self._is_game_process_running():
@@ -2005,6 +2054,53 @@ class MainWindow(QWidget):
                 "failed",
                 f"❌ 无法连接新版 Hook 控制通道（{err}）。请通过 RenpyLens 重新注入并重启游戏后再试。",
             )
+
+    def _bootstrap_rpgmaker_bulk_job(self, job_id: str):
+        with self._bulk_job_lock:
+            if self._bulk_job.get("job_id") != job_id:
+                return
+            self._bulk_job["state"] = "scanning"
+            self._bulk_job["stage_message"] = "0% · 正在离线扫描 RPG Maker 数据..."
+            self._bulk_job["scan_entries"] = {}
+        self._bulk_ui_signal.emit({"action": "sync"})
+
+        def cancel_requested():
+            with self._bulk_job_lock:
+                return (
+                    self._bulk_job.get("job_id") != job_id
+                    or bool(self._bulk_job.get("cancel_requested"))
+                )
+
+        def on_chunk(items):
+            with self._bulk_job_lock:
+                if self._bulk_job.get("job_id") != job_id:
+                    return
+                scan_entries = self._bulk_job.get("scan_entries", {})
+                for item in items or []:
+                    source = str((item or {}).get("source") or "").strip()
+                    if source and source not in scan_entries:
+                        scan_entries[source] = dict(item)
+                self._bulk_job["stage_message"] = (
+                    f"0% · 正在离线扫描 RPG Maker 数据... 已发现 {len(scan_entries)} 条"
+                )
+            self._bulk_ui_signal.emit({"action": "sync"})
+
+        try:
+            entries = scan_rpgmaker_game(
+                self._current_game,
+                on_chunk=on_chunk,
+                cancel_requested=cancel_requested,
+            )
+        except Exception as exc:
+            self._finish_bulk_job(job_id, "failed", f"❌ 扫描 RPG Maker 数据失败：{exc}")
+            return
+
+        if cancel_requested():
+            self._finish_bulk_job(job_id, "cancelled", "⚠️ 已取消全游戏翻译。")
+            return
+        self._on_hook_message_received(
+            {"type": "bulk_scan_finished", "job_id": job_id, "total": len(entries)}
+        )
 
     def _on_hook_message_received(self, message: dict):
         msg_type = str((message or {}).get("type") or "").strip()
@@ -2248,6 +2344,8 @@ class MainWindow(QWidget):
                     "failed",
                     f"❌ 全游戏翻译未完成：{covered_count}/{total_texts}",
                 )
+        except RateLimitError as e:
+            self._finish_bulk_job(job_id, "failed", f"⚠️ 全游戏翻译已暂停：{e}")
         except KeyExpiredError as e:
             self._key_expired_signal.emit()
             self._finish_bulk_job(job_id, "failed", f"❌ 全游戏翻译失败：{e}")
@@ -2281,7 +2379,7 @@ class MainWindow(QWidget):
         last_dir = self.config.get("last_game_dir", "")
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "选择 Ren'Py 游戏 EXE",
+            "选择游戏 EXE（Ren'Py / RPG Maker MV/MZ）",
             last_dir,
             "可执行文件 (*.exe);;所有文件 (*)",
         )
@@ -2293,29 +2391,73 @@ class MainWindow(QWidget):
 
     def _select_game(self, exe_path: str):
         """选中游戏 EXE（仅记录路径，不注入不启动）"""
-        if not is_renpy_game(exe_path):
-            QMessageBox.warning(self, "不是 Ren'Py 游戏",
-                                f"未检测到 Ren'Py 游戏结构：\n{exe_path}\n\n"
-                                "请确认该 .exe 是一个 Ren'Py 游戏。\n\n"
+        target = detect_game(exe_path)
+        if not target:
+            QMessageBox.warning(self, "不支持的游戏",
+                                f"未检测到支持的游戏结构：\n{exe_path}\n\n"
+                                "当前支持 Ren'Py、RPG Maker MV 和 RPG Maker MZ。\n\n"
                                 f"{self._support_tip()}")
-            self.status_label.setText(f"检测失败 - 不是 Ren'Py 游戏。{self._support_tip()}")
+            self.status_label.setText(f"检测失败 - 不支持的游戏。{self._support_tip()}")
             return
 
+        self._current_game = target
         self._current_game_exe = exe_path
+        self._hook_session_id = uuid.uuid4().hex
+        if hasattr(self, "server") and self.server:
+            self.server.set_expected_session(
+                self._hook_session_id if target.engine != ENGINE_RENPY else ""
+            )
+        self._runtime_token_values.clear()
+        self._runtime_display_texts.clear()
         self._reset_hook_session_state()
         name = os.path.basename(exe_path)
         self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}')
-        self.status_label.setText(f"已选择: {name}")
-        self.cache.set_game(exe_path)
+        self.status_label.setText(f"已选择: {name} · {target.engine_label}")
+        self.cache.set_game(
+            exe_path,
+            game_id=target.cache_id,
+            migrate_legacy=target.engine == ENGINE_RENPY,
+        )
         if hasattr(self, "workbench") and self.workbench:
             self.workbench.set_game_title(self.game_title)
         self.btn_clear_cache.setEnabled(not self.cache.is_empty())
         self.btn_workbench_toggle.setEnabled(True)
-        self.btn_start_game.setEnabled(True)
+        self._set_selected_game_running_state(is_game_running(exe_path))
         self.btn_uninstall.setEnabled(False)
         self._hook_installed = False
         self._refresh_workbench_entries()
         print(f"[Main] Game selected: {exe_path}")
+
+    def _set_selected_game_running_state(self, running: bool):
+        """Keep the start action disabled while the selected EXE is already running."""
+        self._selected_game_detected_running = bool(running)
+        if not self._current_game_exe:
+            self.selected_game_timer.stop()
+            return
+
+        name = os.path.basename(self._current_game_exe)
+        if running:
+            self.btn_start_game.setEnabled(False)
+            self.drop_label.setText(
+                f'<span style="font-size: 48px;">🎮</span><br>{name}'
+                '<br><span style="color:#ffb454;">游戏已在运行，请先关闭</span>'
+            )
+            self.status_label.setText(f"⚠️ 检测到 {name} 已在运行，请先关闭游戏后再装载 Hook")
+            self.selected_game_timer.start(1000)
+            return
+
+        self.selected_game_timer.stop()
+        self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}')
+        self.status_label.setText(f"已选择: {name}")
+        self.btn_start_game.setEnabled(not self._is_bulk_job_active())
+
+    def _check_selected_game_status(self):
+        """Re-enable start automatically after an externally opened game exits."""
+        if not self._current_game_exe or self._game_process:
+            self.selected_game_timer.stop()
+            return
+        if not is_game_running(self._current_game_exe):
+            self._set_selected_game_running_state(False)
 
     def _on_clear_cache(self):
         """清除当前游戏的翻译缓存"""
@@ -2333,7 +2475,15 @@ class MainWindow(QWidget):
         exe_path = self._current_game_exe
         self.status_label.setText(f"正在注入 Hook...")
 
-        ok, msg = inject_hook(exe_path, HOOK_SCRIPT, self.config.get("socket_port", 19876))
+        if not self._current_game:
+            return
+        ok, msg = install_hook(
+            self._current_game,
+            HOOK_SCRIPT,
+            RPGMAKER_BRIDGE_SCRIPT,
+            self.config.get("socket_port", 19876),
+            self._hook_session_id,
+        )
         if not ok:
             QMessageBox.critical(self, "注入失败", f"{msg}\n\n{self._support_tip()}")
             self.status_label.setText(f"注入失败: {msg}。{self._support_tip()}")
@@ -2346,23 +2496,31 @@ class MainWindow(QWidget):
         self.btn_uninstall.setEnabled(True)
         self.btn_start_game.setEnabled(True)
         self._hook_installed = True
-        print(f"[Main] Hook injected: {exe_path}")
+        print(f"[Main] {msg}")
 
     def _on_start_game(self):
         """开始游戏：若未装载 Hook 则自动装载，然后启动游戏"""
         if not self._current_game_exe:
+            return
+        if is_game_running(self._current_game_exe):
+            self._set_selected_game_running_state(True)
             return
         # 若尚未装载 Hook，自动装载
         if not self._hook_installed:
             self._on_install_hook()
             if not self._hook_installed:
                 return  # 装载失败，中止
-        
+
+        exe_path = self._current_game_exe
+        # 注入期间游戏也可能被从外部启动；再次检查以避免重复启动实例。
+        if is_game_running(exe_path):
+            self._set_selected_game_running_state(True)
+            return
+
         # 启动游戏时，禁用引擎切换，防止竞态冲突
         self._set_translation_controls_enabled(False)
         self._reset_hook_session_state()
-        
-        exe_path = self._current_game_exe
+
         self.status_label.setText("正在启动游戏...")
 
         self._game_process = launch_game(exe_path)
@@ -2605,8 +2763,8 @@ class MainWindow(QWidget):
         save_config(self.config)
 
     def _on_uninstall(self):
-        if self._current_game_exe:
-            ok, msg = remove_hook(self._current_game_exe)
+        if self._current_game:
+            ok, msg = uninstall_hook(self._current_game)
             if ok:
                 self.status_label.setText(f"已卸载: {msg}")
                 self.btn_uninstall.setEnabled(False)
@@ -2623,6 +2781,8 @@ class MainWindow(QWidget):
     @property
     def game_title(self) -> str:
         """从当前游戏 EXE 路径提取游戏名称（去除 .exe 扩展名）"""
+        if self._current_game and self._current_game.title:
+            return self._current_game.title
         if not self._current_game_exe:
             return "Unknown Game"
         name = os.path.basename(self._current_game_exe)
@@ -2631,6 +2791,43 @@ class MainWindow(QWidget):
         return name
 
     # --- 文本处理 ---
+    def _on_text_event_received(self, event: dict):
+        """Handle the structured protocol used by RPG Maker bridges."""
+        event = event or {}
+        current = dict(event.get("current") or {})
+        source = str(current.get("source") or current.get("display_text") or "").strip()
+        display_text = str(current.get("display_text") or source).strip()
+        if source:
+            self._runtime_token_values[source] = dict(current.get("token_values") or {})
+            self._runtime_display_texts[source] = display_text
+
+        choice_sources = []
+        for choice in event.get("choices", []) or []:
+            if not isinstance(choice, dict):
+                continue
+            choice_source = str(choice.get("source") or choice.get("display_text") or "").strip()
+            if not choice_source:
+                continue
+            choice_sources.append(choice_source)
+            self._runtime_token_values[choice_source] = dict(choice.get("token_values") or {})
+            self._runtime_display_texts[choice_source] = str(
+                choice.get("display_text") or choice_source
+            ).strip()
+
+        self._on_text_received(
+            str(current.get("who") or ""),
+            source,
+            bool(current.get("italic", False)),
+            choice_sources,
+            bool(event.get("menu_active", False)),
+        )
+
+    def _resolve_runtime_tokens(self, text: str, source: str) -> str:
+        value = str(text or "")
+        for token, replacement in self._runtime_token_values.get(str(source or ""), {}).items():
+            value = value.replace(str(token), str(replacement or ""))
+        return value
+
     def _on_text_received(
         self,
         who: str,
@@ -2727,7 +2924,7 @@ class MainWindow(QWidget):
 
         # 2) 无论缓存命中与否，都检查预取缓冲区是否充裕
         #    inflight 的句子会被视为已就绪而跳过
-        if not self._is_bulk_job_active():
+        if not need_async and not self._is_bulk_job_active():
             self._ensure_prefetch_buffer(gen)
 
     def _preview_text(self, text: str, limit: int = 60) -> str:
@@ -2790,6 +2987,28 @@ class MainWindow(QWidget):
             stolen += 1
         return stolen
 
+    def _release_outdated_inflight_for_current(self, texts: list[str], gen: int) -> int:
+        """Let visible text take priority over stale prefetch or older page work."""
+        now = time.perf_counter()
+        released = 0
+        for text in texts:
+            if not text or self.cache.get(text) is not None or text not in self._inflight_texts:
+                continue
+            meta = self._inflight_meta.get(text, {})
+            owner = str(meta.get("owner") or "")
+            meta_gen = meta.get("gen")
+            if owner == "prefetch" or (meta_gen is not None and meta_gen != gen):
+                age = now - float(meta.get("started", now))
+                print(
+                    f"[Inflight] release for current owner={owner or '?'} "
+                    f"gen={meta_gen} current_gen={gen} age={age:.1f}s "
+                    f"text={self._preview_text(text)}"
+                )
+                self._inflight_texts.discard(text)
+                self._inflight_meta.pop(text, None)
+                released += 1
+        return released
+
     def _translate_batch_with_current(
         self,
         who: str,
@@ -2839,9 +3058,14 @@ class MainWindow(QWidget):
                     who, what, current_result, italic, choices=visible_choices, choice_translations=choice_results
                 )
                 self.translation_ready.emit(display)
+                if not self._is_bulk_job_active():
+                    self._ensure_prefetch_buffer(gen)
             return
 
         # 如果当前句和菜单选项都被其他线程翻译中，则等待缓存就绪而非重复翻译
+        with self._inflight_lock:
+            self._release_outdated_inflight_for_current(required_texts, gen)
+
         with self._inflight_lock:
             required_inflight = [t for t in required_texts if t in self._inflight_texts]
         if required_inflight and len(required_inflight) == len(required_texts):
@@ -2887,9 +3111,7 @@ class MainWindow(QWidget):
             # 超时仍未就绪 → 继续走翻译流程
 
         t_build_start = _time.perf_counter()
-        prefetch_count = 0 if self._is_bulk_job_active() else self.config.get("prefetch_count", 5)
-        prefetch_added = 0
-        # 构建批量列表：当前句 + 菜单选项（优先）+ 预取项中未缓存且未在翻译中的
+        # 构建实时批次：只包含当前句 + 当前菜单选项，预取稍后单独补。
         seen = set()
         with self._inflight_lock:
             for text in required_texts:
@@ -2899,16 +3121,6 @@ class MainWindow(QWidget):
                     batch_texts.append(text)
                     seen.add(text)
 
-            for item in self._latest_prefetch_items:
-                if prefetch_added >= prefetch_count:
-                    break
-                text = item.get("what", "")
-                if text and text not in seen \
-                        and self.cache.get(text) is None \
-                        and text not in self._inflight_texts:
-                    batch_texts.append(text)
-                    seen.add(text)
-                    prefetch_added += 1
             # 标记 inflight（在锁内完成，防止其他线程同时标记）
             self._mark_inflight(batch_texts, owner="batch-current", gen=gen)
             if batch_texts:
@@ -2979,7 +3191,7 @@ class MainWindow(QWidget):
         if not batch_texts:
             return
 
-        print(f"[Batch] Batch translating {len(batch_texts)} items (current+choices+prefetch, gen={gen})")
+        print(f"[Batch] Batch translating {len(batch_texts)} current items (gen={gen})")
 
         # 防抖：万事俱备，等待一小段时间，如果用户翻页了就跳过 API 调用
         debounce_ms = self.config.get("debounce_ms", 200)
@@ -2995,6 +3207,15 @@ class MainWindow(QWidget):
         try:
             t_api_start = _time.perf_counter()
             with self._translator_lock:
+                # Older current-line workers may have queued behind a slow
+                # prefetch call.  Do not let them issue obsolete API requests
+                # after they finally acquire the translator lock.
+                if self._text_generation != gen:
+                    print(
+                        f"[Batch] Skipping outdated request after lock wait "
+                        f"(gen={gen}→{self._text_generation})"
+                    )
+                    return
                 if not self.translator:
                     return
                 results = self.translator.translate_batch(
@@ -3048,6 +3269,9 @@ class MainWindow(QWidget):
             else:
                 print(f"[Batch] Translation done but user turned page, result cached only (gen={gen}→{self._text_generation})")
 
+            if self._text_generation == gen and not self._is_bulk_job_active():
+                self._ensure_prefetch_buffer(gen)
+
             t_pipeline_end = _time.perf_counter()
             if timing_enabled:
                 build_ms = (t_build_end - t_build_start) * 1000
@@ -3073,6 +3297,20 @@ class MainWindow(QWidget):
                 print(f"  📝 Result parse: {parse_ms:.1f}ms")
                 print(f"  ⏱️  Total:        {total_ms:.0f}ms")
                 print(f"{'='*60}\n")
+        except RateLimitError as e:
+            if self._text_generation == gen:
+                current_result = f"[翻译受限：{e}]" if what else ""
+                choice_results = [self.cache.get(choice) or f"[翻译受限：{e}]" for choice in visible_choices]
+                display = self._format_display(
+                    who,
+                    what,
+                    current_result,
+                    italic,
+                    choices=visible_choices,
+                    choice_translations=choice_results,
+                )
+                self.translation_ready.emit(display)
+            self._status_signal.emit(f"⚠️ {e}")
         except KeyExpiredError as e:
             if self._text_generation == gen:
                 current_result = f"[{e}]" if what else ""
@@ -3200,6 +3438,15 @@ class MainWindow(QWidget):
         try:
             t_api_start = _time.perf_counter()
             with self._translator_lock:
+                # The generation can change while this prefetch worker waits
+                # for another translation.  Avoid starting stale work once the
+                # shared translator becomes available.
+                if self._text_generation != gen or self._is_bulk_job_active():
+                    print(
+                        f"[Prefetch] Skipping outdated request after lock wait "
+                        f"(gen={gen}→{self._text_generation})"
+                    )
+                    return
                 if not self.translator:
                     return
                 results = self.translator.translate_batch(
@@ -3246,6 +3493,8 @@ class MainWindow(QWidget):
                 print(f"  🌐 API call:     {api_ms:.0f}ms (network+server){api_detail}")
                 print(f"  ⏱️  Total:        {total_ms:.0f}ms")
                 print(f"{'─'*60}\n")
+        except RateLimitError as e:
+            self._status_signal.emit(f"⚠️ 预取已暂停：{e}")
         except KeyExpiredError:
             self._key_expired_signal.emit()
         except Exception as e:
@@ -3349,12 +3598,12 @@ class MainWindow(QWidget):
         if first_is_caption:
             # 如果 choices[0] 就是说明，则直接显示翻译后的它，且不带编号
             trans = choice_translations[0] if choice_translations else ""
-            clean_c = _clean_line(trans)
+            clean_c = _clean_line(self._resolve_runtime_tokens(trans, choices[0]))
             if clean_c:
                 lines.append(clean_c)
         else:
             # 否则，如果 original (what) 有翻译结果，将其作为说明/对话显示
-            d_line = _clean_line(translation)
+            d_line = _clean_line(self._resolve_runtime_tokens(translation, original))
             if d_line:
                 if italic:
                     d_line = f"<i>{d_line}</i>"
@@ -3366,7 +3615,7 @@ class MainWindow(QWidget):
         choice_start_idx = 1 if first_is_caption else 0
         for i in range(choice_start_idx, len(choices)):
             trans = choice_translations[i] if i < len(choice_translations) else ""
-            clean_trans = _clean_line(trans)
+            clean_trans = _clean_line(self._resolve_runtime_tokens(trans, choices[i]))
             if clean_trans:
                 idx_num = i + 1 - choice_start_idx
                 lines.append(f"[{idx_num}] {clean_trans}")
@@ -3382,8 +3631,8 @@ class MainWindow(QWidget):
         # 保存配置
         save_config(self.config)
         # 清理 hook
-        if self._current_game_exe:
-            remove_hook(self._current_game_exe)
+        if self._current_game:
+            uninstall_hook(self._current_game)
         # 停止服务器
         self.server.stop()
         if hasattr(self, "workbench") and self.workbench:
@@ -3422,9 +3671,6 @@ def main():
     # 先清理可能残留的旧进程
     kill_port_process(19876)
 
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-
     # 设置任务栏和窗口图标
     try:
         import ctypes
@@ -3433,6 +3679,9 @@ def main():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     except Exception:
         pass
+
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
 
     # 兼容 PyInstaller 运行时的 _MEIPASS 路径
     if getattr(sys, 'frozen', False):
@@ -3455,6 +3704,7 @@ def main():
     app.setPalette(palette)
 
     window = MainWindow()
+    window.setWindowIcon(app.windowIcon())
     window.show()
     sys.exit(app.exec_())
 

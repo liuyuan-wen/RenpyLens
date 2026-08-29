@@ -15,7 +15,7 @@ else:
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "v1.2.2",
+    "version": "v1.3.0",
     "translation_engine": "builtin",
     "gemini_api_key": "",
     "gemini_url": "https://generativelanguage.googleapis.com",
@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     "builtin_api_expiry": "",
     "builtin_nodes": [
         {"name": "中国大陆节点", "url": "https://frp-bar.com:50588/"},
-        {"name": "海外/备用节点", "url": "https://flush-communities-maintained-polyester.trycloudflare.com"},
+        {"name": "海外/备用节点（暂时失效）", "url": "https://flush-communities-maintained-polyester.trycloudflare.com"},
     ],
     "openai_api_key": "",
     "openai_url": "https://api.openai.com",

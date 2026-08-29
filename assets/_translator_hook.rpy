@@ -10,6 +10,8 @@ init python:
     _translator_control_port = {{CONTROL_PORT}}
     _translator_last_menu_signature = None
     _translator_last_current_msg = None
+    _translator_last_visible_signature = None
+    _translator_last_resolved_who = ""
     _translator_scan_running = False
     _translator_scan_cancel_requested = False
     _translator_runtime_ready_sent = False
@@ -249,9 +251,88 @@ init python:
             text,
         )
         if class_match:
-            return class_match.group(1)
+            return ""
 
-        return " ".join(text.split())
+        # Do not leak unresolved interpolation or Python/Ren'Py object
+        # representations into the user-facing speaker label.
+        if _tre.search(r"\[[^\]]+\]", text):
+            return ""
+        if _tre.search(r"\bobject at 0x[0-9a-f]+\b", text, _tre.IGNORECASE):
+            return ""
+        if _tre.match(r"^<(?:function|bound method|renpy\.)", text, _tre.IGNORECASE):
+            return ""
+        if len(text) > 120:
+            return ""
+
+        text = " ".join(text.split())
+        if _tre.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", text):
+            text = _tre.sub(r"_t$", "", text, flags=_tre.IGNORECASE)
+            text = text.replace("_", " ")
+        return text
+
+    def _translator_get_side_image_speaker(renpy):
+        import os as _tos
+
+        try:
+            attrs = getattr(renpy.store, "_side_image_attributes", None)
+            if not attrs:
+                return ""
+
+            prefix = getattr(renpy.config, "side_image_prefix_tag", "side") or "side"
+            image_name = renpy.get_side_image(prefix, not_showing=False)
+            if not image_name:
+                return ""
+
+            if not isinstance(image_name, tuple):
+                image_name = tuple(str(image_name).split())
+
+            image_module = getattr(getattr(renpy, "display", None), "image", None)
+            image_map = getattr(image_module, "images", None) or {}
+            displayable = image_map.get(image_name)
+            seen = set()
+            while displayable is not None and id(displayable) not in seen:
+                seen.add(id(displayable))
+                filename = getattr(displayable, "filename", None)
+                if filename:
+                    basename = _tos.path.basename(str(filename).replace("\\", "/"))
+                    stem = _tos.path.splitext(basename)[0]
+                    return _translator_normalize_speaker(stem)
+
+                target = getattr(displayable, "target", None)
+                if target is None:
+                    break
+                displayable = target
+        except Exception:
+            pass
+        return ""
+
+    def _translator_choose_visible_speaker(visible, side_speaker):
+        visible = _translator_normalize_speaker(visible)
+        side_speaker = _translator_normalize_speaker(side_speaker)
+        if not visible:
+            return side_speaker
+
+        # Generic NPC labels are often paired with a side image whose file
+        # contains the actual on-screen role/name (for example npc 6 ->
+        # faces/dude.webp). Do not replace normal character names this way.
+        if visible.lower() in ("npc", "unknown", "character") and side_speaker:
+            return side_speaker
+        return visible
+
+    def _translator_apply_speaker_state(value, continuation=False):
+        global _translator_last_resolved_who
+
+        normalized = _translator_normalize_speaker(value)
+        if normalized.lower() == "extend":
+            continuation = True
+            normalized = ""
+
+        if normalized:
+            _translator_last_resolved_who = normalized
+            return normalized
+        if continuation:
+            return _translator_last_resolved_who
+        return ""
 
     def _translator_lookup_name_values(renpy, name):
         results = []
@@ -306,27 +387,60 @@ init python:
             return ""
 
     def _translator_get_visible_who(renpy):
-        for screen_name in ("say", "multiple_say", "nvl"):
-            try:
-                screen_obj = renpy.get_screen(screen_name)
-                if screen_obj is not None:
-                    scope = getattr(screen_obj, "scope", None)
-                    if scope and "who" in scope:
-                        visible = _translator_normalize_speaker(
-                            _translator_clean_text(renpy, scope.get("who"))
-                        )
-                        if visible:
-                            return visible
-            except Exception:
-                pass
+        side_speaker = _translator_get_side_image_speaker(renpy)
 
+        for screen_name in ("say", "multiple_say", "nvl"):
+            # The rendered widget is authoritative. A custom say screen may
+            # receive an internal key such as "npc" in its scope, while the
+            # Text widget actually shown to the player contains "DUDE".
             try:
                 widget = renpy.get_widget(screen_name, "who")
                 visible = _translator_normalize_speaker(
                     _translator_extract_widget_text(renpy, widget)
                 )
                 if visible:
-                    return visible
+                    return _translator_choose_visible_speaker(visible, side_speaker)
+            except Exception:
+                pass
+
+            try:
+                screen_obj = renpy.get_screen(screen_name)
+                if screen_obj is not None:
+                    widgets = getattr(screen_obj, "widgets", None) or {}
+                    for widget_id, widget in widgets.items():
+                        normalized_id = str(widget_id or "").lower().replace("-", "_")
+                        if not any(token in normalized_id for token in ("who", "speaker", "name")):
+                            continue
+                        visible = _translator_normalize_speaker(
+                            _translator_extract_widget_text(renpy, widget)
+                        )
+                        if visible:
+                            return _translator_choose_visible_speaker(visible, side_speaker)
+            except Exception:
+                pass
+
+            try:
+                screen_obj = renpy.get_screen(screen_name)
+                if screen_obj is not None:
+                    scope = getattr(screen_obj, "scope", None) or {}
+                    for scope_key, scope_value in scope.items():
+                        normalized_key = str(scope_key or "").lower().replace("-", "_")
+                        if normalized_key == "who":
+                            continue
+                        if not any(token in normalized_key for token in ("speaker", "name")):
+                            continue
+                        visible = _translator_normalize_speaker(
+                            _translator_clean_text(renpy, scope_value)
+                        )
+                        if visible:
+                            return _translator_choose_visible_speaker(visible, side_speaker)
+
+                    if "who" in scope:
+                        visible = _translator_normalize_speaker(
+                            _translator_clean_text(renpy, scope.get("who"))
+                        )
+                        if visible:
+                            return _translator_choose_visible_speaker(visible, side_speaker)
             except Exception:
                 pass
 
@@ -335,6 +449,38 @@ init python:
             visible = _translator_normalize_speaker(
                 _translator_extract_widget_text(renpy, widget)
             )
+            if visible:
+                return _translator_choose_visible_speaker(visible, side_speaker)
+        except Exception:
+            pass
+
+        return side_speaker
+
+    def _translator_get_visible_what(renpy):
+        for screen_name in ("say", "multiple_say", "nvl"):
+            try:
+                screen_obj = renpy.get_screen(screen_name)
+                if screen_obj is not None:
+                    scope = getattr(screen_obj, "scope", None)
+                    if scope and "what" in scope:
+                        visible = _translator_clean_text(renpy, scope.get("what"))
+                        if visible:
+                            return visible
+            except Exception:
+                pass
+
+            for widget_id in ("what", "dialogue", "text"):
+                try:
+                    widget = renpy.get_widget(screen_name, widget_id)
+                    visible = _translator_extract_widget_text(renpy, widget)
+                    if visible:
+                        return visible
+                except Exception:
+                    pass
+
+        try:
+            widget = renpy.get_widget(None, "what")
+            visible = _translator_extract_widget_text(renpy, widget)
             if visible:
                 return visible
         except Exception:
@@ -478,11 +624,12 @@ init python:
             "target": _translator_node_debug(next_node),
         }
 
-    def _translator_extract_menu_choices(renpy, menu_node):
+    def _translator_extract_menu_entries(renpy, menu_node):
+        caption = ""
         choices = []
         seen = set()
         if not menu_node or menu_node.__class__.__name__ != "Menu" or not hasattr(menu_node, "items"):
-            return choices
+            return caption, choices
 
         for item in (menu_node.items or []):
             if not item or len(item) < 1:
@@ -490,10 +637,24 @@ init python:
             if not _translator_menu_item_is_visible(renpy, item):
                 continue
             clean_choice = _translator_clean_text(renpy, item[0])
-            if clean_choice and clean_choice not in seen:
+            if not clean_choice:
+                continue
+
+            # Ren'Py stores a menu caption as an item without a branch block.
+            # It is explanatory text, not a selectable option.
+            branch = item[2] if len(item) >= 3 else None
+            if not branch:
+                if not caption:
+                    caption = clean_choice
+                continue
+
+            if clean_choice not in seen:
                 seen.add(clean_choice)
                 choices.append(clean_choice)
-        return choices
+        return caption, choices
+
+    def _translator_extract_menu_choices(renpy, menu_node):
+        return _translator_extract_menu_entries(renpy, menu_node)[1]
 
     def _translator_collect_branch_nodes(node, queue):
         next_node = getattr(node, "next", None)
@@ -663,13 +824,14 @@ init python:
                     for item in (node.items or []):
                         if not item or len(item) < 1:
                             continue
-                        choice_text = _translator_clean_text(renpy, item[0])
-                        if choice_text and choice_text not in seen_sources:
-                            seen_sources.add(choice_text)
+                        menu_text = _translator_clean_text(renpy, item[0])
+                        if menu_text and menu_text not in seen_sources:
+                            seen_sources.add(menu_text)
+                            branch = item[2] if len(item) >= 3 else None
                             batch.append(
                                 {
-                                    "source": choice_text,
-                                    "entry_type": "choice",
+                                    "source": menu_text,
+                                    "entry_type": "choice" if branch else "dialogue",
                                     "speaker": "",
                                 }
                             )
@@ -760,21 +922,24 @@ init python:
         import renpy
 
         global _translator_last_menu_signature
+        global _translator_last_current_msg
+        global _translator_last_visible_signature
         try:
             _translator_mark_runtime_ready()
             cur = _translator_get_current_node(renpy)
             if cur and cur.__class__.__name__ == "Menu":
-                choices = _translator_extract_menu_choices(renpy, cur)
-                signature = tuple(choices)
+                caption, choices = _translator_extract_menu_entries(renpy, cur)
+                signature = (caption, tuple(choices))
                 if choices and signature != _translator_last_menu_signature:
                     _translator_last_menu_signature = signature
+                    _translator_last_visible_signature = None
                     _translator_start_thread(
                         _translator_send,
                         (
                             {
                                 "type": "current",
                                 "who": "",
-                                "what": "",
+                                "what": caption,
                                 "italic": False,
                                 "choices": choices,
                                 "menu_active": True,
@@ -783,6 +948,27 @@ init python:
                     )
             else:
                 _translator_last_menu_signature = None
+
+                visible_what = _translator_get_visible_what(renpy)
+                if visible_what:
+                    visible_who = _translator_get_visible_who(renpy)
+                    visible_who = _translator_apply_speaker_state(
+                        visible_who,
+                        continuation=str(visible_who or "").strip().lower() == "extend",
+                    )
+                    signature = (visible_who, visible_what)
+                    if signature != _translator_last_visible_signature:
+                        _translator_last_visible_signature = signature
+                        msg = {
+                            "type": "current",
+                            "who": visible_who,
+                            "what": visible_what,
+                            "italic": False,
+                            "choices": [],
+                            "menu_active": False,
+                        }
+                        _translator_last_current_msg = dict(msg)
+                        _translator_start_thread(_translator_send, (msg,))
         except Exception:
             pass
 
@@ -793,14 +979,15 @@ init python:
 
         try:
             visible_who = _translator_get_visible_who(renpy)
+            visible_who = _translator_apply_speaker_state(
+                visible_who,
+                continuation=str(visible_who or "").strip().lower() == "extend",
+            )
             if not visible_who:
                 return
 
             current_who = str(_translator_last_current_msg.get("who", "") or "").strip()
             if current_who == visible_who:
-                return
-
-            if current_who and current_who.upper() not in ("MC", "PLAYER"):
                 return
 
             refreshed = dict(_translator_last_current_msg)
@@ -814,6 +1001,7 @@ init python:
         import renpy
 
         global _translator_last_current_msg
+        global _translator_last_visible_signature
 
         if event == "begin":
             what = kwargs.get("what", "")
@@ -840,8 +1028,13 @@ init python:
 
             visible_who = _translator_get_visible_who(renpy)
             who = _translator_resolve_who(renpy, raw_who, cur)
-            if visible_who and (not who or str(who).strip().upper() in ("MC", "PLAYER")):
+            if visible_who:
                 who = visible_who
+            continuation = (
+                str(raw_who or "").strip().lower() == "extend"
+                or str(who or "").strip().lower() == "extend"
+            )
+            who = _translator_apply_speaker_state(who, continuation=continuation)
 
             is_italic = False
             stripped_what = what.strip()
@@ -852,21 +1045,29 @@ init python:
 
             choices = []
             seen_choices = set()
+            menu_caption = ""
 
             def _collect_menu_choices(menu_node):
-                for clean_choice in _translator_extract_menu_choices(renpy, menu_node):
+                global_caption, menu_choices = _translator_extract_menu_entries(renpy, menu_node)
+                for clean_choice in menu_choices:
                     if clean_choice not in seen_choices:
                         seen_choices.add(clean_choice)
                         choices.append(clean_choice)
+                return global_caption
 
-            _collect_menu_choices(cur)
+            menu_caption = _collect_menu_choices(cur)
             if cur and hasattr(cur, "next"):
-                _collect_menu_choices(cur.next)
+                next_caption = _collect_menu_choices(cur.next)
+                if not menu_caption:
+                    menu_caption = next_caption
+
+            is_menu_node = bool(cur and cur.__class__.__name__ == "Menu")
+            if is_menu_node and menu_caption:
+                clean_what = menu_caption
 
             if not clean_what and not choices:
                 return
 
-            is_menu_node = bool(cur and cur.__class__.__name__ == "Menu")
             menu_active = is_menu_node or (not clean_what and bool(choices))
 
             msg = {
@@ -878,6 +1079,8 @@ init python:
                 "menu_active": menu_active,
             }
             _translator_last_current_msg = dict(msg)
+            if clean_what:
+                _translator_last_visible_signature = (msg["who"], clean_what)
 
             prefetch_debug = {
                 "current_node": _translator_node_debug(cur),
@@ -978,6 +1181,7 @@ init python:
             _translator_refresh_visible_who(renpy)
         elif event == "end":
             _translator_last_current_msg = None
+            _translator_last_visible_signature = None
 
     try:
         config.all_character_callbacks.append(_translator_callback)
