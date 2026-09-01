@@ -16,7 +16,7 @@ else:
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "v1.3.0",
+    "version": "v1.5.0",
     "ui_language": "auto",
     "translation_engine": "builtin",
     "gemini_api_key": "",
