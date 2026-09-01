@@ -5,6 +5,7 @@
 # ==================================
 # 2. 依次“放行”（取消忽略）必要的文件
 !/README.md
+!/README.zh-CN.md
 !/build.py
 !/requirements.txt
 !/upx.exe

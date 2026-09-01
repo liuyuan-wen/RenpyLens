@@ -34,6 +34,10 @@ class FakeClient:
         self.calls += 1
         return self.response
 
+    def get(self, *args, **kwargs):
+        self.calls += 1
+        return self.response
+
     def stream(self, *args, **kwargs):
         self.stream_calls += 1
         return FakeStreamContext(self.response)
@@ -108,6 +112,21 @@ class RateLimitErrorTests(unittest.TestCase):
         with self.assertRaises(RateLimitError):
             translator._call_api("system", "user")
 
+        self.assertEqual(client.calls, 1)
+
+    def test_builtin_latency_accepts_an_http_response_without_authentication(self):
+        response = httpx.Response(
+            401,
+            request=httpx.Request("GET", "https://example.test/v1/models"),
+        )
+        translator = BuiltinTranslator({"builtin_url": "https://example.test"})
+        client = FakeClient(response)
+        translator._client = client
+
+        latency_ms, status_code = translator.test_latency()
+
+        self.assertGreaterEqual(latency_ms, 0)
+        self.assertEqual(status_code, 401)
         self.assertEqual(client.calls, 1)
 
     def test_streaming_429_uses_same_error(self):

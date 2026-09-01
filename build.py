@@ -14,9 +14,9 @@ def build_exe():
     sys.path.append(os.path.join(os.getcwd(), "src"))
     try:
         from config import DEFAULT_CONFIG
-        version = DEFAULT_CONFIG.get("version", "v1.3.0")
+        version = DEFAULT_CONFIG.get("version", "v1.5.0")
     except ImportError:
-        version = "v1.3.0"
+        version = "v1.5.0"
 
     print(f"开始打包 RenpyLens {version}...")
     
@@ -29,6 +29,20 @@ def build_exe():
         print(f"[WARN] 指定的 Python 解释器不存在: {python_exe}，将回退使用默认解释器")
         python_exe = sys.executable
 
+    qt_translation_dir = ""
+    try:
+        qt_translation_dir = subprocess.check_output(
+            [
+                python_exe,
+                "-c",
+                "from PyQt5.QtCore import QLibraryInfo; "
+                "print(QLibraryInfo.location(QLibraryInfo.TranslationsPath))",
+            ],
+            text=True,
+        ).strip()
+    except Exception as exc:
+        print(f"[WARN] 无法定位 Qt 翻译资源，将依赖 PyInstaller 默认收集: {exc}")
+
     # 构建 PyInstaller 命令
     command = [
         python_exe, "-m", "PyInstaller",
@@ -40,7 +54,7 @@ def build_exe():
         "--add-data", "assets/RenpyLensBridge.js;.", # RPG Maker MV/MZ 运行时桥接
         "--add-data", "assets/icon.ico;.", # 包含图标以便程序运行时提取
         "--add-data", "assets/icon.png;.", 
-        "--add-data", "assets/qq.jpg;.",
+        "--add-data", "assets/locales;assets/locales",
         "--icon", "assets/icon.ico", # 指定程序本身的图标
         
         # 排除体积巨大且程序明显用不到的科学计算和系统级大包
@@ -98,6 +112,15 @@ def build_exe():
         "--distpath", ".",  # 将输出目录修改为当前目录，不使用默认的 dist
         "src/main.py"
     ]
+
+    if qt_translation_dir and os.path.isdir(qt_translation_dir):
+        for locale in ("zh_CN", "zh_TW", "en", "ja", "ko", "ru"):
+            for prefix in ("qt", "qtbase"):
+                qm_path = os.path.join(qt_translation_dir, f"{prefix}_{locale}.qm")
+                if os.path.isfile(qm_path):
+                    command[command.index("src/main.py"):command.index("src/main.py")] = [
+                        "--add-data", f"{qm_path};assets/qt_translations"
+                    ]
     
     print(f"运行命令: {' '.join(command)}")
     result = subprocess.run(command)

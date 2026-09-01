@@ -6,6 +6,8 @@ import time
 import math
 import httpx
 import threading
+from i18n import tr
+from provider_registry import ResolvedProvider, resolve_provider
 
 
 class KeyExpiredError(Exception):
@@ -49,24 +51,21 @@ class RateLimitError(Exception):
 
     def _retry_hint(self):
         if self.retry_after is not None:
-            return f"请等待约 {self.retry_after} 秒后再试。"
-        return "请稍后再试。"
+            return tr("rate.wait_seconds", seconds=self.retry_after)
+        return tr("rate.wait_later")
 
     def _build_user_message(self):
         retry_hint = self._retry_hint()
         if self.limit_type == "tokens":
             limit = self.current_limit or 5000
-            return (
-                f"本分钟翻译内容已达到 {limit} Token 上限，{retry_hint}"
-                "全量翻译时可调小每批翻译条数。"
-            )
+            return tr("rate.tokens", limit=limit, retry=retry_hint)
         if self.limit_type == "requests":
             limit = self.current_limit or 60
-            return f"请求过于频繁，已达到每分钟 {limit} 次上限，{retry_hint}"
+            return tr("rate.requests", limit=limit, retry=retry_hint)
         if self.limit_type == "max_parallel_requests":
             limit = self.current_limit or 3
-            return f"同时进行的翻译请求过多，当前最多允许 {limit} 个，{retry_hint}"
-        return f"API 请求过于频繁，{retry_hint}"
+            return tr("rate.parallel", limit=limit, retry=retry_hint)
+        return tr("rate.generic", retry=retry_hint)
 
 
 class BaseTranslator:
@@ -195,18 +194,23 @@ class BaseTranslator:
                 print(f"[Translator] Connection pool closed")
 
 
-def _normalize_openai_chat_url(base_url: str, prefer_v1: bool = True) -> str:
+def _normalize_openai_chat_url(
+    base_url: str,
+    prefer_v1: bool = True,
+    chat_path: str | None = None,
+) -> str:
     """Accept root URLs, `/v1`, or full chat-completions endpoints without double-appending."""
     base = (base_url or "").strip().rstrip('/')
     if not base:
         return ""
     if base.endswith("/v1/chat/completions") or base.endswith("/chat/completions"):
         return base
-    if base.endswith("/v1"):
+    path = chat_path or ("/v1/chat/completions" if prefer_v1 else "/chat/completions")
+    path = "/" + path.strip("/")
+    parent_path = path[:-len("/chat/completions")]
+    if parent_path and base.endswith(parent_path):
         return base + "/chat/completions"
-    if prefer_v1:
-        return base + "/v1/chat/completions"
-    return base + "/chat/completions"
+    return base + path
 
 
 class GeminiTranslator(BaseTranslator):
@@ -434,7 +438,6 @@ class BuiltinTranslator(BaseTranslator):
         """创建 httpx 客户端（支持关闭后重建）"""
         return httpx.Client(
             timeout=self.api_timeout_seconds,
-            verify=False,  # 忽略 SSL 证书校验（SakuraFRP 等自签名证书）
             trust_env=False,
             limits=httpx.Limits(
                 max_connections=5,
@@ -455,6 +458,16 @@ class BuiltinTranslator(BaseTranslator):
             print(f"[Builtin] Connection warmup done: {elapsed:.0f}ms (TCP+TLS handshake established, status={resp.status_code})")
         except Exception as e:
             print(f"[Builtin] Connection warmup failed (will retry on first translation): {e}")
+
+    def test_latency(self) -> tuple[float, int]:
+        """Measure a fresh connection to the built-in service's models endpoint."""
+        client = self._get_client()
+        started = time.perf_counter()
+        response = client.get(self._models_url, headers=self._build_headers())
+        latency_ms = (time.perf_counter() - started) * 1000
+        if response.status_code >= 500:
+            response.raise_for_status()
+        return latency_ms, response.status_code
 
     def _build_headers(self):
         headers = {
@@ -513,7 +526,7 @@ class BuiltinTranslator(BaseTranslator):
                     try:
                         err_data = resp.json().get("error", {})
                         if err_data.get("type") == "expired_key":
-                            raise KeyExpiredError("试用 API Key 已到期，如需协助请加入官方交流QQ群：1058127921。")
+                            raise KeyExpiredError(tr("rate.key_expired"))
                     except KeyExpiredError:
                         raise
                     except Exception:
@@ -657,37 +670,18 @@ class OpenAICompatibleTranslator(BaseTranslator):
     (适用于 OpenAI, DeepSeek, 硅基流动, 月之暗面, xAI, 阿里通义, 火山引擎, 自定义等)
     """
 
-    def __init__(self, engine: str, config: dict):
+    def __init__(self, provider: ResolvedProvider, config: dict):
         super().__init__(config)
-        self.engine = engine
-        self.api_key = config.get(f"{engine}_api_key", "")
-        self.model = config.get(f"{engine}_model", "")
-        self.base_url = config.get(f"{engine}_url", "").rstrip('/')
+        self.engine = provider.id
+        self.provider_name = provider.name
+        self.api_key = provider.api_key
+        self.model = provider.model
+        self.base_url = provider.url.rstrip('/')
         
-        # 处理可能的 base_url 未以 /v1 结尾的情况
-        if not self.base_url.rstrip('/').endswith('/v1') and "api.openai.com" not in self.base_url:
-            # 阿里 / 火山 等特殊后缀不强加 /v1，根据常见情况智能识别
-            if "dashscope.aliyuncs.com" in self.base_url or "volces.com" in self.base_url or "api.x.ai" in self.base_url or "api.deepseek.com" in self.base_url or "api.siliconflow.cn" in self.base_url or "api.moonshot.cn" in self.base_url:
-                self.api_url = f"{self.base_url}/chat/completions" # 很多直接拼
-                if "api.x.ai" in self.base_url or "api.moonshot.cn" in self.base_url or "api.siliconflow.cn" in self.base_url:
-                    self.api_url = f"{self.base_url}/v1/chat/completions"
-            else:
-                 # 默认 openai 系或者自定义加上 v1
-                 self.api_url = f"{self.base_url}/v1/chat/completions"
-        else:
-            self.api_url = f"{self.base_url}/chat/completions"
-            
-        # 强制修正常见已知端点
-        if "api.openai.com" in self.base_url:
-             self.api_url = "https://api.openai.com/v1/chat/completions"
-        if "api.deepseek.com" in self.base_url:
-             self.api_url = "https://api.deepseek.com/chat/completions"
-        if "api.openai.com" not in self.base_url and "api.deepseek.com" not in self.base_url:
-             prefer_v1 = not any(
-                 host in self.base_url
-                 for host in ("dashscope.aliyuncs.com", "volces.com", "api.deepseek.com")
-             )
-             self.api_url = _normalize_openai_chat_url(self.base_url, prefer_v1=prefer_v1)
+        self.api_url = _normalize_openai_chat_url(
+            self.base_url,
+            chat_path=provider.chat_path,
+        )
 
         self.max_retries = 3
 
@@ -813,39 +807,42 @@ class AnthropicTranslator(BaseTranslator):
 
 
 def create_translator(engine: str, config: dict) -> BaseTranslator:
-    """工厂函数：根据引擎名创建对应的翻译器"""
-    if engine == "ollama":
+    """根据注册表中的协议类型创建翻译器。"""
+    provider = resolve_provider(config, engine)
+    if provider is None:
+        print(f"[Translator] Unknown engine '{engine}', falling back to builtin")
+        provider = resolve_provider(config, "builtin")
+
+    if provider.protocol == "ollama":
         url = config.get("ollama_url", "http://localhost:11435")
         model = config.get("ollama_model", "gemma3:4b")
         print(f"[Translator] Ollama: {url}, model={model}")
         return OllamaTranslator(config)
-    elif engine == "builtin":
+    elif provider.protocol == "builtin":
         url = config.get("builtin_url", "http://localhost:8000")
         model = config.get("builtin_model", "Qwen2.5-7B-Instruct")
         key = config.get("builtin_api_key", "")
         print(f"[Translator] Builtin: {url}, model={model}, key={'***' if key else '(none)'}")
         return BuiltinTranslator(config)
-    elif engine == "zhipu":
+    elif provider.protocol == "zhipu":
         key = config.get("zhipu_api_key", "")
         model = config.get("zhipu_model", "glm-4.7-flash")
         print(f"[Translator] ZhipuAI: model={model}, key={'***' + key[-4:] if len(key) > 4 else '(empty)'}")
         return ZhipuTranslator(config)
-    elif engine == "gemini":
+    elif provider.protocol == "gemini":
         key = config.get("gemini_api_key", "")
         model = config.get("gemini_model", "gemini-2.5-flash-lite")
         print(f"[Translator] Gemini: model={model}, key={'***' + key[-4:] if len(key) > 4 else '(empty)'}")
         return GeminiTranslator(config)
-    elif engine == "anthropic":
+    elif provider.protocol == "anthropic":
         key = config.get("anthropic_api_key", "")
         model = config.get("anthropic_model", "claude-3-5-haiku-20241022")
         print(f"[Translator] Anthropic: model={model}, key={'***' + key[-4:] if len(key) > 4 else '(empty)'}")
         return AnthropicTranslator(config)
-    elif engine in ["openai", "deepseek", "siliconflow", "moonshot", "xai", "alibaba", "volcengine", "custom"]:
-        key = config.get(f"{engine}_api_key", "")
-        model = config.get(f"{engine}_model", "")
-        url = config.get(f"{engine}_url", "")
-        print(f"[Translator] {engine.capitalize()}: url={url}, model={model}, key={'***' + key[-4:] if len(key) > 4 else '(empty)'}")
-        return OpenAICompatibleTranslator(engine, config)
-    else:
-        print(f"[Translator] Unknown engine '{engine}', falling back to Ollama")
-        return OllamaTranslator(config)
+    elif provider.protocol == "openai":
+        masked_key = "***" + provider.api_key[-4:] if len(provider.api_key) > 4 else "(empty)"
+        print(f"[Translator] {provider.name}: url={provider.url}, model={provider.model}, key={masked_key}")
+        return OpenAICompatibleTranslator(provider, config)
+
+    print(f"[Translator] Unsupported protocol '{provider.protocol}', falling back to builtin")
+    return BuiltinTranslator(config)

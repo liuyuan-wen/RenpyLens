@@ -18,6 +18,7 @@ from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QPainter, QPainterPath, QColor, QFontMetrics, QPen, QTransform, QTextCursor
 import win32con
 import win32gui
+from i18n import manager as i18n_manager, tr
 
 
 class OutlinedLabel(QLabel):
@@ -199,7 +200,8 @@ class TranslationOverlay(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        self.label = OutlinedLabel("等待游戏文本...", self)
+        self._showing_waiting_text = True
+        self.label = OutlinedLabel(tr("overlay.waiting"), self)
         self.label.set_font_family(config.get("font_family", "Microsoft YaHei"))
         self.label.set_font_size(config.get("font_size", 22))
         self.label.set_font_bold(config.get("font_bold", True))
@@ -281,25 +283,25 @@ class TranslationOverlay(QWidget):
         self.edit_text.setAcceptRichText(False)
         self.edit_text.setMinimumHeight(88)
         self.edit_text.textChanged.connect(self._on_edit_text_changed)
-        self.edit_text.setPlaceholderText("在这里直接修改当前对白或选项译文")
+        self.edit_text.setPlaceholderText(tr("overlay.edit_placeholder"))
         editor_layout.addWidget(self.edit_text, 1)
 
         self.editor_footer = QWidget(self.editor_container)
         self.editor_footer.setObjectName("editorFooter")
         self.editor_footer.setCursor(Qt.OpenHandCursor)
-        self.editor_footer.setToolTip("拖动底部空白区域移动窗口")
+        self.editor_footer.setToolTip(tr("overlay.drag_footer"))
         btn_row = QHBoxLayout(self.editor_footer)
         btn_row.setContentsMargins(0, 0, 34, 0)
         btn_row.setSpacing(6)
         btn_row.addStretch()
 
-        self.btn_cancel_edit = QPushButton("取消")
+        self.btn_cancel_edit = QPushButton(tr("common.cancel"))
         self.btn_cancel_edit.setObjectName("editCancelButton")
         self.btn_cancel_edit.setCursor(Qt.PointingHandCursor)
         self.btn_cancel_edit.clicked.connect(self.cancel_edit)
         btn_row.addWidget(self.btn_cancel_edit)
 
-        self.btn_save_edit = QPushButton("保存")
+        self.btn_save_edit = QPushButton(tr("common.save"))
         self.btn_save_edit.setObjectName("editSaveButton")
         self.btn_save_edit.setCursor(Qt.PointingHandCursor)
         self.btn_save_edit.clicked.connect(self._emit_save)
@@ -309,7 +311,7 @@ class TranslationOverlay(QWidget):
         self.resize_handle.setObjectName("resizeHandle")
         self.resize_handle.setAlignment(Qt.AlignCenter)
         self.resize_handle.setCursor(Qt.SizeFDiagCursor)
-        self.resize_handle.setToolTip("拖动这里调整编辑窗口大小")
+        self.resize_handle.setToolTip(tr("overlay.resize_tip"))
         self.resize_handle.setFixedSize(26, 26)
 
         editor_layout.addWidget(self.editor_footer)
@@ -332,12 +334,22 @@ class TranslationOverlay(QWidget):
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        i18n_manager().language_changed.connect(self.retranslate_ui)
 
     def showEvent(self, event):
         super().showEvent(event)
         self._sync_topmost_timer()
         QTimer.singleShot(0, self._enforce_topmost)
         self.visibility_changed.emit(True)
+
+    def retranslate_ui(self, *_):
+        self.edit_text.setPlaceholderText(tr("overlay.edit_placeholder"))
+        self.editor_footer.setToolTip(tr("overlay.drag_footer"))
+        self.btn_cancel_edit.setText(tr("common.cancel"))
+        self.btn_save_edit.setText(tr("common.save"))
+        self.resize_handle.setToolTip(tr("overlay.resize_tip"))
+        if self._showing_waiting_text:
+            self.label.setText(tr("overlay.waiting"))
 
     def hideEvent(self, event):
         self._topmost_timer.stop()
@@ -645,6 +657,7 @@ class TranslationOverlay(QWidget):
             self._pending_text = text
             return
         self._pending_text = None
+        self._showing_waiting_text = False
         self.label.setText(text)
         self._enforce_topmost()
         QTimer.singleShot(20, self._adjust_height)
@@ -819,54 +832,54 @@ class TranslationOverlay(QWidget):
         )
 
         if self._editing_target:
-            cancel_action = menu.addAction("取消编辑")
+            cancel_action = menu.addAction(tr("overlay.cancel_edit"))
             cancel_action.triggered.connect(self.cancel_edit)
             self._exec_context_menu(menu, pos)
             return
 
-        copy_translation_action = menu.addAction("复制翻译文本")
+        copy_translation_action = menu.addAction(tr("overlay.copy_translation"))
         copy_translation_action.triggered.connect(
             lambda: QApplication.clipboard().setText(self.label.text())
         )
-        copy_original_action = menu.addAction("复制原始文本")
+        copy_original_action = menu.addAction(tr("overlay.copy_original"))
         copy_original_action.triggered.connect(
             lambda: QApplication.clipboard().setText(self._original_text_for_clipboard())
         )
 
         if self._edit_context.get("dialogue"):
             menu.addSeparator()
-            edit_dialogue_action = menu.addAction("编辑当前对白")
+            edit_dialogue_action = menu.addAction(tr("overlay.edit_dialogue"))
             edit_dialogue_action.triggered.connect(
                 lambda checked=False, target=self._edit_context["dialogue"]: self.start_edit(target)
             )
 
         choice_targets = self._edit_context.get("choices", [])
         if choice_targets:
-            choice_menu = menu.addMenu("编辑选项")
+            choice_menu = menu.addMenu(tr("overlay.edit_choices"))
             for target in choice_targets:
-                title = str(target.get("menu_label") or "选项").strip()
+                title = str(target.get("menu_label") or tr("overlay.choice")).strip()
                 action = choice_menu.addAction(title)
                 action.triggered.connect(
                     lambda checked=False, item=target: self.start_edit(item)
                 )
 
         menu.addSeparator()
-        workbench_action = menu.addAction("显示工作台")
+        workbench_action = menu.addAction(tr("overlay.show_workbench"))
         workbench_action.triggered.connect(self.show_workbench_requested.emit)
 
-        size_menu = menu.addMenu("字体大小")
+        size_menu = menu.addMenu(tr("overlay.font_size"))
         for size in [16, 18, 20, 22, 24, 28, 32, 36, 40]:
             act = size_menu.addAction(f"{size}px" + (" ✓" if size == self.config.get("font_size") else ""))
             act.triggered.connect(lambda checked=False, value=size: self.set_font_size(value))
 
-        family_menu = menu.addMenu("字体")
+        family_menu = menu.addMenu(tr("overlay.font"))
         families = [
-            ("微软雅黑", "Microsoft YaHei"),
-            ("等线", "DengXian"),
-            ("黑体", "SimHei"),
-            ("宋体", "SimSun"),
-            ("楷体", "KaiTi"),
-            ("仿宋", "FangSong"),
+            ("Microsoft YaHei", "Microsoft YaHei"),
+            ("DengXian", "DengXian"),
+            ("SimHei", "SimHei"),
+            ("SimSun", "SimSun"),
+            ("KaiTi", "KaiTi"),
+            ("FangSong", "FangSong"),
         ]
         current_family = self.config.get("font_family", "Microsoft YaHei")
         for name, family in families:
@@ -874,27 +887,27 @@ class TranslationOverlay(QWidget):
             act.triggered.connect(lambda checked=False, value=family: self.set_font_family(value))
 
         family_menu.addSeparator()
-        bold_action = family_menu.addAction("粗体")
+        bold_action = family_menu.addAction(tr("overlay.bold"))
         bold_action.setCheckable(True)
         bold_action.setChecked(self.config.get("font_bold", True))
         bold_action.triggered.connect(self.set_font_bold)
 
-        color_menu = menu.addMenu("字体颜色")
+        color_menu = menu.addMenu(tr("overlay.font_color"))
         colors = [
-            ("白色", "#FFFFFF"),
-            ("灰色", "#AAAAAA"),
-            ("红色", "#FF5555"),
-            ("绿色", "#32CD32"),
-            ("黄色", "#FFD700"),
-            ("蓝色", "#55A0FF"),
-            ("粉色", "#FF80DF"),
+            (tr("color.white"), "#FFFFFF"),
+            (tr("color.gray"), "#AAAAAA"),
+            (tr("color.red"), "#FF5555"),
+            (tr("color.green"), "#32CD32"),
+            (tr("color.yellow"), "#FFD700"),
+            (tr("color.blue"), "#55A0FF"),
+            (tr("color.pink"), "#FF80DF"),
         ]
         current_color = self.config.get("font_color", "#FFFFFF")
         for name, hex_val in colors:
             act = color_menu.addAction(name + (" ✓" if hex_val == current_color else ""))
             act.triggered.connect(lambda checked=False, value=hex_val: self.set_text_color(value))
 
-        width_menu = menu.addMenu("文本框宽度")
+        width_menu = menu.addMenu(tr("overlay.text_width"))
         primary_screen = QApplication.primaryScreen()
         screen_width = primary_screen.geometry().width() if primary_screen else 1920
         current_width = self.config.get("overlay_width", self.width())
@@ -916,20 +929,20 @@ class TranslationOverlay(QWidget):
 
         menu.addSeparator()
 
-        show_name_action = QAction("显示说话人名称", self)
+        show_name_action = QAction(tr("overlay.show_speaker"), self)
         show_name_action.setCheckable(True)
         show_name_action.setChecked(self.config.get("show_character_name", True))
         show_name_action.triggered.connect(self._toggle_show_name)
         menu.addAction(show_name_action)
 
-        force_topmost_action = QAction("强力置顶 (解决全屏)", self)
+        force_topmost_action = QAction(tr("overlay.force_topmost"), self)
         force_topmost_action.setCheckable(True)
         force_topmost_action.setChecked(self.config.get("force_topmost", True))
         force_topmost_action.triggered.connect(self._toggle_force_topmost)
         menu.addAction(force_topmost_action)
 
         menu.addSeparator()
-        quit_action = menu.addAction("隐藏浮窗")
+        quit_action = menu.addAction(tr("overlay.hide"))
         quit_action.triggered.connect(self.hide)
 
         self._exec_context_menu(menu, pos)

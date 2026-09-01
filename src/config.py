@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import copy
 
 if sys.platform == "win32":
     CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "RenpyLens")
@@ -16,6 +17,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_CONFIG = {
     "version": "v1.3.0",
+    "ui_language": "auto",
     "translation_engine": "builtin",
     "gemini_api_key": "",
     "gemini_url": "https://generativelanguage.googleapis.com",
@@ -26,13 +28,13 @@ DEFAULT_CONFIG = {
     "ollama_url": "http://localhost:11434",
     "ollama_model": "gemma3:4b",
     "ollama_available_models": ["gemma3:4b", "qwen3:8b"],
-    "builtin_url": "http://localhost:8000",
+    "builtin_url": "https://www-api-1.h53633179.nyat.app:50588/v1",
     "builtin_model": "模型1",
     "builtin_api_key": "",
     "builtin_api_expiry": "",
     "builtin_nodes": [
-        {"name": "中国大陆节点", "url": "https://frp-bar.com:50588/"},
-        {"name": "海外/备用节点（暂时失效）", "url": "https://flush-communities-maintained-polyester.trycloudflare.com"},
+        {"name": "中国大陆节点", "url": "https://www-api-1.h53633179.nyat.app:50588/v1"},
+        {"name": "全球节点", "url": "https://www-api-2.h3043b325.nyat.app:42747/v1"},
     ],
     "openai_api_key": "",
     "openai_url": "https://api.openai.com",
@@ -58,9 +60,19 @@ DEFAULT_CONFIG = {
     "volcengine_api_key": "",
     "volcengine_url": "https://ark.cn-beijing.volces.com",
     "volcengine_model": "",
+    "openrouter_api_key": "",
+    "openrouter_url": "https://openrouter.ai/api/v1",
+    "openrouter_model": "openrouter/auto",
+    "groq_api_key": "",
+    "groq_url": "https://api.groq.com/openai/v1",
+    "groq_model": "openai/gpt-oss-120b",
+    "minimax_api_key": "",
+    "minimax_url": "https://api.minimaxi.com/v1",
+    "minimax_model": "MiniMax-M3",
     "custom_api_key": "",
     "custom_url": "http://localhost:8000",
     "custom_model": "custom-model",
+    "custom_openai_channels": [],
     "system_prompt": (
         'You are a game localization expert specializing in visual novels. '
         'You are currently localizing the game "{game_title}". '
@@ -97,7 +109,7 @@ DEFAULT_CONFIG = {
     "bulk_translate_rpm": 60,
     "api_timeout_seconds": 120,
     "enable_timing_log": True,
-    "trial_key_url": "https://frp-bar.com:58385/get_trial_key",
+    "trial_key_url": "https://www-map.h53633179.nyat.app:58385/get_trial_key",
     "github_repo": "liuyuan-wen/RenpyLens",
     "force_topmost": True,
     "show_character_name": False,
@@ -135,14 +147,44 @@ def load_config() -> dict:
                 saved["overlay_edit_height"] = DEFAULT_CONFIG["overlay_edit_height"]
                 saved["overlay_edit_ui_version"] = DEFAULT_CONFIG["overlay_edit_ui_version"]
 
-            merged = {**DEFAULT_CONFIG, **saved}
+            # Migrate the built-in service away from legacy endpoints whose TLS
+            # certificates do not match their hostnames.  This also updates
+            # existing installations instead of only changing fresh defaults.
+            builtin_url_migrations = {
+                "http://localhost:8000": DEFAULT_CONFIG["builtin_nodes"][0]["url"],
+                "https://frp-bar.com:50588": DEFAULT_CONFIG["builtin_nodes"][0]["url"],
+                "https://frp-bar.com:50588/": DEFAULT_CONFIG["builtin_nodes"][0]["url"],
+                "https://frp-bar.com:50588/v1": DEFAULT_CONFIG["builtin_nodes"][0]["url"],
+                "https://frp-cup.com:42747": DEFAULT_CONFIG["builtin_nodes"][1]["url"],
+                "https://frp-cup.com:42747/": DEFAULT_CONFIG["builtin_nodes"][1]["url"],
+                "https://frp-cup.com:42747/v1": DEFAULT_CONFIG["builtin_nodes"][1]["url"],
+                "https://flush-communities-maintained-polyester.trycloudflare.com": DEFAULT_CONFIG["builtin_nodes"][1]["url"],
+            }
+            current_builtin_url = saved.get("builtin_url")
+            if current_builtin_url in builtin_url_migrations:
+                saved["builtin_url"] = builtin_url_migrations[current_builtin_url]
+            for node in saved.get("builtin_nodes", []):
+                if isinstance(node, dict):
+                    node["url"] = builtin_url_migrations.get(node.get("url"), node.get("url"))
+                    for default_node in DEFAULT_CONFIG["builtin_nodes"]:
+                        if node.get("url") == default_node["url"]:
+                            node["name"] = default_node["name"]
+                            break
+            if saved.get("trial_key_url") in {
+                "https://frp-bar.com:58385/get_trial_key",
+                "https://www-map.h53633179.nyat.app:58385/get_trial_key",
+            }:
+                saved["trial_key_url"] = DEFAULT_CONFIG["trial_key_url"]
+
+            merged = copy.deepcopy(DEFAULT_CONFIG)
+            merged.update(saved)
             merged["version"] = DEFAULT_CONFIG["version"]
             if PRIORITY_CONFIG_PY:
                 merged.update(DEFAULT_CONFIG)
             return merged
         except Exception:
             pass
-    return dict(DEFAULT_CONFIG)
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 
 def save_config(cfg: dict):

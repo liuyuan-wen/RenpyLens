@@ -18,15 +18,22 @@ from collections import deque
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QComboBox, QLineEdit, QTextEdit, QFileDialog,
-    QStyledItemDelegate, QDialog, QFrame
+    QStyledItemDelegate, QDialog, QFrame, QMenu
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QColor, QPalette, QTextCursor, QPixmap
 
 from config import load_config, save_config
-from hwid_utils import get_hwid, register_trial_key, fetch_trial_key_expiry
+from hwid_utils import NO_EXPIRY, get_hwid, register_trial_key, fetch_trial_key_expiry
 from hook_server import HookServer
 from translator import create_translator, KeyExpiredError, RateLimitError
+from provider_registry import (
+    iter_provider_options,
+    provider_connection_signature,
+    provider_display_name,
+    resolve_provider,
+    update_provider,
+)
 from cache import (
     ENTRY_TYPE_CHOICE,
     ENTRY_TYPE_DIALOGUE,
@@ -50,6 +57,14 @@ from updater import (
     is_newer_version,
     download_release_asset,
     launch_windows_updater_script,
+)
+from i18n import (
+    LANGUAGE_OPTIONS,
+    LocalizedString,
+    localized_node_name,
+    manager as i18n_manager,
+    set_language,
+    tr,
 )
 # 尝试从 ../assets 或 bundling 路径查找 hook script
 if getattr(sys, 'frozen', False):
@@ -83,11 +98,12 @@ class MainWindow(QWidget):
     _trial_key_signal = pyqtSignal(object)   # 试用 Key 申请结果信号
     _trial_expiry_signal = pyqtSignal(object)  # API 到期时间刷新结果
     _key_expired_signal = pyqtSignal()     # Key 过期信号
-    _status_signal = pyqtSignal(str)       # 状态栏更新信号 (用于非 UI 线程更新)
+    _status_signal = pyqtSignal(object)       # 状态栏更新信号 (用于非 UI 线程更新)
     _update_check_signal = pyqtSignal(object)
     _update_download_signal = pyqtSignal(object)
     _bulk_ui_signal = pyqtSignal(object)
     _cache_state_signal = pyqtSignal(bool)
+    _latency_test_signal = pyqtSignal(object)
     SUPPORT_QQ_GROUP = "1058127921"
     TRANSLATION_REPEAT_CHAR_LIMIT = 12
     TRANSLATION_LENGTH_RATIO_LIMIT = 3.0
@@ -95,9 +111,10 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.config = load_config()
+        set_language(self.config.get("ui_language", "auto"), QApplication.instance())
 
-        version = self.config.get("version", "v1.2.2")
-        self.setWindowTitle(f"RenpyLens {version} - 游戏实时翻译")
+        version = self.config.get("version", "v1.5.0")
+        self.setWindowTitle(tr("app.title", version=version))
         self.resize(800, 10)
         self.setAcceptDrops(True)
 
@@ -131,6 +148,11 @@ class MainWindow(QWidget):
         self._hook_session_ready = False
         self._hook_runtime_ready = False
         self._workbench_refresh_pending_source = ""
+        self._status_message = ("main.ready", {})
+        self._latency_test_token = 0
+        self._latency_test_state = "idle"
+        self._latency_test_ms = None
+        self._latency_test_error = ""
 
         # 2. UI 组件初始化
         self._setup_ui()
@@ -138,15 +160,17 @@ class MainWindow(QWidget):
 
         # 3. 核心服务启动
         self._setup_services()
+        i18n_manager().language_changed.connect(self.retranslate_ui)
 
         self.translation_ready.connect(self._on_translation_ready)
         self._trial_expiry_signal.connect(self._on_trial_expiry_result)
         self._key_expired_signal.connect(self._on_key_expired)
-        self._status_signal.connect(self.status_label.setText)
+        self._status_signal.connect(self._on_status_signal)
         self._update_check_signal.connect(self._on_update_check_result)
         self._update_download_signal.connect(self._on_update_download_result)
         self._bulk_ui_signal.connect(self._on_bulk_ui_event)
         self._cache_state_signal.connect(self.btn_clear_cache.setEnabled)
+        self._latency_test_signal.connect(self._on_builtin_latency_result)
         self._key_expired_shown = False  # 防止重复弹窗
 
         # 游戏进程监控定时器
@@ -303,7 +327,7 @@ class MainWindow(QWidget):
             QPushButton:hover { color: #ccc; border-color: #666; }
             QPushButton:checked { color: #4a9eff; border-color: #4a9eff; }
         """
-        self.btn_settings = QPushButton("⚙️ 设置")
+        self.btn_settings = QPushButton(tr("main.settings"))
         self.btn_settings.setStyleSheet(_toolbar_btn_style)
         self.btn_settings.clicked.connect(self._on_settings)
         toolbar.addWidget(self.btn_settings)
@@ -335,7 +359,7 @@ class MainWindow(QWidget):
 
         toolbar.addWidget(title_container)
         toolbar.addStretch()
-        self.btn_pin = QPushButton("📌 置顶")
+        self.btn_pin = QPushButton(tr("common.pin"))
         self.btn_pin.setCheckable(True)
         self.btn_pin.setChecked(self._is_pinned)
         self.btn_pin.setStyleSheet(_toolbar_btn_style)
@@ -344,7 +368,7 @@ class MainWindow(QWidget):
         layout.addLayout(toolbar)
 
         # 拖放/点击区域
-        self.drop_label = QLabel("""<span style="font-size: 48px;">📂</span><br>将游戏 .exe 拖放或点击此处选择""")
+        self.drop_label = QLabel(tr("main.drop_game"))
         self.drop_label.setObjectName("drop_zone")
         self.drop_label.setAlignment(Qt.AlignCenter)
         self.drop_label.setMinimumHeight(160)
@@ -355,7 +379,7 @@ class MainWindow(QWidget):
         layout.addWidget(self.drop_label)
 
         # ״̬
-        self.status_label = QLabel("就绪 - 等待拖入游戏")
+        self.status_label = QLabel(tr("main.ready"))
         self.status_label.setObjectName("status")
         self.status_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.status_label)
@@ -363,52 +387,40 @@ class MainWindow(QWidget):
         # 按钮行：开始游戏 | 装载 Hook | 卸载 Hook
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
-        self.btn_start_game = QPushButton("▶ 装载 Hook 并开始游戏")
+        self.btn_start_game = QPushButton(tr("main.start_game"))
         self.btn_start_game.setEnabled(False)
         self.btn_start_game.clicked.connect(self._on_start_game)
         btn_layout.addWidget(self.btn_start_game, 2)
         self.btn_start_game.setFixedHeight(60)
         self.btn_start_game.setStyleSheet("QPushButton { font-size: 26px; }")
-        self.btn_start_game.setToolTip("自动注入翻译 Hook 到游戏并启动，开始实时翻译")
+        self.btn_start_game.setToolTip(tr("main.start_game_tip"))
 
-        self.btn_uninstall = QPushButton("📤 卸载 Hook")
+        self.btn_uninstall = QPushButton(tr("main.uninstall_hook"))
         self.btn_uninstall.setEnabled(False)
         self.btn_uninstall.clicked.connect(self._on_uninstall)
         btn_layout.addWidget(self.btn_uninstall, 1)
         self.btn_uninstall.setFixedHeight(60)
         self.btn_uninstall.setStyleSheet("QPushButton { font-size: 20px; }")
-        self.btn_uninstall.setToolTip("从游戏目录中移除翻译 Hook 脚本")
+        self.btn_uninstall.setToolTip(tr("main.uninstall_hook_tip"))
 
-        self.btn_clear_cache = QPushButton("🗑️ 清除缓存")
+        self.btn_clear_cache = QPushButton(tr("main.clear_cache"))
         self.btn_clear_cache.setEnabled(False)
         self.btn_clear_cache.clicked.connect(self._on_clear_cache)
         btn_layout.addWidget(self.btn_clear_cache, 1)
         self.btn_clear_cache.setFixedHeight(60)
         self.btn_clear_cache.setStyleSheet("QPushButton { font-size: 20px; }")
-        self.btn_clear_cache.setToolTip("清除当前游戏的翻译缓存，下次将重新翻译所有文本")
+        self.btn_clear_cache.setToolTip(tr("main.clear_cache_tip"))
         layout.addLayout(btn_layout)
 
         # 翻译引擎选择行
         engine_layout = QHBoxLayout()
-        engine_label = QLabel("翻译引擎:")
-        engine_label.setStyleSheet("font-size: 20px; color: #aaa;")
-        engine_layout.addWidget(engine_label)
+        self.engine_label = QLabel(tr("main.engine"))
+        self.engine_label.setStyleSheet("font-size: 20px; color: #aaa;")
+        engine_layout.addWidget(self.engine_label)
         self.engine_combo = QComboBox()
         self.engine_combo.setEditable(True)
         self.engine_combo.lineEdit().setReadOnly(True)
-        self.engine_combo.addItem("内置通道", "builtin")
-        self.engine_combo.addItem("OpenAI", "openai")
-        self.engine_combo.addItem("Gemini", "gemini")
-        self.engine_combo.addItem("Anthropic Claude", "anthropic")
-        self.engine_combo.addItem("DeepSeek", "deepseek")
-        self.engine_combo.addItem("硅基流动", "siliconflow")
-        self.engine_combo.addItem("月之暗面 (Kimi)", "moonshot")
-        self.engine_combo.addItem("xAI (Grok)", "xai")
-        self.engine_combo.addItem("阿里通义", "alibaba")
-        self.engine_combo.addItem("火山引擎", "volcengine")
-        self.engine_combo.addItem("智谱AI", "zhipu")
-        self.engine_combo.addItem("Ollama", "ollama")
-        self.engine_combo.addItem("自定义", "custom")
+        self._reload_engine_combo()
         self.engine_combo.setStyleSheet("""
             QComboBox {
                 background-color: #16213e; color: #eee;
@@ -440,9 +452,9 @@ class MainWindow(QWidget):
 
         # 模型选择行
         model_layout = QHBoxLayout()
-        model_label = QLabel("模型:")
-        model_label.setStyleSheet("font-size: 20px; color: #aaa;")
-        model_layout.addWidget(model_label)
+        self.model_label = QLabel(tr("main.model"))
+        self.model_label.setStyleSheet("font-size: 20px; color: #aaa;")
+        model_layout.addWidget(self.model_label)
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)  # 可手动输入任意模型名
         self.model_combo.setStyleSheet("""
@@ -472,7 +484,7 @@ class MainWindow(QWidget):
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
         self.model_combo.setFixedHeight(48)
         model_layout.addWidget(self.model_combo)
-        self.model_hint = QLabel("可手动修改")
+        self.model_hint = QLabel(tr("main.model_editable"))
         self.model_hint.setStyleSheet("font-size: 18px; color: #666;")
         model_layout.addWidget(self.model_hint)
         model_layout.addStretch()
@@ -489,18 +501,18 @@ class MainWindow(QWidget):
         self.node_row = QWidget()
         self.node_layout = QHBoxLayout(self.node_row)
         self.node_layout.setContentsMargins(0, 0, 0, 0)
-        node_label = QLabel("线路选择:")
-        node_label.setStyleSheet("font-size: 20px; color: #aaa;")
-        self.node_layout.addWidget(node_label)
+        self.node_label = QLabel(tr("main.route"))
+        self.node_label.setStyleSheet("font-size: 20px; color: #aaa;")
+        self.node_layout.addWidget(self.node_label)
         self.node_combo = QComboBox()
         self.node_combo.setEditable(True)
         self.node_combo.lineEdit().setReadOnly(True)
         
         builtin_nodes = self.config.get("builtin_nodes", [])
         for node in builtin_nodes:
-            name = node.get("name", "未命名节点")
+            name = node.get("name", tr("common.unnamed_node"))
             url = node.get("url", "")
-            self.node_combo.addItem(name, url)
+            self.node_combo.addItem(localized_node_name(name), url)
             
         self.node_combo.setStyleSheet("""
             QComboBox {
@@ -523,7 +535,7 @@ class MainWindow(QWidget):
                 border: 1px solid #555;
             }
         """)
-        current_builtin_url = self.config.get("builtin_url", "https://frp-bar.com:50588/")
+        current_builtin_url = self.config.get("builtin_url", "https://www-api-1.h53633179.nyat.app:50588/v1")
         idx = self.node_combo.findData(current_builtin_url)
         if idx >= 0:
             self.node_combo.setCurrentIndex(idx)
@@ -533,6 +545,23 @@ class MainWindow(QWidget):
         self.node_combo.setItemDelegate(QStyledItemDelegate())
         self.node_combo.setFixedHeight(48)
         self.node_layout.addWidget(self.node_combo)
+
+        self.btn_test_latency = QPushButton()
+        self.btn_test_latency.setCursor(Qt.PointingHandCursor)
+        self.btn_test_latency.setFixedHeight(40)
+        self.btn_test_latency.setMinimumWidth(88)
+        self.btn_test_latency.setStyleSheet("""
+            QPushButton {
+                background-color: #16213e; color: #4a9eff;
+                border: 1px solid #4a9eff; border-radius: 4px;
+                padding: 5px 12px; font-size: 17px;
+            }
+            QPushButton:hover { background-color: #1a2744; color: #6bb5ff; }
+            QPushButton:disabled { color: #777; border-color: #555; }
+        """)
+        self.btn_test_latency.clicked.connect(self._on_test_builtin_latency)
+        self.node_layout.addWidget(self.btn_test_latency)
+        self._render_latency_button()
 
         self.node_layout.addStretch()
         _es_layout.addWidget(self.node_row)
@@ -554,7 +583,7 @@ class MainWindow(QWidget):
         """
 
         self.builtin_api_layout.addStretch() # 占位
-        self.btn_trial_key = QPushButton("🔑 获取试用API")
+        self.btn_trial_key = QPushButton(tr("main.get_trial"))
         self.btn_trial_key.setCursor(Qt.PointingHandCursor)
         self.btn_trial_key.setStyleSheet(builtin_api_btn_style)
         self.btn_trial_key.clicked.connect(self._on_request_trial_key)
@@ -576,7 +605,7 @@ class MainWindow(QWidget):
 
         self.btn_refresh_expiry = QPushButton("⟳")
         self.btn_refresh_expiry.setCursor(Qt.PointingHandCursor)
-        self.btn_refresh_expiry.setToolTip("刷新到期时间")
+        self.btn_refresh_expiry.setToolTip(tr("main.refresh_expiry"))
         self.btn_refresh_expiry.setFixedSize(22, 22)
         self.btn_refresh_expiry.setStyleSheet("""
             QPushButton {
@@ -603,11 +632,11 @@ class MainWindow(QWidget):
         self.url_row = QWidget()
         self.url_layout = QHBoxLayout(self.url_row)
         self.url_layout.setContentsMargins(0, 0, 0, 0)
-        url_label = QLabel("API 地址:")
-        url_label.setStyleSheet("font-size: 20px; color: #aaa;")
-        self.url_layout.addWidget(url_label)
+        self.url_label = QLabel(tr("main.api_address"))
+        self.url_label.setStyleSheet("font-size: 20px; color: #aaa;")
+        self.url_layout.addWidget(self.url_label)
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("如 https://frp-bar.com:50588/v1")
+        self.url_input.setPlaceholderText(tr("main.example_url", url="https://www-api-1.h53633179.nyat.app:50588/v1"))
         self.url_input.setStyleSheet("""
             QLineEdit {
                 background-color: #16213e; color: #eee;
@@ -625,9 +654,9 @@ class MainWindow(QWidget):
         self.key_row = QWidget()
         self.key_layout = QHBoxLayout(self.key_row)
         self.key_layout.setContentsMargins(0, 0, 0, 0)
-        key_label = QLabel("API 密钥:")
-        key_label.setStyleSheet("font-size: 20px; color: #aaa;")
-        self.key_layout.addWidget(key_label)
+        self.key_label = QLabel(tr("main.api_key"))
+        self.key_label.setStyleSheet("font-size: 20px; color: #aaa;")
+        self.key_layout.addWidget(self.key_label)
         
         self.key_container = QWidget()
         h_key = QHBoxLayout(self.key_container)
@@ -655,7 +684,7 @@ class MainWindow(QWidget):
         
         self.btn_key_toggle = QPushButton("🙈")
         self.btn_key_toggle.setFixedSize(42, 42)
-        self.btn_key_toggle.setToolTip("显示/隐藏密钥")
+        self.btn_key_toggle.setToolTip(tr("common.show_hide_key"))
         self.btn_key_toggle.setCursor(Qt.PointingHandCursor)
         self.btn_key_toggle.setStyleSheet("""
             QPushButton {
@@ -688,14 +717,12 @@ class MainWindow(QWidget):
         self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         current_engine = self.config.get("translation_engine", "builtin")
         idx = self.engine_combo.findData(current_engine)
-        if idx >= 0:
-            self.engine_combo.setCurrentIndex(idx)
-            # 如果索引没变(都是0)，信号不会触发，手动补一次
-            if idx == 0:
-                self._on_engine_changed(0)
-        else:
-            self.engine_combo.setCurrentIndex(0)
-            self._on_engine_changed(0)
+        if idx < 0:
+            idx = self.engine_combo.findData("builtin")
+            self.config["translation_engine"] = "builtin"
+        self.engine_combo.setCurrentIndex(idx)
+        # 下拉框在信号连接前已经按配置选中，因此始终手动完成一次初始化。
+        self._on_engine_changed(idx)
 
         # 初始刷新一次地址栏 (仅当当前引擎是内置通道时才需要)
         if self.config.get("translation_engine", "builtin") == "builtin":
@@ -720,36 +747,43 @@ class MainWindow(QWidget):
         """
 
         # 1. 显示浮窗
-        self.btn_overlay_toggle = QPushButton("🪟 显示浮窗")
-        self.btn_overlay_toggle.setFixedWidth(140)
+        self.btn_overlay_toggle = QPushButton(tr("main.show_overlay"))
         self.btn_overlay_toggle.setStyleSheet(_footer_btn_style)
         self.btn_overlay_toggle.clicked.connect(self._toggle_overlay_visibility)
         log_toggle_layout.addWidget(self.btn_overlay_toggle)
 
         # 2. 译文工作台
-        self.btn_workbench_toggle = QPushButton("🗂️ 译文工作台")
-        self.btn_workbench_toggle.setFixedWidth(150)
+        self.btn_workbench_toggle = QPushButton(tr("main.workbench"))
         self.btn_workbench_toggle.setEnabled(False)
         self.btn_workbench_toggle.setStyleSheet(_footer_btn_style)
         self.btn_workbench_toggle.clicked.connect(self._show_workbench)
         log_toggle_layout.addWidget(self.btn_workbench_toggle)
 
         # 3. 日志展开/收起
-        self.btn_log_toggle = QPushButton("📋 日志 ▲")
-        self.btn_log_toggle.setFixedWidth(130)
+        self.btn_log_toggle = QPushButton(tr("main.log_open"))
         self.btn_log_toggle.setStyleSheet(_footer_btn_style)
         self.btn_log_toggle.clicked.connect(self._toggle_log)
         log_toggle_layout.addWidget(self.btn_log_toggle)
-
-        # 中间弹簧，将左侧三个按钮留在左边，右侧内容推向最右
         log_toggle_layout.addStretch()
 
-        # 4. QQ群号（靠右对齐）
-        self.qq_group_label = QLabel("QQ群: 1058127921")
-        self.qq_group_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.qq_group_label.setStyleSheet("color: #666; font-size: 20px; margin-right: 5px;")
-        log_toggle_layout.addWidget(self.qq_group_label)
+        # 4. 界面语言（靠右；菜单始终使用各语言自己的名称）
+        self.btn_language = QPushButton()
+        self.btn_language.setStyleSheet(_footer_btn_style)
+        self.language_menu = QMenu(self.btn_language)
+        self.language_menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a2e; color: #eee;
+                border: 1px solid #444; padding: 5px;
+                font-size: 16px;
+            }
+            QMenu::item { padding: 7px 28px 7px 12px; border-radius: 3px; }
+            QMenu::item:selected { background-color: #16213e; color: #4a9eff; }
+        """)
+        self.btn_language.setMenu(self.language_menu)
+        self._rebuild_language_menu()
+        log_toggle_layout.addWidget(self.btn_language)
 
+        self._fit_footer_buttons()
         layout.addLayout(log_toggle_layout)
 
         self.log_text = QTextEdit()
@@ -852,7 +886,7 @@ class MainWindow(QWidget):
                     "entry_type": ENTRY_TYPE_CHOICE,
                     "choice_index": index,
                     "speaker": "",
-                    "menu_label": f"选项 [{index + 1}]",
+                    "menu_label": f"{tr('overlay.choice')} [{index + 1}]",
                 }
             )
 
@@ -919,9 +953,8 @@ class MainWindow(QWidget):
             if refresh_workbench:
                 QMessageBox.warning(
                     self,
-                    "无法保存译文",
-                    "译文中的 RPG Maker 动态占位符与原文不一致。\n"
-                    "请完整保留形如 ⟦RL_V_1⟧ 的占位符后再保存。",
+                    tr("dialog.placeholder_mismatch_title"),
+                    tr("dialog.placeholder_mismatch"),
                 )
             return None
         saved_entry = self.cache.save_manual_translation(
@@ -945,7 +978,100 @@ class MainWindow(QWidget):
         self._save_manual_translation_entry(payload, refresh_workbench=False)
 
     def _update_workbench_toggle_button(self, *_):
-        self.btn_workbench_toggle.setText("🗂️ 译文工作台")
+        self.btn_workbench_toggle.setText(tr("main.workbench"))
+        self._fit_footer_buttons()
+
+    def _set_status(self, key: str, **params):
+        self._status_message = (key, dict(params))
+        self.status_label.setText(tr(key, **params))
+
+    def _on_status_signal(self, text):
+        if isinstance(text, LocalizedString):
+            self._status_message = (text.key, text.params)
+        self.status_label.setText(str(text or ""))
+
+    def _refresh_drop_label_language(self):
+        if not self._current_game_exe:
+            self.drop_label.setText(tr("main.drop_game"))
+            return
+        name = os.path.basename(self._current_game_exe)
+        extra = ""
+        if self._selected_game_detected_running and not self._hook_installed:
+            extra = f'<br><span style="color:#ffb454;">{tr("drop.game_already_running")}</span>'
+        elif self._hook_installed:
+            extra = f'<br><span style="color:#4a9eff;">{tr("drop.hook_loaded")}</span>'
+        self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}{extra}')
+
+    def _reload_engine_combo(self, preferred_engine: str | None = None):
+        """Rebuild provider choices while preserving the stable provider id."""
+        if preferred_engine is None:
+            preferred_engine = self.engine_combo.currentData() or self.config.get(
+                "translation_engine", "builtin"
+            )
+        self.engine_combo.blockSignals(True)
+        try:
+            self.engine_combo.clear()
+            for provider_id, name, spec in iter_provider_options(self.config):
+                display_name = provider_display_name(spec, tr) if spec else name
+                self.engine_combo.addItem(display_name, provider_id)
+            index = self.engine_combo.findData(preferred_engine)
+            if index < 0:
+                preferred_engine = "builtin"
+                self.config["translation_engine"] = preferred_engine
+                index = self.engine_combo.findData(preferred_engine)
+            self.engine_combo.setCurrentIndex(max(0, index))
+        finally:
+            self.engine_combo.blockSignals(False)
+
+    def retranslate_ui(self, *_):
+        version = self.config.get("version", "v1.5.0")
+        self.setWindowTitle(tr("app.title", version=version))
+        self.btn_settings.setText(tr("main.settings"))
+        self.btn_pin.setText(tr("common.pin"))
+        self.btn_start_game.setText(tr("main.start_game"))
+        self.btn_start_game.setToolTip(tr("main.start_game_tip"))
+        self.btn_uninstall.setText(tr("main.uninstall_hook"))
+        self.btn_uninstall.setToolTip(tr("main.uninstall_hook_tip"))
+        self.btn_clear_cache.setText(tr("main.clear_cache"))
+        self.btn_clear_cache.setToolTip(tr("main.clear_cache_tip"))
+        self.engine_label.setText(tr("main.engine"))
+        self.model_label.setText(tr("main.model"))
+        self.model_hint.setText(tr("main.model_editable"))
+        self.node_label.setText(tr("main.route"))
+        self._render_latency_button()
+        self.btn_trial_key.setText(tr("main.get_trial"))
+        self.btn_refresh_expiry.setToolTip(tr("main.refresh_expiry"))
+        self.url_label.setText(tr("main.api_address"))
+        self.key_label.setText(tr("main.api_key"))
+        self.btn_key_toggle.setToolTip(tr("common.show_hide_key"))
+        self._reload_engine_combo()
+        self.node_combo.blockSignals(True)
+        try:
+            for index, node in enumerate(self.config.get("builtin_nodes", [])):
+                if index < self.node_combo.count():
+                    self.node_combo.setItemText(index, localized_node_name(node.get("name", "")))
+        finally:
+            self.node_combo.blockSignals(False)
+        self._update_model_combo()
+        current_engine = self.config.get("translation_engine", "builtin")
+        if current_engine == "ollama":
+            self.url_input.setPlaceholderText(tr("main.example_url", url="http://localhost:11434"))
+        elif current_engine == "builtin":
+            self.url_input.setPlaceholderText(tr("main.example_url", url="http://localhost:8000"))
+            self.key_input.setPlaceholderText(tr("main.optional_auth"))
+        else:
+            self.url_input.setPlaceholderText(tr("main.example_url", url=f"https://api.{current_engine}.com"))
+        self._update_overlay_toggle_button()
+        self._update_workbench_toggle_button()
+        self.btn_log_toggle.setText(tr("main.log_open" if self.log_text.isVisible() else "main.log_closed"))
+        self._rebuild_language_menu()
+        self._fit_footer_buttons()
+        self._refresh_drop_label_language()
+        key, params = self._status_message
+        self.status_label.setText(tr(key, **params))
+        self._update_api_status_label()
+        self._update_api_expiry_label()
+        self._update_bulk_workbench_state()
 
     def _show_workbench(self, focus_source: str = ""):
         if not hasattr(self, "workbench") or not self.workbench:
@@ -975,8 +1101,11 @@ class MainWindow(QWidget):
             return
 
         save_config(self.config)
+        if previous_config.get("ui_language", "auto") != self.config.get("ui_language", "auto"):
+            set_language(self.config.get("ui_language", "auto"), QApplication.instance())
 
         engine = self.config.get("translation_engine", "builtin")
+        previous_engine = previous_config.get("translation_engine", "builtin")
         semantic_keys = {
             "source_lang",
             "target_lang",
@@ -985,16 +1114,20 @@ class MainWindow(QWidget):
             "temperature",
             "keep_original_names",
         }
-        active_connection_keys = {
-            f"{engine}_url",
-            f"{engine}_api_key",
-            "api_timeout_seconds",
-        }
         clear_cache = any(previous_config.get(key) != self.config.get(key) for key in semantic_keys)
-        translator_needs_rebuild = clear_cache or any(
-            previous_config.get(key) != self.config.get(key) for key in active_connection_keys
+        provider_changed = (
+            previous_engine != engine
+            or provider_connection_signature(previous_config, previous_engine)
+            != provider_connection_signature(self.config, engine)
+        )
+        translator_needs_rebuild = (
+            clear_cache
+            or provider_changed
+            or previous_config.get("api_timeout_seconds") != self.config.get("api_timeout_seconds")
         )
         socket_port_changed = previous_config.get("socket_port") != self.config.get("socket_port")
+
+        self._reload_engine_combo(engine)
 
         if translator_needs_rebuild:
             self._rebuild_translator(clear_cache=clear_cache)
@@ -1002,27 +1135,34 @@ class MainWindow(QWidget):
         self.node_combo.blockSignals(True)
         self.node_combo.clear()
         for node in self.config.get("builtin_nodes", []):
-            self.node_combo.addItem(node.get("name", "未命名"), node.get("url", ""))
+            self.node_combo.addItem(localized_node_name(node.get("name", tr("common.unnamed"))), node.get("url", ""))
         idx = self.node_combo.findData(self.config.get("builtin_url", ""))
         if idx >= 0:
             self.node_combo.setCurrentIndex(idx)
         self.node_combo.blockSignals(False)
+        self._latency_test_token += 1
+        self._latency_test_state = "idle"
+        self._latency_test_ms = None
+        self._latency_test_error = ""
+        self._render_latency_button()
 
+        active_provider = resolve_provider(self.config, engine)
         if engine == "builtin":
-            self.url_input.setText(self.config.get("builtin_url", ""))
-            self.key_input.setText(self.config.get("builtin_api_key", ""))
+            self.url_input.setText(active_provider.url if active_provider else "")
+            self.key_input.setText(active_provider.api_key if active_provider else "")
             self._update_api_status_label()
             self._update_api_expiry_label()
-        else:
-            self.url_input.setText(self.config.get(f"{engine}_url", ""))
-            self.key_input.setText(self.config.get(f"{engine}_api_key", ""))
+        elif active_provider:
+            self.url_input.setText(active_provider.url)
+            self.key_input.setText(active_provider.api_key)
+        self._update_model_combo()
 
         if socket_port_changed:
             self._restart_hook_server()
             self._hook_installed = False
-            self.status_label.setText("✅ 设置已保存，Socket 端口已更新，下次会自动重新注入 Hook")
+            self._set_status("status.settings_saved_port")
         else:
-            self.status_label.setText("✅ 设置已保存")
+            self._set_status("status.settings_saved")
 
         if hasattr(self, "overlay") and self.overlay:
             self.overlay.update_config(self.config)
@@ -1057,7 +1197,7 @@ class MainWindow(QWidget):
                 return
             self.config["builtin_url"] = url
             node_name = self.node_combo.currentText() or url
-            self.status_label.setText(f"🚀 内置通道: {node_name}")
+            self._set_status("status.builtin_route", name=node_name)
             
             # 同步节点下拉框状态
             idx = self.node_combo.findData(url)
@@ -1066,13 +1206,12 @@ class MainWindow(QWidget):
                 self.node_combo.setCurrentIndex(idx)
             self.node_combo.blockSignals(False)
         else:
-            # 所有其它引擎统一用前缀处理
-            config_key = f"{engine}_url"
-            if url == self.config.get(config_key, ""):
+            provider = resolve_provider(self.config, engine)
+            if provider is None or url == provider.url:
                 return
-            self.config[config_key] = url
+            update_provider(self.config, engine, url=url)
             engine_name = self.engine_combo.currentText()
-            self.status_label.setText(f"🌐 {engine_name} API 地址: {url}")
+            self._set_status("status.api_url", engine=engine_name, url=url)
 
         save_config(self.config)
         # 重建翻译器，但不要因为连接参数变更清缓存
@@ -1083,9 +1222,7 @@ class MainWindow(QWidget):
         """用户修改了 API Key"""
         key = self.key_input.text().strip()
         engine = self.config.get("translation_engine", "builtin")
-        # 统一使用 {engine}_api_key 前缀保存
-        config_key = f"{engine}_api_key"
-        self.config[config_key] = key
+        update_provider(self.config, engine, api_key=key)
 
         save_config(self.config)
         # 重建翻译器，但不要因为 Key 变更清缓存
@@ -1099,13 +1236,13 @@ class MainWindow(QWidget):
     def _on_request_trial_key(self):
         """用户点击'获取试用API'按钮，向服务器申请 Key 并填入文本框"""
         self.btn_trial_key.setEnabled(False)
-        self.btn_trial_key.setText("⏳ 申请中...")
+        self.btn_trial_key.setText(tr("status.trial_requesting"))
         # 通过信号回到主线程
         self._trial_key_signal.connect(self._on_trial_key_result)
 
         def _request():
             # 从配置中读取获取试用 Key 的 API 地址，若无则使用默认值
-            trial_url = self.config.get("trial_key_url", "https://frp-bar.com:58385/get_trial_key")
+            trial_url = self.config.get("trial_key_url", "https://www-map.h53633179.nyat.app:58385/get_trial_key")
             result = register_trial_key(get_hwid(), trial_url)
             self._trial_key_signal.emit(result or {})
 
@@ -1115,7 +1252,7 @@ class MainWindow(QWidget):
         """处理试用 Key 申请结果（主线程回调）"""
         self._trial_key_signal.disconnect(self._on_trial_key_result)
         self.btn_trial_key.setEnabled(True)
-        self.btn_trial_key.setText("🔑 获取试用API")
+        self.btn_trial_key.setText(tr("main.get_trial"))
 
         result = result or {}
         key = str(result.get("key", "") or "").strip()
@@ -1131,16 +1268,16 @@ class MainWindow(QWidget):
             # 重建翻译器以使用新 Key
             engine = self.config.get("translation_engine", "builtin")
             self.translator = create_translator(engine, self.config)
-            self.status_label.setText("✅ 试用 Key 已获取并填入")
+            self._set_status("status.trial_ready")
             self._update_api_expiry_label()
             self.btn_refresh_expiry.setEnabled(True)
             print(f"[Main] Trial Key obtained and auto-filled")
         else:
-            self.status_label.setText(f"❌ 获取试用 Key 失败，请检查网络。{self._support_tip()}")
+            self._set_status("status.trial_failed", support=self._support_tip())
             QMessageBox.warning(
                 self,
-                "获取试用 Key 失败",
-                f"请检查网络后重试。\n\n{self._support_tip()}",
+                tr("dialog.trial_failed_title"),
+                tr("dialog.trial_failed", support=self._support_tip()),
             )
         # 更新 API 状态标识
         self._update_api_status_label()
@@ -1151,28 +1288,35 @@ class MainWindow(QWidget):
         """更新内置通道的 API 状态指示器"""
         key = self.config.get("builtin_api_key", "")
         if key:
-            self.api_status_label.setText("✅ API已就绪")
+            self.api_status_label.setText(tr("status.api_ready"))
             self.api_status_label.setStyleSheet("font-size: 18px; padding-left: 8px; color: #4caf50;")
         else:
-            self.api_status_label.setText("❌ 未获取API")
+            self.api_status_label.setText(tr("status.api_missing"))
             self.api_status_label.setStyleSheet("font-size: 18px; padding-left: 8px; color: #ff5252;")
 
     def _update_api_expiry_label(self, text: str | None = None, loading: bool = False):
         """更新内置通道 API 到期时间显示"""
         if loading:
-            display_text = "刷新中..."
+            display_text = tr("status.refreshing")
             color = "#4a9eff"
         else:
             cached = self.config.get("builtin_api_expiry", "").strip()
             display_text = (text if text is not None else cached).strip()
             if not display_text:
-                display_text = "未获取"
+                display_text = tr("status.not_acquired")
                 color = "#888"
-            elif display_text in ("获取失败", "待接入"):
+            elif display_text in (NO_EXPIRY, "无到期时间"):
+                display_text = tr("status.no_expiry")
+                color = "#ddd"
+            elif display_text in ("__FETCH_FAILED__", "获取失败", tr("status.fetch_failed")):
+                display_text = tr("status.fetch_failed")
+                color = "#ffb74d"
+            elif display_text in ("__PENDING__", "待接入", tr("status.pending")):
+                display_text = tr("status.pending")
                 color = "#ffb74d"
             else:
                 color = "#ddd"
-        self.api_expiry_label.setText(f"API到期时间：{display_text}")
+        self.api_expiry_label.setText(tr("status.api_expiry", value=display_text))
         self.api_expiry_label.setStyleSheet(f"font-size: 18px; color: {color}; padding-left: 12px;")
 
     def _set_expiry_refresh_loading(self, loading: bool):
@@ -1199,7 +1343,7 @@ class MainWindow(QWidget):
 
     def _request_trial_expiry_text(self):
         """查询真实 API 到期时间"""
-        trial_url = self.config.get("trial_key_url", "https://frp-bar.com:58385/get_trial_key")
+        trial_url = self.config.get("trial_key_url", "https://www-map.h53633179.nyat.app:58385/get_trial_key")
         api_key = self.config.get("builtin_api_key", "").strip()
         if not api_key:
             return ""
@@ -1214,8 +1358,8 @@ class MainWindow(QWidget):
             self._update_api_expiry_label(expiry_text)
             print(f"[Main] Trial API expiry refreshed: {expiry_text}")
         else:
-            self._update_api_expiry_label("获取失败")
-            self.status_label.setText(f"❌ API 到期时间获取失败。{self._support_tip()}")
+            self._update_api_expiry_label("__FETCH_FAILED__")
+            self._set_status("status.expiry_failed", support=self._support_tip())
 
     def _update_url_visibility(self):
         """控制 API 地址、API 密钥、线路选择框的可见性"""
@@ -1244,10 +1388,97 @@ class MainWindow(QWidget):
 
     def _on_node_changed(self):
         """修改内置通道节点下拉框时，自动填入API地址并保存配置"""
+        self._latency_test_token += 1
+        self._latency_test_state = "idle"
+        self._latency_test_ms = None
+        self._latency_test_error = ""
+        self._render_latency_button()
         url = self.node_combo.currentData()
         if url:
             self.url_input.setText(url)
             self._on_url_changed()
+
+    def _render_latency_button(self):
+        if not hasattr(self, "btn_test_latency"):
+            return
+        state = self._latency_test_state
+        if state == "testing":
+            self.btn_test_latency.setText(tr("main.latency_testing"))
+            self.btn_test_latency.setEnabled(False)
+        elif state == "success":
+            self.btn_test_latency.setText(f"{self._latency_test_ms:.0f} ms")
+            self.btn_test_latency.setEnabled(True)
+        elif state == "failed":
+            self.btn_test_latency.setText(tr("main.latency_failed"))
+            self.btn_test_latency.setEnabled(True)
+        else:
+            self.btn_test_latency.setText(tr("main.test_latency"))
+            self.btn_test_latency.setEnabled(True)
+        tooltip = tr("main.test_latency_tip")
+        if state == "failed" and self._latency_test_error:
+            tooltip = f"{tooltip}\n{self._latency_test_error}"
+        self.btn_test_latency.setToolTip(tooltip)
+
+    def _on_test_builtin_latency(self):
+        url = self.node_combo.currentData() or self.config.get("builtin_url", "")
+        if not url or self._latency_test_state == "testing":
+            return
+        self._latency_test_token += 1
+        token = self._latency_test_token
+        self._latency_test_state = "testing"
+        self._latency_test_ms = None
+        self._latency_test_error = ""
+        self._render_latency_button()
+        test_config = dict(self.config)
+        test_config["builtin_url"] = url
+        test_config["api_timeout_seconds"] = 10
+
+        def _test():
+            tester = None
+            try:
+                tester = create_translator("builtin", test_config)
+                latency_ms, status_code = tester.test_latency()
+                result = {
+                    "token": token,
+                    "url": url,
+                    "ok": True,
+                    "latency_ms": latency_ms,
+                    "status_code": status_code,
+                }
+            except Exception as exc:
+                result = {
+                    "token": token,
+                    "url": url,
+                    "ok": False,
+                    "error": str(exc),
+                }
+            finally:
+                if tester is not None:
+                    tester.close()
+            self._latency_test_signal.emit(result)
+
+        threading.Thread(target=_test, daemon=True).start()
+
+    def _on_builtin_latency_result(self, result):
+        if result.get("token") != self._latency_test_token:
+            return
+        current_url = self.node_combo.currentData() or self.config.get("builtin_url", "")
+        if result.get("url") != current_url:
+            return
+        if result.get("ok"):
+            self._latency_test_state = "success"
+            self._latency_test_ms = float(result.get("latency_ms", 0))
+            self._latency_test_error = ""
+            print(
+                f"[Main] Built-in route latency: {self._latency_test_ms:.0f}ms "
+                f"(HTTP {result.get('status_code')})"
+            )
+        else:
+            self._latency_test_state = "failed"
+            self._latency_test_ms = None
+            self._latency_test_error = str(result.get("error", ""))
+            print(f"[Main] Built-in route latency test failed: {self._latency_test_error}")
+        self._render_latency_button()
 
 
     def _toggle_log(self):
@@ -1260,18 +1491,59 @@ class MainWindow(QWidget):
             self.log_text.setVisible(False)
             QApplication.processEvents()
             self.resize(self.width(), target_h)
-            self.btn_log_toggle.setText("📋 日志 ▲")
+            self.btn_log_toggle.setText(tr("main.log_open"))
         else:
             # 用保存的高度恢复窗口尺寸
             saved_h = getattr(self, '_log_saved_height', 200)
             target_h = self.height() + saved_h + spacing
             self.log_text.setVisible(True)
             self.resize(self.width(), target_h)
-            self.btn_log_toggle.setText("📋 日志 ▼")
+            self.btn_log_toggle.setText(tr("main.log_closed"))
+        self._fit_footer_buttons()
 
     def _update_overlay_toggle_button(self, *_):
         visible = hasattr(self, "overlay") and self.overlay and self.overlay.isVisible()
-        self.btn_overlay_toggle.setText("🪟 隐藏浮窗" if visible else "🪟 显示浮窗")
+        self.btn_overlay_toggle.setText(tr("main.hide_overlay" if visible else "main.show_overlay"))
+        self._fit_footer_buttons()
+
+    def _fit_footer_buttons(self):
+        """Size footer actions to their current translation, without equal stretching."""
+        for button_name in (
+            "btn_overlay_toggle", "btn_workbench_toggle", "btn_log_toggle",
+            "btn_language",
+        ):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setFixedWidth(button.sizeHint().width())
+
+    def _language_button_text(self) -> str:
+        preference = self.config.get("ui_language", "auto")
+        for label, locale in LANGUAGE_OPTIONS:
+            if locale == preference:
+                return f"🌐 {tr(label) if locale == 'auto' else label}"
+        return "🌐 English"
+
+    def _rebuild_language_menu(self):
+        if not hasattr(self, "language_menu"):
+            return
+        self.btn_language.setText(self._language_button_text())
+        self.language_menu.clear()
+        preference = self.config.get("ui_language", "auto")
+        for label, locale in LANGUAGE_OPTIONS:
+            display_name = tr(label) if locale == "auto" else label
+            action = self.language_menu.addAction(display_name)
+            action.setCheckable(True)
+            action.setChecked(locale == preference)
+            action.triggered.connect(
+                lambda checked=False, selected=locale: self._change_ui_language(selected)
+            )
+
+    def _change_ui_language(self, preference: str):
+        if preference == self.config.get("ui_language", "auto"):
+            return
+        self.config["ui_language"] = preference
+        save_config(self.config)
+        set_language(preference, QApplication.instance())
 
     def _toggle_overlay_visibility(self):
         if not hasattr(self, "overlay") or not self.overlay:
@@ -1297,21 +1569,20 @@ class MainWindow(QWidget):
             cursor.removeSelectedText()
 
     def _support_tip(self) -> str:
-        return f"如需协助，请加入官方交流QQ群：{self.SUPPORT_QQ_GROUP}"
+        return tr("status.support", number=self.SUPPORT_QQ_GROUP)
 
     def _auto_check_updates(self):
         self._start_update_check()
 
     def _restore_status_after_update_check(self):
-        text = self.status_label.text()
-        if "自动检查更新" in text or "启动后自动检查更新" in text:
-            self.status_label.setText("就绪 - 等待拖入游戏")
+        if self._status_message[0] == "status.update_checking":
+            self._set_status("main.ready")
 
     def _start_update_check(self):
         if self._update_checking:
             return
         self._update_checking = True
-        self.status_label.setText("⏳ 启动后自动检查更新中...")
+        self._set_status("status.update_checking")
 
         def _worker():
             repo = self.config.get("github_repo", "liuyuan-wen/RenpyLens")
@@ -1343,9 +1614,9 @@ class MainWindow(QWidget):
                 #     "当前网络无法稳定访问 GitHub，已跳过自动更新检查。\n\n"
                 #     f"{self._support_tip()}",
                 # )
-                self.status_label.setText(f"⚠️ 自动更新检查已跳过。{self._support_tip()}")
+                self._set_status("status.update_skipped", support=self._support_tip())
             else:
-                self.status_label.setText(f"⚠️ 自动更新检查失败。{self._support_tip()}")
+                self._set_status("status.update_failed", support=self._support_tip())
             return
 
         if not release:
@@ -1360,45 +1631,39 @@ class MainWindow(QWidget):
         if not getattr(sys, "frozen", False):
             QMessageBox.information(
                 self,
-                "发现新版本",
-                f"检测到新版本：{latest_tag}\n当前版本：{current_version}\n\n"
-                "当前为源码运行模式，不执行自动替换。\n"
-                f"{self._support_tip()}",
+                tr("dialog.new_version"),
+                tr("dialog.update_source_mode", latest=latest_tag, current=current_version, support=self._support_tip()),
             )
             return
 
         if not release.asset_url:
             QMessageBox.information(
                 self,
-                "发现新版本",
-                f"检测到新版本：{latest_tag}\n当前版本：{current_version}\n\n"
-                "未找到可自动更新的 EXE 资源。\n"
-                f"{self._support_tip()}",
+                tr("dialog.new_version"),
+                tr("dialog.update_no_asset", latest=latest_tag, current=current_version, support=self._support_tip()),
             )
             return
 
         reply = QMessageBox.question(
             self,
-            "发现新版本",
-            f"检测到新版本：{latest_tag}\n当前版本：{current_version}\n\n"
-            "点击“是”将自动从 GitHub 下载并更新（完成后自动重启）。\n"
-            "若下载不便，也可直接加入 QQ 群获取最新版本：1058127921",
+            tr("dialog.new_version"),
+            tr("dialog.update_question", latest=latest_tag, current=current_version, number=self.SUPPORT_QQ_GROUP),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
         if reply != QMessageBox.Yes:
-            self.status_label.setText(f"ℹ️ 已跳过本次自动更新。{self._support_tip()}")
+            self._set_status("status.update_skipped", support=self._support_tip())
             return
 
         self._start_update_download(release)
 
     def _start_update_download(self, release):
         if self._update_downloading:
-            self.status_label.setText("⏳ 更新包正在下载，请稍候...")
+            self._set_status("status.update_downloading_wait")
             return
 
         self._update_downloading = True
-        self.status_label.setText("⏳ 正在下载更新包...")
+        self._set_status("status.update_downloading")
 
         def _worker():
             file_path, err = download_release_asset(release.asset_url, release.asset_name or "RenpyLens_update.exe")
@@ -1422,10 +1687,10 @@ class MainWindow(QWidget):
         if err or not file_path:
             QMessageBox.warning(
                 self,
-                "更新下载失败",
-                f"{err or '下载文件无效'}\n\n{self._support_tip()}",
+                tr("dialog.update_download_failed"),
+                f"{err or tr('common.unknown_error')}\n\n{self._support_tip()}",
             )
-            self.status_label.setText(f"❌ 更新下载失败。{self._support_tip()}")
+            self._set_status("status.update_download_failed", support=self._support_tip())
             return
 
         target_exe = os.path.abspath(sys.executable)
@@ -1437,13 +1702,13 @@ class MainWindow(QWidget):
         if not ok:
             QMessageBox.warning(
                 self,
-                "更新启动失败",
-                f"{launch_err or '无法启动更新程序'}\n\n{self._support_tip()}",
+                tr("dialog.update_launch_failed"),
+                f"{launch_err or tr('common.unknown_error')}\n\n{self._support_tip()}",
             )
-            self.status_label.setText(f"❌ 更新启动失败。{self._support_tip()}")
+            self._set_status("status.update_launch_failed", support=self._support_tip())
             return
 
-        QMessageBox.information(self, "准备更新", "更新包已下载，程序将退出并自动完成更新后重启。")
+        QMessageBox.information(self, tr("dialog.prepare_update"), tr("dialog.prepare_update_message"))
         QApplication.quit()
 
     def _setup_log_redirect(self):
@@ -1718,21 +1983,26 @@ class MainWindow(QWidget):
             job = dict(self._bulk_job)
 
         state = job.get("state", "idle")
+        stage_message = job.get("stage_message") or ""
+        result_message = job.get("result_message") or ""
+        if isinstance(stage_message, LocalizedString):
+            stage_message = tr(stage_message.key, **stage_message.params)
+        if isinstance(result_message, LocalizedString):
+            result_message = tr(result_message.key, **result_message.params)
         if state == "idle":
             self.workbench.set_bulk_idle()
             return
         if state in {"preparing", "scanning", "cancelling"}:
-            self.workbench.set_bulk_preparing(job.get("stage_message") or "0%")
+            self.workbench.set_bulk_preparing(stage_message or "0%")
             return
         if state == "translating":
             self.workbench.set_bulk_progress(
                 int(job.get("covered_count") or 0),
                 int(job.get("total_texts") or 0),
-                job.get("stage_message") or "正在批量翻译...",
+                stage_message or tr("bulk.translating"),
             )
             return
 
-        result_message = job.get("result_message") or ""
         if state == "completed":
             self.workbench.set_bulk_result(result_message, level="success", auto_reset_ms=5000)
         elif state == "cancelled":
@@ -1764,23 +2034,30 @@ class MainWindow(QWidget):
         self._update_bulk_workbench_state()
 
     def _finish_bulk_job(self, job_id: str, state: str, message: str):
+        localized_message = message if isinstance(message, LocalizedString) else None
         final_message = str(message or "").strip()
         with self._bulk_job_lock:
             if self._bulk_job.get("job_id") != job_id:
                 return
             self._bulk_job["state"] = state
             self._bulk_job["stage_message"] = ""
-            self._bulk_job["result_message"] = final_message
+            self._bulk_job["result_message"] = localized_message or final_message
             self._bulk_job["error"] = final_message if state == "failed" else ""
 
         self._bulk_ui_signal.emit({"action": "sync"})
         self._bulk_ui_signal.emit({"action": "refresh_workbench"})
         if state == "completed":
-            self._status_signal.emit(final_message or "✅ 全游戏翻译完成")
+            if localized_message:
+                self._status_message = (localized_message.key, localized_message.params)
+            self._status_signal.emit(final_message or tr("bulk.completed"))
         elif state == "cancelled":
-            self._status_signal.emit(final_message or "⚠️ 已取消全游戏翻译")
+            if localized_message:
+                self._status_message = (localized_message.key, localized_message.params)
+            self._status_signal.emit(final_message or tr("bulk.cancelled"))
         elif state == "failed":
-            self._status_signal.emit(final_message or "❌ 全游戏翻译失败")
+            if localized_message:
+                self._status_message = (localized_message.key, localized_message.params)
+            self._status_signal.emit(final_message or tr("bulk.failed"))
         if not self._is_game_process_running():
             self._set_translation_controls_enabled(True)
             self.btn_start_game.setEnabled(bool(self._current_game_exe))
@@ -1794,16 +2071,16 @@ class MainWindow(QWidget):
             or "script is unavailable" in lowered
             or "all_stmts is unavailable" in lowered
         ):
-            return "Ren'Py 脚本尚未完成加载，请等待游戏进入主菜单或第一段对话后再试。"
-        return clean_detail or "未知错误"
+            return tr("bulk.script_not_ready")
+        return clean_detail or tr("common.unknown_error")
 
     def _build_bulk_translate_message(self) -> str:
-        scan_description = "🧩 自动打开游戏，读取所有文本，分批进行大模型翻译。"
+        scan_description = tr("bulk.scan_renpy")
         if self._current_game and self._current_game.capabilities.offline_scan:
-            scan_description = "🧩 离线读取 RPG Maker 数据文件，无需启动游戏，随后分批翻译。"
+            scan_description = tr("bulk.scan_rpgmaker")
         parts = [
             scan_description,
-            "💾 翻译结果会保存到配置目录中的 <code>translation_cache.db</code>。",
+            tr("bulk.cache_note"),
         ]
         return "<br><br>".join(parts)
 
@@ -1813,7 +2090,7 @@ class MainWindow(QWidget):
             owner = self.workbench
 
         dialog = QDialog(owner)
-        dialog.setWindowTitle("🚀 一键翻译全游戏")
+        dialog.setWindowTitle(tr("bulk.title"))
         dialog.setWindowModality(Qt.WindowModal)
         dialog.setMinimumWidth(620)
         dialog.setStyleSheet(
@@ -1884,11 +2161,8 @@ class MainWindow(QWidget):
 
             warning_text = QLabel(
                 '<div style="font-size: 17px; line-height: 1.45;">'
-                '<span style="font-weight: bold; color: #ffd27a;">⚠ 内置通道提醒</span><br>'
-                '<span style="color: #f0c987;">'
-                "如果使用的是内置通道，请先联系 QQ 群群主获取打开 TPM/RPM 上限的 API Key，"
-                "否则全量翻译过程中可能触发限额并报错。"
-                "</span></div>"
+                f'<span style="font-weight: bold; color: #ffd27a;">{tr("bulk.builtin_warning_title")}</span><br>'
+                f'<span style="color: #f0c987;">{tr("bulk.builtin_warning")}</span></div>'
             )
             warning_text.setWordWrap(True)
             warning_layout.addWidget(warning_text)
@@ -1896,11 +2170,11 @@ class MainWindow(QWidget):
 
         buttons = QHBoxLayout()
         buttons.addStretch()
-        cancel_button = QPushButton("取消")
+        cancel_button = QPushButton(tr("common.cancel"))
         cancel_button.setObjectName("bulk_cancel_btn")
         cancel_button.setCursor(Qt.PointingHandCursor)
         cancel_button.clicked.connect(dialog.reject)
-        confirm_button = QPushButton("确认，开始翻译")
+        confirm_button = QPushButton(tr("bulk.confirm"))
         confirm_button.setObjectName("bulk_confirm_btn")
         confirm_button.setCursor(Qt.PointingHandCursor)
         confirm_button.clicked.connect(dialog.accept)
@@ -1912,10 +2186,10 @@ class MainWindow(QWidget):
 
     def _on_workbench_bulk_translate_requested(self):
         if not self._current_game_exe:
-            QMessageBox.warning(self, "未选择游戏", "请先选择一个受支持的游戏后再使用“一键翻译全游戏”。")
+            QMessageBox.warning(self, tr("dialog.no_game"), tr("dialog.no_game_bulk"))
             return
         if self._is_bulk_job_active():
-            QMessageBox.information(self, "任务进行中", "一键翻译全游戏任务已经在进行中。")
+            QMessageBox.information(self, tr("dialog.task_running"), tr("dialog.task_running_message"))
             return
 
         if not self._show_bulk_translate_confirm_dialog():
@@ -1928,7 +2202,7 @@ class MainWindow(QWidget):
                 {
                     "job_id": job_id,
                     "state": "preparing",
-                    "stage_message": "0% · 正在准备任务...",
+                    "stage_message": tr("bulk.preparing"),
                 }
             )
         self.btn_start_game.setEnabled(False)
@@ -1941,7 +2215,7 @@ class MainWindow(QWidget):
                 return
             self._bulk_job["cancel_requested"] = True
             self._bulk_job["state"] = "cancelling"
-            self._bulk_job["stage_message"] = "0% · 正在取消..."
+            self._bulk_job["stage_message"] = tr("bulk.cancelling")
             job_id = str(self._bulk_job.get("job_id") or "")
         self._bulk_ui_signal.emit({"action": "sync"})
         if job_id and self._current_game and self._current_game.engine == ENGINE_RENPY:
@@ -1951,7 +2225,7 @@ class MainWindow(QWidget):
 
     def _bootstrap_bulk_job(self, job_id: str):
         if not self._current_game_exe or not self._current_game:
-            self._finish_bulk_job(job_id, "failed", "❌ 未选择游戏，无法开始全量翻译。")
+            self._finish_bulk_job(job_id, "failed", tr("bulk.no_game"))
             return
 
         if self._current_game.capabilities.offline_scan:
@@ -1961,7 +2235,7 @@ class MainWindow(QWidget):
         with self._bulk_job_lock:
             if self._bulk_job.get("job_id") != job_id:
                 return
-            self._bulk_job["stage_message"] = "0% · 正在注入最新 Hook..."
+            self._bulk_job["stage_message"] = tr("bulk.injecting")
         self._bulk_ui_signal.emit({"action": "sync"})
 
         ok, msg = install_hook(
@@ -1972,7 +2246,7 @@ class MainWindow(QWidget):
             self._hook_session_id,
         )
         if not ok:
-            self._finish_bulk_job(job_id, "failed", f"❌ 注入 Hook 失败：{msg}")
+            self._finish_bulk_job(job_id, "failed", tr("bulk.inject_failed", detail=msg))
             return
 
         print(f"[Bulk] {msg}")
@@ -1982,14 +2256,14 @@ class MainWindow(QWidget):
                 self._finish_bulk_job(
                     job_id,
                     "failed",
-                    "❌ 当前游戏实例未加载新版 Hook。请通过 RenpyLens 重新注入并重启游戏后再试。",
+                    tr("bulk.old_hook"),
                 )
                 return
 
             with self._bulk_job_lock:
                 if self._bulk_job.get("job_id") != job_id:
                     return
-                self._bulk_job["stage_message"] = "0% · 正在启动游戏..."
+                self._bulk_job["stage_message"] = tr("bulk.starting_game")
             self._bulk_ui_signal.emit({"action": "sync"})
             self._bulk_ui_signal.emit({"action": "start_game"})
 
@@ -1999,7 +2273,7 @@ class MainWindow(QWidget):
                     if self._bulk_job.get("job_id") != job_id:
                         return
                     if self._bulk_job.get("cancel_requested"):
-                        self._finish_bulk_job(job_id, "cancelled", "⚠️ 已取消全游戏翻译。")
+                        self._finish_bulk_job(job_id, "cancelled", tr("bulk.cancelled"))
                         return
                 if self._hook_ready_event.wait(0.2):
                     break
@@ -2007,7 +2281,7 @@ class MainWindow(QWidget):
                 self._finish_bulk_job(
                     job_id,
                     "failed",
-                    "❌ 等待 Hook 就绪超时。请通过 RenpyLens 重新注入并重启游戏后再试。",
+                    tr("bulk.hook_timeout"),
                 )
                 return
 
@@ -2015,7 +2289,7 @@ class MainWindow(QWidget):
             with self._bulk_job_lock:
                 if self._bulk_job.get("job_id") != job_id:
                     return
-                self._bulk_job["stage_message"] = "0% · 正在等待游戏进入主菜单或第一段对白..."
+                self._bulk_job["stage_message"] = tr("bulk.waiting_game")
             self._bulk_ui_signal.emit({"action": "sync"})
 
             deadline = time.time() + 45.0
@@ -2024,7 +2298,7 @@ class MainWindow(QWidget):
                     if self._bulk_job.get("job_id") != job_id:
                         return
                     if self._bulk_job.get("cancel_requested"):
-                        self._finish_bulk_job(job_id, "cancelled", "⚠️ 已取消全游戏翻译。")
+                        self._finish_bulk_job(job_id, "cancelled", tr("bulk.cancelled"))
                         return
                 if self._hook_runtime_ready_event.wait(0.2):
                     break
@@ -2032,7 +2306,7 @@ class MainWindow(QWidget):
                 self._finish_bulk_job(
                     job_id,
                     "failed",
-                    "❌ 等待游戏进入可扫描状态超时。请等游戏进入主菜单或第一段对白后再试。",
+                    tr("bulk.runtime_timeout"),
                 )
                 return
 
@@ -2040,7 +2314,7 @@ class MainWindow(QWidget):
             if self._bulk_job.get("job_id") != job_id:
                 return
             self._bulk_job["state"] = "scanning"
-            self._bulk_job["stage_message"] = "0% · 正在扫描脚本..."
+            self._bulk_job["stage_message"] = tr("bulk.scanning_script")
             self._bulk_job["scan_entries"] = {}
             self._bulk_job["pending_entries"] = []
             self._bulk_job["total_texts"] = 0
@@ -2052,7 +2326,7 @@ class MainWindow(QWidget):
             self._finish_bulk_job(
                 job_id,
                 "failed",
-                f"❌ 无法连接新版 Hook 控制通道（{err}）。请通过 RenpyLens 重新注入并重启游戏后再试。",
+                tr("bulk.control_failed", detail=err),
             )
 
     def _bootstrap_rpgmaker_bulk_job(self, job_id: str):
@@ -2060,7 +2334,7 @@ class MainWindow(QWidget):
             if self._bulk_job.get("job_id") != job_id:
                 return
             self._bulk_job["state"] = "scanning"
-            self._bulk_job["stage_message"] = "0% · 正在离线扫描 RPG Maker 数据..."
+            self._bulk_job["stage_message"] = tr("bulk.scanning_rpgmaker")
             self._bulk_job["scan_entries"] = {}
         self._bulk_ui_signal.emit({"action": "sync"})
 
@@ -2081,7 +2355,7 @@ class MainWindow(QWidget):
                     if source and source not in scan_entries:
                         scan_entries[source] = dict(item)
                 self._bulk_job["stage_message"] = (
-                    f"0% · 正在离线扫描 RPG Maker 数据... 已发现 {len(scan_entries)} 条"
+                    tr("bulk.scanning_rpgmaker_count", count=len(scan_entries))
                 )
             self._bulk_ui_signal.emit({"action": "sync"})
 
@@ -2092,11 +2366,11 @@ class MainWindow(QWidget):
                 cancel_requested=cancel_requested,
             )
         except Exception as exc:
-            self._finish_bulk_job(job_id, "failed", f"❌ 扫描 RPG Maker 数据失败：{exc}")
+            self._finish_bulk_job(job_id, "failed", tr("bulk.rpg_scan_failed", detail=exc))
             return
 
         if cancel_requested():
-            self._finish_bulk_job(job_id, "cancelled", "⚠️ 已取消全游戏翻译。")
+            self._finish_bulk_job(job_id, "cancelled", tr("bulk.cancelled"))
             return
         self._on_hook_message_received(
             {"type": "bulk_scan_finished", "job_id": job_id, "total": len(entries)}
@@ -2138,7 +2412,7 @@ class MainWindow(QWidget):
                 if self._bulk_job.get("job_id") != active_job_id:
                     return
                 self._bulk_job["state"] = "scanning"
-                self._bulk_job["stage_message"] = "0% · 正在扫描脚本..."
+                self._bulk_job["stage_message"] = tr("bulk.scanning_script")
             self._bulk_ui_signal.emit({"action": "sync"})
             return
 
@@ -2158,13 +2432,13 @@ class MainWindow(QWidget):
                         "speaker": self._normalize_speaker((item or {}).get("speaker", "")),
                     }
                 self._bulk_job["stage_message"] = (
-                    f"0% · 正在扫描脚本... 已发现 {len(scan_entries)} 条"
+                    tr("bulk.scanning_script_count", count=len(scan_entries))
                 )
             self._bulk_ui_signal.emit({"action": "sync"})
             return
 
         if msg_type == "bulk_scan_cancelled":
-            self._finish_bulk_job(active_job_id, "cancelled", "⚠️ 已取消全游戏翻译。")
+            self._finish_bulk_job(active_job_id, "cancelled", tr("bulk.cancelled"))
             return
 
         if msg_type == "bulk_scan_error":
@@ -2172,7 +2446,7 @@ class MainWindow(QWidget):
             self._finish_bulk_job(
                 active_job_id,
                 "failed",
-                f"❌ 扫描脚本失败：{detail or '未知错误'}",
+                tr("bulk.script_scan_failed", detail=detail or tr("common.unknown_error")),
             )
             return
 
@@ -2190,23 +2464,23 @@ class MainWindow(QWidget):
                 self._bulk_job["pending_entries"] = pending_entries
                 if cancel_requested:
                     self._bulk_job["state"] = "cancelling"
-                    self._bulk_job["stage_message"] = "0% · 正在取消..."
+                    self._bulk_job["stage_message"] = tr("bulk.cancelling")
                 else:
                     self._bulk_job["state"] = "translating"
-                    self._bulk_job["stage_message"] = "正在批量翻译..."
+                    self._bulk_job["stage_message"] = tr("bulk.translating")
             self._bulk_ui_signal.emit({"action": "sync"})
 
             if cancel_requested:
-                self._finish_bulk_job(active_job_id, "cancelled", "🛑 已取消全游戏翻译。")
+                self._finish_bulk_job(active_job_id, "cancelled", tr("bulk.cancelled_stop"))
                 return
             if total_texts <= 0:
-                self._finish_bulk_job(active_job_id, "completed", "ℹ️ 没有扫描到可翻译文本。")
+                self._finish_bulk_job(active_job_id, "completed", tr("bulk.no_text"))
                 return
             if not pending_entries:
                 self._finish_bulk_job(
                     active_job_id,
                     "completed",
-                    f"✅ 全游戏翻译完成：{covered_count}/{total_texts}",
+                    tr("bulk.completed_count", done=covered_count, total=total_texts),
                 )
                 return
 
@@ -2249,10 +2523,10 @@ class MainWindow(QWidget):
                     if self._bulk_job.get("job_id") != job_id:
                         return
                     if self._bulk_job.get("cancel_requested"):
-                        self._finish_bulk_job(job_id, "cancelled", "⚠️ 已取消全游戏翻译。")
+                        self._finish_bulk_job(job_id, "cancelled", tr("bulk.cancelled"))
                         return
                     self._bulk_job["state"] = "translating"
-                    self._bulk_job["stage_message"] = "正在批量翻译..."
+                    self._bulk_job["stage_message"] = tr("bulk.translating")
                 self._bulk_ui_signal.emit({"action": "sync"})
 
                 batch_entries = []
@@ -2263,7 +2537,7 @@ class MainWindow(QWidget):
                 ]
                 if uncovered_entries:
                     if not self._bulk_wait_for_slot(job_id):
-                        self._finish_bulk_job(job_id, "cancelled", "⚠️ 已取消全游戏翻译。")
+                        self._finish_bulk_job(job_id, "cancelled", tr("bulk.cancelled"))
                         return
                     texts = [entry["source"] for entry in uncovered_entries]
                     with self._translator_lock:
@@ -2331,26 +2605,26 @@ class MainWindow(QWidget):
                 cancel_requested = bool(self._bulk_job.get("cancel_requested"))
 
             if cancel_requested:
-                self._finish_bulk_job(job_id, "cancelled", "⚠️ 已取消全游戏翻译。")
+                self._finish_bulk_job(job_id, "cancelled", tr("bulk.cancelled"))
             elif covered_count >= total_texts:
                 self._finish_bulk_job(
                     job_id,
                     "completed",
-                    f"✅ 全游戏翻译完成：{covered_count}/{total_texts}",
+                    tr("bulk.completed_count", done=covered_count, total=total_texts),
                 )
             else:
                 self._finish_bulk_job(
                     job_id,
                     "failed",
-                    f"❌ 全游戏翻译未完成：{covered_count}/{total_texts}",
+                    tr("bulk.incomplete_count", done=covered_count, total=total_texts),
                 )
         except RateLimitError as e:
-            self._finish_bulk_job(job_id, "failed", f"⚠️ 全游戏翻译已暂停：{e}")
+            self._finish_bulk_job(job_id, "failed", tr("bulk.paused", detail=e))
         except KeyExpiredError as e:
             self._key_expired_signal.emit()
-            self._finish_bulk_job(job_id, "failed", f"❌ 全游戏翻译失败：{e}")
+            self._finish_bulk_job(job_id, "failed", tr("bulk.failed_detail", detail=e))
         except Exception as e:
-            self._finish_bulk_job(job_id, "failed", f"❌ 全游戏翻译失败：{e}")
+            self._finish_bulk_job(job_id, "failed", tr("bulk.failed_detail", detail=e))
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -2379,9 +2653,9 @@ class MainWindow(QWidget):
         last_dir = self.config.get("last_game_dir", "")
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "选择游戏 EXE（Ren'Py / RPG Maker MV/MZ）",
+            tr("file.choose_game"),
             last_dir,
-            "可执行文件 (*.exe);;所有文件 (*)",
+            tr("file.executable_filter"),
         )
         if file_path:
             # 保存上次打开的目录
@@ -2393,11 +2667,12 @@ class MainWindow(QWidget):
         """选中游戏 EXE（仅记录路径，不注入不启动）"""
         target = detect_game(exe_path)
         if not target:
-            QMessageBox.warning(self, "不支持的游戏",
-                                f"未检测到支持的游戏结构：\n{exe_path}\n\n"
-                                "当前支持 Ren'Py、RPG Maker MV 和 RPG Maker MZ。\n\n"
-                                f"{self._support_tip()}")
-            self.status_label.setText(f"检测失败 - 不支持的游戏。{self._support_tip()}")
+            QMessageBox.warning(
+                self,
+                tr("dialog.unsupported_game"),
+                tr("dialog.unsupported_game_message", path=exe_path, support=self._support_tip()),
+            )
+            self._set_status("status.unsupported_game", support=self._support_tip())
             return
 
         self._current_game = target
@@ -2412,7 +2687,7 @@ class MainWindow(QWidget):
         self._reset_hook_session_state()
         name = os.path.basename(exe_path)
         self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}')
-        self.status_label.setText(f"已选择: {name} · {target.engine_label}")
+        self._set_status("status.selected_engine", name=name, engine=target.engine_label)
         self.cache.set_game(
             exe_path,
             game_id=target.cache_id,
@@ -2440,15 +2715,15 @@ class MainWindow(QWidget):
             self.btn_start_game.setEnabled(False)
             self.drop_label.setText(
                 f'<span style="font-size: 48px;">🎮</span><br>{name}'
-                '<br><span style="color:#ffb454;">游戏已在运行，请先关闭</span>'
+                f'<br><span style="color:#ffb454;">{tr("drop.game_already_running")}</span>'
             )
-            self.status_label.setText(f"⚠️ 检测到 {name} 已在运行，请先关闭游戏后再装载 Hook")
+            self._set_status("status.game_running", name=name)
             self.selected_game_timer.start(1000)
             return
 
         self.selected_game_timer.stop()
         self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}')
-        self.status_label.setText(f"已选择: {name}")
+        self._set_status("status.selected", name=name)
         self.btn_start_game.setEnabled(not self._is_bulk_job_active())
 
     def _check_selected_game_status(self):
@@ -2465,7 +2740,7 @@ class MainWindow(QWidget):
         self.btn_clear_cache.setEnabled(False)
         self._refresh_workbench_entries()
         game_name = os.path.basename(self._current_game_exe) if self._current_game_exe else ""
-        self.status_label.setText(f"🗑️ {game_name} 缓存已清除")
+        self._set_status("status.cache_cleared", name=game_name)
         print(f"[Main] Translation cache cleared for {game_name}")
 
     def _on_install_hook(self):
@@ -2473,7 +2748,7 @@ class MainWindow(QWidget):
         if not self._current_game_exe:
             return
         exe_path = self._current_game_exe
-        self.status_label.setText(f"正在注入 Hook...")
+        self._set_status("status.injecting")
 
         if not self._current_game:
             return
@@ -2485,13 +2760,13 @@ class MainWindow(QWidget):
             self._hook_session_id,
         )
         if not ok:
-            QMessageBox.critical(self, "注入失败", f"{msg}\n\n{self._support_tip()}")
-            self.status_label.setText(f"注入失败: {msg}。{self._support_tip()}")
+            QMessageBox.critical(self, tr("dialog.inject_failed"), f"{msg}\n\n{self._support_tip()}")
+            self._set_status("status.inject_failed", detail=msg, support=self._support_tip())
             return
 
         name = os.path.basename(exe_path)
-        self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}<br><span style="color:#4a9eff;">Hook 已装载</span>')
-        self.status_label.setText(f"✅ Hook 已注入: {name}")
+        self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}<br><span style="color:#4a9eff;">{tr("drop.hook_loaded")}</span>')
+        self._set_status("status.injected", name=name)
 
         self.btn_uninstall.setEnabled(True)
         self.btn_start_game.setEnabled(True)
@@ -2521,7 +2796,7 @@ class MainWindow(QWidget):
         self._set_translation_controls_enabled(False)
         self._reset_hook_session_state()
 
-        self.status_label.setText("正在启动游戏...")
+        self._set_status("status.starting_game")
 
         self._game_process = launch_game(exe_path)
         if self._game_process:
@@ -2531,21 +2806,21 @@ class MainWindow(QWidget):
                     has_warmup = True
             
             if has_warmup:
-                self.status_label.setText("🎮 游戏已启动 - 正在预加载翻译模型...")
+                self._set_status("status.preloading")
                 threading.Thread(target=self._warmup_model, daemon=True).start()
             else:
-                self.status_label.setText("🎮 游戏已启动 - 等待游戏内对话...")
+                self._set_status("status.waiting_dialogue")
             self.overlay.show()
             self._update_overlay_toggle_button()
             self.showMinimized()
             self.game_timer.start(1000)
             self.btn_start_game.setEnabled(False)
         else:
-            self.status_label.setText(f"⚠️ 游戏启动失败，请手动启动游戏 EXE。{self._support_tip()}")
+            self._set_status("status.game_launch_failed", support=self._support_tip())
             QMessageBox.warning(
                 self,
-                "游戏启动失败",
-                f"请手动启动游戏 EXE。\n\n{self._support_tip()}",
+                tr("dialog.game_launch_failed"),
+                tr("dialog.game_launch_failed_message", support=self._support_tip()),
             )
             self.overlay.show()
             self._set_translation_controls_enabled(True)
@@ -2559,7 +2834,7 @@ class MainWindow(QWidget):
             self.showNormal()  # 恢复主窗口
             if self._current_game_exe:
                 name = os.path.basename(self._current_game_exe)
-                self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}<br><span style="color:#4a9eff;">Hook 已装载</span>')
+                self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}<br><span style="color:#4a9eff;">{tr("drop.hook_loaded")}</span>')
                 self.btn_start_game.setEnabled(True)
             self._game_process = None
             self._reset_hook_session_state()
@@ -2576,22 +2851,22 @@ class MainWindow(QWidget):
             if bulk_state in {"preparing", "scanning", "cancelling"} and bulk_job_id:
                 final_state = "cancelled" if bulk_cancel_requested or bulk_state == "cancelling" else "failed"
                 final_message = (
-                    "🛑 已取消全游戏翻译。"
+                    tr("bulk.cancelled_stop")
                     if final_state == "cancelled"
-                    else "❌ 游戏在扫描完成前退出，全游戏翻译已终止。"
+                    else tr("bulk.game_exited")
                 )
                 self.status_label.setText(final_message)
                 self._finish_bulk_job(bulk_job_id, final_state, final_message)
             elif bulk_state == "translating" and bulk_job_id:
                 keep_translator_alive = True
-                self.status_label.setText("游戏已退出，正在继续完成一键翻译全游戏任务...")
+                self._set_status("status.game_exited_bulk")
                 self.btn_start_game.setEnabled(False)
                 if hasattr(self, "workbench") and self.workbench:
                     self.workbench.show()
                     self.workbench.raise_()
             else:
                 self._hide_workbench()
-                self.status_label.setText("游戏已退出")
+                self._set_status("status.game_exited")
 
             if not keep_translator_alive:
                 self._set_translation_controls_enabled(True)
@@ -2612,7 +2887,7 @@ class MainWindow(QWidget):
             with self._translator_lock:
                 if self.translator:
                     self.translator.warmup()
-            self.translation_ready.emit("✅ 模型已就绪")
+            self.translation_ready.emit(tr("status.model_ready"))
         except Exception as e:
             print(f"[Warmup] Failed: {e}")
 
@@ -2620,26 +2895,33 @@ class MainWindow(QWidget):
     def _on_engine_changed(self, index):
         """切换翻译引擎"""
         engine = self.engine_combo.itemData(index)
+        if not engine:
+            return
         self.config["translation_engine"] = engine
+        provider = resolve_provider(self.config, engine)
+        if provider is None:
+            self.config["translation_engine"] = "builtin"
+            self._reload_engine_combo("builtin")
+            provider = resolve_provider(self.config, "builtin")
+            engine = "builtin"
 
         # URL 行可见性与内容
         self._update_url_visibility()
         if engine == "ollama":
-            self.url_input.setText(self.config.get("ollama_url", "http://localhost:11435"))
-            self.url_input.setPlaceholderText("如 http://localhost:11434")
+            self.url_input.setText(provider.url)
+            self.url_input.setPlaceholderText(tr("main.example_url", url="http://localhost:11434"))
         elif engine == "builtin":
-            self.url_input.setText(self.config.get("builtin_url", "http://localhost:8000"))
-            self.url_input.setPlaceholderText("如 http://localhost:8000")
-            self.key_input.setText(self.config.get("builtin_api_key", ""))
-            self.key_input.setPlaceholderText("可选，认证密钥")
+            self.url_input.setText(provider.url)
+            self.url_input.setPlaceholderText(tr("main.example_url", url="http://localhost:8000"))
+            self.key_input.setText(provider.api_key)
+            self.key_input.setPlaceholderText(tr("main.optional_auth"))
             self._update_api_status_label()
             self._update_api_expiry_label()
         else:
-            # 对于其他受支持的引擎 (openai, deepseek, anthropic, zhipu 等)，使用统一的前缀处理
-            self.url_input.setText(self.config.get(f"{engine}_url", ""))
-            self.url_input.setPlaceholderText(f"如 https://api.{engine}.com")
-            self.key_input.setText(self.config.get(f"{engine}_api_key", ""))
-            self.key_input.setPlaceholderText(f"{engine.capitalize()} API Key")
+            self.url_input.setText(provider.url)
+            self.url_input.setPlaceholderText(tr("main.example_url", url=provider.url))
+            self.key_input.setText(provider.api_key)
+            self.key_input.setPlaceholderText(f"{provider.name} API Key")
 
 
         # 更新模型下拉框
@@ -2649,7 +2931,7 @@ class MainWindow(QWidget):
         old_translator = self.translator
         engine_name = self.engine_combo.currentText()
         model_name = self.model_combo.currentText()
-        self.status_label.setText(f"⏳ 正在切换 {engine_name}...")
+        self._set_status("status.switching_engine", engine=engine_name)
 
         def _switch_thread():
             # 获取当前快照，防止切换期间 index 变化
@@ -2670,7 +2952,7 @@ class MainWindow(QWidget):
                 self.translator = new_translator
             
             print(f"[Main] Async engine switch complete: {engine}, model: {model_name}")
-            self._status_signal.emit(f"✅ {engine_name} / {model_name}")
+            self._status_signal.emit(tr("status.engine_ready", engine=engine_name, model=model_name))
 
         threading.Thread(target=_switch_thread, daemon=True).start()
 
@@ -2683,11 +2965,15 @@ class MainWindow(QWidget):
         if engine == "builtin":
             # 内置通道: 可编辑，显示友好名称，内部映射到真实模型名
             self.model_combo.setEditable(True)
-            self._builtin_model_map = {"模型1": "Qwen3-8B-FP8"}
+            self._builtin_model_map = {tr("engine.model1"): "Qwen3-8B-FP8"}
             current_real = self.config.get("builtin_model", "Qwen3-8B-FP8")
             
             # 兼容旧配置：如果保存成了显示名，映射回并重写
-            if current_real in self._builtin_model_map:
+            if current_real == "模型1":
+                current_real = "Qwen3-8B-FP8"
+                self.config["builtin_model"] = current_real
+                save_config(self.config)
+            elif current_real in self._builtin_model_map:
                 current_real = self._builtin_model_map[current_real]
                 self.config["builtin_model"] = current_real
                 save_config(self.config)
@@ -2704,24 +2990,9 @@ class MainWindow(QWidget):
         else:
             # 其他所有通道
             self.model_combo.setEditable(True)
-            current = self.config.get(f"{engine}_model", "")
-            
-            default_models = {
-                "ollama": self.config.get("ollama_available_models", ["gemma3:4b", "qwen2.5:7b"]),
-                "openai": ["gpt-4o-mini", "gpt-4o", "o1-mini", "o3-mini"],
-                "anthropic": ["claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022"],
-                "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-                "siliconflow": ["Pro/deepseek-ai/DeepSeek-V3", "Pro/deepseek-ai/DeepSeek-R1", "Qwen/Qwen2.5-7B-Instruct"],
-                "moonshot": ["moonshot-v1-8k", "moonshot-v1-32k"],
-                "xai": ["grok-2-latest", "grok-2-vision-latest"],
-                "alibaba": ["qwen-plus", "qwen-max", "qwen-turbo"],
-                "volcengine": ["ep-xxxx", "doubao-pro-32k", "doubao-lite-32k"],
-                "zhipu": ["glm-4.7-flash", "glm-4.7-plus"],
-                "gemini": ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash-exp"],
-                "custom": ["custom-model"]
-            }
-            
-            common_models = default_models.get(engine, [])
+            provider = resolve_provider(self.config, engine)
+            current = provider.model if provider else ""
+            common_models = list(provider.recommended_models if provider else ())
             
             # 如果当前模型不在默认列表里，插到第一个
             if current and current not in common_models:
@@ -2755,10 +3026,10 @@ class MainWindow(QWidget):
             self.config["builtin_model"] = real_name
             model_name = real_name  # 用于后续日志
         else:
-            self.config[f"{engine}_model"] = model_name
+            update_provider(self.config, engine, model=model_name)
 
         self._rebuild_translator(clear_cache=True)
-        self.status_label.setText(f"✅ 模型已切换: {model_name}")
+        self._set_status("status.model_switched", model=model_name)
         print(f"[Main] Model switched: {model_name}")
         save_config(self.config)
 
@@ -2766,7 +3037,7 @@ class MainWindow(QWidget):
         if self._current_game:
             ok, msg = uninstall_hook(self._current_game)
             if ok:
-                self.status_label.setText(f"已卸载: {msg}")
+                self._set_status("status.uninstalled", detail=msg)
                 self.btn_uninstall.setEnabled(False)
                 self.btn_start_game.setEnabled(True)
 
@@ -2776,7 +3047,7 @@ class MainWindow(QWidget):
                 self.overlay.hide()
                 self._update_overlay_toggle_button()
             else:
-                QMessageBox.warning(self, "卸载失败", f"{msg}\n\n{self._support_tip()}")
+                QMessageBox.warning(self, tr("dialog.uninstall_failed"), f"{msg}\n\n{self._support_tip()}")
 
     @property
     def game_title(self) -> str:
@@ -2903,10 +3174,10 @@ class MainWindow(QWidget):
         else:
             # 未缓存 → 统一走批量翻译路径（当前句 + 菜单选项 + 预取项合并为一批）
             display_choices = [
-                choice_translation_map.get(choice, "") or "选项翻译中..."
+                choice_translation_map.get(choice, "") or tr("status.choice_translating")
                 for choice in visible_choices
             ]
-            display_current = current_cached if current_cached else ("翻译中..." if has_current else "")
+            display_current = current_cached if current_cached else (tr("status.translating") if has_current else "")
             self._display_overlay_text(
                 self._format_display(
                     who,
@@ -3299,8 +3570,11 @@ class MainWindow(QWidget):
                 print(f"{'='*60}\n")
         except RateLimitError as e:
             if self._text_generation == gen:
-                current_result = f"[翻译受限：{e}]" if what else ""
-                choice_results = [self.cache.get(choice) or f"[翻译受限：{e}]" for choice in visible_choices]
+                current_result = tr("translation.limited_detail", detail=e) if what else ""
+                choice_results = [
+                    self.cache.get(choice) or tr("translation.limited_detail", detail=e)
+                    for choice in visible_choices
+                ]
                 display = self._format_display(
                     who,
                     what,
@@ -3327,8 +3601,11 @@ class MainWindow(QWidget):
             self._key_expired_signal.emit()
         except Exception as e:
             if self._text_generation == gen:
-                current_result = f"[翻译失败: {e}]" if what else ""
-                choice_results = [self.cache.get(choice) or f"[翻译失败: {e}]" for choice in visible_choices]
+                current_result = tr("translation.failed_detail", detail=e) if what else ""
+                choice_results = [
+                    self.cache.get(choice) or tr("translation.failed_detail", detail=e)
+                    for choice in visible_choices
+                ]
                 display = self._format_display(
                     who,
                     what,
@@ -3338,7 +3615,7 @@ class MainWindow(QWidget):
                     choice_translations=choice_results,
                 )
                 self.translation_ready.emit(display)
-            self._status_signal.emit(f"❌ 翻译失败，请检查网络或配置。{self._support_tip()}")
+            self._status_signal.emit(tr("status.translation_failed", support=self._support_tip()))
         finally:
             with self._inflight_lock:
                 self._clear_inflight(batch_texts, owner="batch-current")
@@ -3494,12 +3771,12 @@ class MainWindow(QWidget):
                 print(f"  ⏱️  Total:        {total_ms:.0f}ms")
                 print(f"{'─'*60}\n")
         except RateLimitError as e:
-            self._status_signal.emit(f"⚠️ 预取已暂停：{e}")
+            self._status_signal.emit(tr("status.prefetch_paused", detail=e))
         except KeyExpiredError:
             self._key_expired_signal.emit()
         except Exception as e:
             print(f"[Prefetch] Batch translation failed: {e}")
-            self._status_signal.emit(f"❌ 预取翻译失败，请检查网络或配置。{self._support_tip()}")
+            self._status_signal.emit(tr("status.prefetch_failed", support=self._support_tip()))
         finally:
             self._prefetch_running = False
             with self._inflight_lock:
@@ -3529,8 +3806,8 @@ class MainWindow(QWidget):
         # 如果是状态信息（带勾选信号），或者主窗口还在显示“预加载”状态，则同步更新状态栏
         if display_text.startswith("✅"):
             self.status_label.setText(display_text)
-        elif "预加载" in self.status_label.text():
-            self.status_label.setText("✅ 正在游玩 - 等待对话...")
+        elif self._status_message[0] == "status.preloading":
+            self._set_status("status.playing")
 
     def _on_key_expired(self):
         """试用 Key 过期弹窗（仅弹一次）"""
@@ -3539,9 +3816,8 @@ class MainWindow(QWidget):
         self._key_expired_shown = True
         QMessageBox.warning(
             self,
-            "RenpyLens",
-            "您的内置通道试用 API Key 已到期。\n\n"
-            f"{self._support_tip()}"
+            tr("dialog.key_expired"),
+            tr("dialog.key_expired_message", support=self._support_tip())
         )
 
     def _format_display(

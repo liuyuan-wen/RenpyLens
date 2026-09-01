@@ -1,141 +1,139 @@
+[![简体中文](https://img.shields.io/badge/Language-简体中文-4a9eff)](README.zh-CN.md)
+
 # <img src="assets/icon.png" width="48" align="absmiddle"/> RenpyLens
 
-RenpyLens 是一款支持 **Ren'Py、RPGM MV/MZ** 的轻量级实时游戏翻译浮窗工具。
-本软件既**小白友好**（支持一键拖拽翻译），又适合有一定基础的用户上手部署或二次开发。
+RenpyLens is a lightweight, real-time AI translation overlay for **Ren'Py** and **RPG Maker MV/MZ** games on Windows.
 
-通过原生的注入方式，在游戏运行期间实时抓取文本，并使用强大的 **AI大语言模型引擎** 将其翻译为您需要的语言，浮窗显示在游戏之上。
-本软件处于频繁更新迭代期，欢迎加群交流。
+Drop a game executable into the app, choose a translation provider, and RenpyLens captures dialogue, speaker names, and visible choices through engine-native bridges. Translations appear in a movable overlay without replacing the game's original text.
 
-## 💬 交流与支持
+The interface is available in **English, Simplified Chinese, Traditional Chinese, Japanese, Korean, and Russian**.
 
-- **官方 QQ 交流群**：1058127921
+## 💬 Community and Support
 
-- 入群获取最新动态及内测功能
+- **Discord:** [Join the global RenpyLens community](https://discord.gg/c4putqY5zs)
+- **Chinese QQ group:** `1058127921`
 
-## ✨ 核心特性
+Use these communities for support, feedback, release news, and early feature previews.
 
-- **拖拽式一键操作**: 直接将游戏的 `.exe` 文件拖入主界面即可。
-- **多引擎桥接**: 通过引擎内脚本直接提取 Ren'Py 与 RPG Maker MV/MZ 的当前对白、说话人和可见选项。
-- **多引擎支持 (LLMs)**: 本地和云端大语言模型无缝切换，保证上下文连贯性和角色语气：
-  - **内置引擎**: 官方提供的首选专属服务，开箱即用，极简操作免去配置烦恼。
-  - **云端大厂 API**: 内置兼容 Gemini, 智谱 (GLM), OpenAI, Anthropic (Claude), DeepSeek, Moonshot, X.AI, 阿里云 (Qwen), 火山引擎 等。
-  - **Ollama**: 本地离线模型支持。
-  - **自定义节点**: 支持兼容 OpenAI 格式的第三方/自建 API 端点接入。
-- **覆盖层浮窗**: 翻译结果显示在一个无边框、可拖动、可调节的浮窗上，不干扰游戏的原始画面。
-- **工作台与手动校对**: 提供翻译工作台，支持游戏中实时编辑，或在最近翻译条目中编辑译文、自动应用。
-- **一键全游戏翻译**: 可扫描整部游戏脚本并分批翻译，支持进度显示、频率限制和随时取消。
-- **缓存与防抖机制**: 内置 SQLite + 内存双层独立缓存，并支持防抖，适配玩家快进文本。
+## ✨ Highlights
 
-## 📸 运行效果示例
+- **Drag-and-drop setup:** Drop the game's `.exe` into RenpyLens and launch it with the translation bridge.
+- **Multiple game engines:** Supports Ren'Py and RPG Maker MV/MZ dialogue, speaker names, and visible choices.
+- **Flexible AI providers:**
+  - **Built-in channel:** A streamlined, ready-to-use service with China mainland and global routes.
+  - **Cloud providers:** OpenAI, Gemini, Anthropic Claude, DeepSeek, OpenRouter, Groq, MiniMax, SiliconFlow, Moonshot, xAI, Alibaba Qwen, Volcengine, Zhipu AI, and more.
+  - **Ollama:** Run supported models locally and offline.
+  - **Custom channels:** Add any OpenAI-compatible API endpoint.
+- **Real-time overlay:** Display translations in a borderless, movable, resizable overlay above the game.
+- **Translation workbench:** Review and edit recent dialogue and choices while playing.
+- **Whole-game translation:** Scan supported game scripts and translate them in batches with progress tracking, rate limits, and cancellation.
+- **Translation memory:** SQLite and in-memory caching reduce duplicate requests and preserve manual edits.
+- **Localized interface:** Switch the application UI between six languages from the main window.
 
-<img src="assets/example.jpg" alt="翻译效果演示" width="600">
+## 📸 Screenshot
 
-## 🆕 版本更新
+<img src="assets/example.jpg" alt="RenpyLens translation overlay" width="600">
 
-### v1.3.0 `最新`
-- **RPGM支持**: 新增 RPGM MV/MZ 适配。
-- **文本提取增强**: 改进可见对白、角色名、侧边头像及 `extend` 连续对白识别，过滤无效角色名。
-- **翻译与启动优化**: 当前对白优先于过期预取任务，完善 429 限流提示，并避免重复启动已运行的游戏。
+## 🆕 Release Notes
 
-### v1.2.2
-- **实时翻译稳定性增强**: 失效任务可在等待超时后自动接管重试，减少预取异常导致的对白卡死。
-- **文本提取兼容性优化**: 支持沿 Ren'Py 当前 `if` 分支继续预取，并修复 `Movie` 等类对象被错误显示为角色名的问题。
-- **配置与交互改进**: 新增 10–3600 秒 API 超时设置，批量翻译上限提升至 1000 条，并修复清空缓存后按钮状态不刷新的问题。
+### v1.5.0 `Latest`
 
-### v1.2.1
-- **全游戏翻译稳定性修复**: 全游戏扫描现在会等待游戏真正进入主菜单或第一段对白后再启动，并将扫描调度回 Ren'Py 主线程，减少过早触发导致的失败或异常。
-- **启动器兼容性增强**: 改进游戏进程跟踪逻辑，支持启动器或包装 EXE 拉起子进程的场景，避免主程序误判“游戏已退出”。
-- **浮窗编辑体验优化**: 浮窗现在支持双击当前译文直接进入编辑模式，工作台按钮也会直接唤起并聚焦工作台窗口。
+- **Complete multilingual UI:** Added English, Simplified Chinese, Traditional Chinese, Japanese, Korean, and Russian interfaces with quick language switching.
+- **Built-in channel improvements:** Updated the China mainland and global routes, enabled strict TLS verification, and added route latency testing.
+- **Expanded API channels:** Redesigned OpenAI-compatible provider settings with presets and user-managed custom channels.
+- **Global community support:** Added Discord and improved localized route names, status messages, and layouts.
+- **Compatibility and stability:** Improved Hook cleanup, text extraction, rate-limit feedback, and legacy configuration migration for Ren'Py and RPG Maker MV/MZ.
 
-### v1.2.0
-- **工作台与校对升级**: 新增翻译工作台及浮窗快捷编辑，支持查看、修改、自动保存当前对白与选项。
-- **一键全游戏翻译**: 支持整游戏扫描、分批翻译、进度显示和任务取消，并通过增强缓存减少重复请求。
-- **缓存与更新增强**: 缓存新增说话人、条目类型及人工校对记录，并支持检测、下载和自动安装 GitHub Release 更新。
+### v1.2.0–v1.3.0
 
-### v1.1.0～v1.1.4
-- **翻译与模型优化**: 升级内置模型和提示词，提高翻译速度、准确度及指令遵循能力；禁用部分模型的 thinking 模式、清理思维链标签，并优化缓存与线程协作以减少重复请求和翻页卡顿。
-- **Hook 与菜单兼容性增强**: 重构注入 Hook，扩大 Ren'Py 游戏兼容范围；新增菜单选项抓取与同步翻译，仅处理当前可见选项并修复编号问题。
-- **浮窗与界面升级**: 支持角色名、斜体、菜单译文和强制置顶显示，新增字体、粗体及颜色定制，并完善浮窗显示、隐藏、复位和渲染效果。
-- **配置与内置通道改进**: 优化 OpenAI 兼容接口识别、游戏中引擎切换和状态显示，新增 API 到期查询、状态刷新及官方交流群入口。
+- Added RPG Maker MV/MZ support and improved Ren'Py dialogue, speaker, choice, and continuation extraction.
+- Introduced the translation workbench, overlay editing, whole-game batch translation, progress tracking, and manual translation caching.
+- Improved prefetching, scan timing, launcher and wrapper executable tracking, and duplicate-launch prevention.
+- Added API timeout and batch controls, clearer HTTP 429 feedback, and GitHub Release download and automatic update support.
 
-## 🎮 软件使用
+### v1.1.0–v1.1.4
 
-1. **获取软件**:
-   - 直接点击右侧的 **Releases** 页面下载最新版的 `RenpyLens.exe`。
-   - 或者也可以按照下方的 **[🛠️ 代码开发](#-代码开发)** 步骤，自行克隆代码并使用 Python 运行或打包。
-2. **配置 API / 模型**: 
-   - **无自有 API / 极简操作用户**: 直接双击 `.exe` 打开软件，在翻译引擎中选择 **"内置通道"**，点击 **"🔑 获取试用 API"**，成功后即可直接导入游戏体验。
-   - **自带 API / 高阶用户**: 点击 **“⚙️ 设置”** 按钮。在 **“API 设置”** 选项卡中，填入 LLM 服务商密钥及相关配置（例如 Gemini 或 Ollama 的本地地址端口）。
-      > **模型建议**: 尽量选择 **不带** CoT (Chain of Thought) 思考能力的模型。由于实时翻译不需要 thinking，且本项目目前尚未对所有模型适配自动关闭 thinking 的功能，使用此类模型可能会因生成思考过程而导致输出冗余、响应变慢。
-3. **选择游戏**:
-   - 将 Ren'Py、RPG Maker MV 或 RPG Maker MZ 游戏的主程序 `.exe` 直接拖拽到软件界面的指定区域。
-4. **注入并启动**:
-   - 拖入后，点击 **"▶ 开始游戏"**，工具会自动安装对应引擎的桥接脚本。Ren'Py 使用 `game/`，RPG Maker 使用游戏内容目录下的 `js/plugins/`。
-   - 游戏启动后，翻译浮窗会自动弹出。当游戏中出现新对话时，浮窗会实时显示翻译结果。
-5. **浮窗控制**:
-   - **拖动位置**: 鼠标左键按住浮窗上的文字拖动即可自由调整翻译界面在游戏上的位置。
-   - **更多设置**: 鼠标 **右击文字** 即可唤出快捷菜单，进行更多控制。
-6. **清理与卸载**:
-   - 游戏结束后，你可以点击 **"📤 卸载 Hook"** 将翻译脚本从游戏目录中安全移除，恢复游戏原貌。
-   - 若遇到翻译卡死或缓存的文案需要修改，可点击 **"🧹 清除当前游戏缓存"** 重置。
+- Improved translation prompts, model behavior, caching, concurrency, and thinking-output cleanup.
+- Expanded Ren'Py Hook and menu compatibility, including visible-choice translation.
+- Added speaker names, italics, customizable fonts and colors, and always-on-top overlay behavior.
+- Improved OpenAI-compatible endpoints, runtime provider switching, trial API status, and expiration checks.
 
-## 🛠️ 代码开发
+## 🎮 Getting Started
 
-### 环境要求
-- Windows 操作系统 (推荐)
+1. **Download RenpyLens**
+   - Download the latest `RenpyLens_v1.5.0.exe` from the repository's **Releases** page.
+   - Alternatively, follow the development instructions below to run it from source.
+2. **Choose a translation provider**
+   - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**.
+   - To use your own service, open **Settings → API Settings** and configure a provider, Ollama, or a custom OpenAI-compatible channel.
+3. **Select a game**
+   - Drop the main `.exe` of a Ren'Py, RPG Maker MV, or RPG Maker MZ game into the RenpyLens window.
+4. **Load the Hook and start**
+   - Select **Load Hook and Start Game**. RenpyLens installs the appropriate bridge and launches the game.
+   - Ren'Py uses a bridge inside `game/`; RPG Maker uses a plugin inside `js/plugins/`.
+5. **Use the overlay**
+   - Drag the overlay to reposition it.
+   - Right-click the overlay for display controls, editing, and workbench access.
+6. **Remove the Hook when needed**
+   - Select **Uninstall Hook** to remove RenpyLens bridge files safely.
+
+> **Model tip:** Real-time translation works best with models that do not emit long chain-of-thought or reasoning output. Such output increases latency and may appear in translations when a provider cannot disable it.
+
+## 🛠️ Development
+
+### Requirements
+
+- Windows 10 or later recommended
 - Python 3.10+
 
-### 克隆与安装
+### Clone and install
 
-```bash
-git clone https://github.com/your-username/RenpyLens.git
+```powershell
+git clone https://github.com/liuyuan-wen/RenpyLens.git
 cd RenpyLens
 
-# 使用虚拟环境 (推荐)
 python -m venv venv
 venv\Scripts\activate
-
-# 安装依赖
 pip install -r requirements.txt
 ```
 
-### 运行应用
+### Run from source
 
-```bash
-python main.py
+```powershell
+python src/main.py
 ```
 
-## 📦 打包可执行文件
+### Run tests
 
-使用附带的打包脚本可以一键打包成单文件 `.exe`。
+```powershell
+python -m unittest discover -s tests -v
+```
 
-```bash
-# 需确保环境中已安装 pyinstaller
+## 📦 Build a Windows executable
+
+```powershell
+# PyInstaller must be installed in the selected Python environment.
 python build.py
 
-# 如果需要使用特定的 Python 环境进行打包，可使用 --python 参数：
-python build.py --python "C:\path\to\your\venv\python.exe"
+# Or select a specific Python interpreter.
+python build.py --python "C:\path\to\venv\python.exe"
 ```
-打包成功后，独立的可执行文件为 `RenpyLens.exe`。
-> **注意**: 该脚本会自动利用 `upx.exe`（如果存在同级目录）进行体积压缩。
 
-## 🧩 架构简介
+The build output is `RenpyLens_v1.5.0.exe`. If `upx.exe` is present in the project root, the build script uses it for compression.
 
-- **`main.py` & `settings_dialog.py`**: 基于 PyQt5 的核心 UI 与事件流。
-- **`workbench.py`**: 最近条目工作台、手动编辑与批量翻译状态面板。
-- **`updater.py`**: GitHub Release 检查、更新包下载与 Windows 自更新脚本。
-- **`engine_adapters.py`**: 统一识别引擎、安装/卸载桥接脚本，并离线扫描 RPG Maker 事件数据。
-- **`injector.py`**: Ren'Py 的识别、启动与 `_translator_hook.rpy` 安全注入实现。
-- **`translator.py`**: 多并发、具有池化思想的 LLM 翻译引擎网络请求封装。
-- **`hook_server.py`**: 本地 TCP 服务端，负责与注入到游戏内部的 Hook 脚本进行极低延迟的双向通讯。
-- **`cache.py`**: 本地翻译记忆库（SQLite），提高相同对话的显示速度并降低 API 开销。
-- **`_translator_hook.rpy`**: Ren'Py 运行时桥接脚本。
-- **`RenpyLensBridge.js`**: RPG Maker MV/MZ 运行时桥接插件；只读取引擎最终显示的文本，不替换游戏内原文。
+## 🧩 Project Structure
 
+- **`src/main.py` and `src/settings_dialog.py`:** Main PyQt5 interface and application flow.
+- **`src/workbench.py`:** Recent-entry review, manual editing, and whole-game translation status.
+- **`src/updater.py`:** GitHub Release checks, downloads, and Windows self-update flow.
+- **`src/engine_adapters.py`:** Engine detection, bridge installation, and offline RPG Maker event scanning.
+- **`src/injector.py`:** Ren'Py detection, launch handling, and safe Hook installation.
+- **`src/translator.py`:** Translation providers, connection pooling, batching, and rate-limit handling.
+- **`src/hook_server.py`:** Local communication between RenpyLens and the injected game bridge.
+- **`src/cache.py`:** SQLite-backed translation memory.
+- **`assets/_translator_hook.rpy`:** Ren'Py runtime bridge.
+- **`assets/RenpyLensBridge.js`:** RPG Maker MV/MZ runtime bridge.
 
-## 📄 许可证 (License)
+## 📄 License
 
-本项目采用 [GPLv3 License](LICENSE) 许可协议开源。
-
-
-
+RenpyLens is open-source software licensed under the [GNU General Public License v3.0](LICENSE).

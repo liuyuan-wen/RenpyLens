@@ -265,7 +265,10 @@ init python:
             return ""
 
         text = " ".join(text.split())
-        if _tre.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", text):
+        # Ren'Py 7 and older embed Python 2.7, whose ``re`` module does not
+        # provide ``fullmatch``.  ``\Z`` keeps the same whole-string semantics
+        # while remaining compatible with both Python 2 and Python 3.
+        if _tre.match(r"^[A-Za-z][A-Za-z0-9_]*\Z", text):
             text = _tre.sub(r"_t$", "", text, flags=_tre.IGNORECASE)
             text = text.replace("_", " ")
         return text

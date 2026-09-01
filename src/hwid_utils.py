@@ -5,6 +5,8 @@ import ssl
 import urllib.request
 import uuid
 
+NO_EXPIRY = "__NO_EXPIRY__"
+
 
 def get_hwid():
     """获取机器的唯一物理标识 (UUID/MAC)"""
@@ -32,7 +34,7 @@ def _format_expiry_date(value: str) -> str:
 
 def _extract_expiry(resp_data: dict) -> str:
     if resp_data.get("has_expiry") is False or resp_data.get("no_expiry") is True:
-        return "无到期时间"
+        return NO_EXPIRY
     for key in ("expires", "expires_at", "expiry", "expire_at"):
         value = str(resp_data.get(key, "") or "").strip()
         if value:
@@ -72,7 +74,7 @@ def register_trial_key(hwid, trial_key_url):
         key = str(resp_data.get("key", "") or "").strip()
         expires = _extract_expiry(resp_data)
         print(f"Server response success! Key: {key}")
-        if expires:
+        if expires and expires != NO_EXPIRY:
             print(f"Trial key expires at: {expires}")
         return {
             "key": key,
@@ -97,6 +99,6 @@ def fetch_trial_key_expiry(hwid: str, api_key: str, trial_key_url: str) -> str:
         return ""
 
     expires = _extract_expiry(resp_data)
-    if expires:
+    if expires and expires != NO_EXPIRY:
         print(f"Trial key expiry refreshed: {expires}")
     return expires

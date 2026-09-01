@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from i18n import manager as i18n_manager, tr
 
 
 class EntrySummaryDelegate(QStyledItemDelegate):
@@ -110,7 +111,8 @@ class TranslationWorkbench(QWidget):
     def __init__(self, config: dict):
         super().__init__()
         self.config = config
-        self._base_window_title = "RenpyLens 译文工作台"
+        self._base_window_title = tr("workbench.title")
+        self._game_title = ""
         self._entries_by_source: dict[str, dict[str, Any]] = {}
         self._current_source = ""
         self._is_pinned = self.config.get("workbench_pinned", False)
@@ -308,7 +310,7 @@ class TranslationWorkbench(QWidget):
             QPushButton:checked { color: #4a9eff; border-color: #4a9eff; }
         """
 
-        self.game_title_label = QLabel("当前游戏：未选择")
+        self.game_title_label = QLabel(tr("workbench.no_game"))
         self.game_title_label.setObjectName("workbench_game_title")
         self.game_title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         toolbar.addWidget(self.game_title_label)
@@ -326,9 +328,9 @@ class TranslationWorkbench(QWidget):
         self.bulk_idle_page = QWidget()
         bulk_idle_layout = QHBoxLayout(self.bulk_idle_page)
         bulk_idle_layout.setContentsMargins(0, 0, 0, 0)
-        self.btn_bulk_translate = QPushButton("🚀 一键翻译全游戏")
+        self.btn_bulk_translate = QPushButton(tr("workbench.bulk"))
         self.btn_bulk_translate.setCursor(Qt.PointingHandCursor)
-        self.btn_bulk_translate.setToolTip("预取全游戏脚本文本，并分批翻译到本地缓存")
+        self.btn_bulk_translate.setToolTip(tr("workbench.bulk_tip"))
         self.btn_bulk_translate.setStyleSheet(
             """
             QPushButton {
@@ -386,7 +388,7 @@ class TranslationWorkbench(QWidget):
         bulk_result_layout.addWidget(self.bulk_result_label)
         self.bulk_stack.addWidget(self.bulk_result_page)
 
-        self.btn_bulk_cancel = QPushButton("取消")
+        self.btn_bulk_cancel = QPushButton(tr("common.cancel"))
         self.btn_bulk_cancel.setVisible(False)
         self.btn_bulk_cancel.setCursor(Qt.PointingHandCursor)
         self.btn_bulk_cancel.setStyleSheet(
@@ -408,7 +410,7 @@ class TranslationWorkbench(QWidget):
         bulk_layout.addWidget(self.btn_bulk_cancel)
         toolbar.addWidget(bulk_container)
 
-        self.btn_pin = QPushButton("📌 置顶")
+        self.btn_pin = QPushButton(tr("common.pin"))
         self.btn_pin.setCheckable(True)
         self.btn_pin.setChecked(self._is_pinned)
         self.btn_pin.setStyleSheet(toolbar_btn_style)
@@ -416,9 +418,9 @@ class TranslationWorkbench(QWidget):
         toolbar.addWidget(self.btn_pin)
         root.addLayout(toolbar)
 
-        title = QLabel("最近遇到的文本")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #7aa2ff;")
-        root.addWidget(title)
+        self.recent_title = QLabel(tr("workbench.recent"))
+        self.recent_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #7aa2ff;")
+        root.addWidget(self.recent_title)
 
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
@@ -443,22 +445,22 @@ class TranslationWorkbench(QWidget):
         meta_row.setSpacing(16)
         detail_layout.addLayout(meta_row)
 
-        self.type_label = QLabel("类型: -")
+        self.type_label = QLabel(tr("workbench.type_empty"))
         self.type_label.setObjectName("meta_title")
         meta_row.addWidget(self.type_label)
 
-        self.speaker_label = QLabel("角色: -")
+        self.speaker_label = QLabel(tr("workbench.speaker_empty"))
         self.speaker_label.setObjectName("meta_title")
         meta_row.addWidget(self.speaker_label)
 
-        self.status_label = QLabel("状态: -")
+        self.status_label = QLabel(tr("workbench.status_empty"))
         self.status_label.setObjectName("meta_title")
         meta_row.addWidget(self.status_label)
         meta_row.addStretch()
 
-        source_title = QLabel("原文")
-        source_title.setObjectName("meta_title")
-        detail_layout.addWidget(source_title)
+        self.source_title = QLabel(tr("workbench.source"))
+        self.source_title.setObjectName("meta_title")
+        detail_layout.addWidget(self.source_title)
 
         self.source_view = QTextEdit()
         self.source_view.setReadOnly(True)
@@ -466,9 +468,9 @@ class TranslationWorkbench(QWidget):
         self.source_view.setMinimumHeight(160)
         detail_layout.addWidget(self.source_view)
 
-        translation_title = QLabel("当前译文")
-        translation_title.setObjectName("meta_title")
-        detail_layout.addWidget(translation_title)
+        self.translation_title = QLabel(tr("workbench.translation"))
+        self.translation_title.setObjectName("meta_title")
+        detail_layout.addWidget(self.translation_title)
 
         self.translation_edit = QTextEdit()
         self.translation_edit.setAcceptRichText(False)
@@ -476,10 +478,10 @@ class TranslationWorkbench(QWidget):
         detail_layout.addWidget(self.translation_edit, 1)
 
         btn_row = QHBoxLayout()
-        self.btn_open_config = QPushButton("📂 打开配置目录")
+        self.btn_open_config = QPushButton(tr("common.open_config"))
         self.btn_open_config.setObjectName("open_config_btn")
         self.btn_open_config.setCursor(Qt.PointingHandCursor)
-        self.btn_open_config.setToolTip("打开 config.json 和缓存所在的本地文件夹")
+        self.btn_open_config.setToolTip(tr("common.open_config_tip"))
         self.btn_open_config.setStyleSheet(
             """
             QPushButton {
@@ -508,13 +510,13 @@ class TranslationWorkbench(QWidget):
         btn_row.addStretch()
         detail_layout.addLayout(btn_row)
 
-        self.btn_cancel = QPushButton("取消修改")
+        self.btn_cancel = QPushButton(tr("workbench.cancel_changes"))
         self.btn_cancel.setObjectName("editor_cancel_btn")
         self.btn_cancel.setCursor(Qt.PointingHandCursor)
         self.btn_cancel.clicked.connect(self._reset_editor)
         btn_row.addWidget(self.btn_cancel)
 
-        self.btn_save = QPushButton("保存译文")
+        self.btn_save = QPushButton(tr("workbench.save_translation"))
         self.btn_save.setObjectName("editor_save_btn")
         self.btn_save.setCursor(Qt.PointingHandCursor)
         self.btn_save.clicked.connect(self._save_current)
@@ -522,14 +524,50 @@ class TranslationWorkbench(QWidget):
 
         self._set_empty_state()
         self.set_bulk_idle()
+        i18n_manager().language_changed.connect(self.retranslate_ui)
+
+    def retranslate_ui(self, *_):
+        self._base_window_title = tr("workbench.title")
+        self.setWindowTitle(self._base_window_title)
+        self.set_game_title(self._game_title)
+        self.btn_bulk_translate.setText(tr("workbench.bulk"))
+        self.btn_bulk_translate.setToolTip(tr("workbench.bulk_tip"))
+        self.btn_bulk_cancel.setText(tr("common.cancel"))
+        self.btn_pin.setText(tr("common.pin"))
+        self.recent_title.setText(tr("workbench.recent"))
+        self.source_title.setText(tr("workbench.source"))
+        self.translation_title.setText(tr("workbench.translation"))
+        self.btn_open_config.setText(tr("common.open_config"))
+        self.btn_open_config.setToolTip(tr("common.open_config_tip"))
+        self.btn_cancel.setText(tr("workbench.cancel_changes"))
+        self.btn_save.setText(tr("workbench.save_translation"))
+        if self._current_source:
+            entry = self._entries_by_source.get(self._current_source)
+            if entry:
+                self._apply_entry(entry, translation_override=self.translation_edit.toPlainText(), dirty_override=self.has_unsaved_changes(), preserve_editor_text=True)
+        else:
+            self._set_empty_state()
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            source = str(item.data(Qt.UserRole) or "") if item else ""
+            if source:
+                is_active_dirty = source == self._current_source and self.has_unsaved_changes()
+                self._update_item_summary(
+                    source,
+                    translation_override=(
+                        self.translation_edit.toPlainText() if is_active_dirty else None
+                    ),
+                    dirty_override=(True if is_active_dirty else None),
+                )
 
     def set_game_title(self, game_title: str):
         game_title = str(game_title or "").strip()
+        self._game_title = game_title
         if game_title:
-            self.game_title_label.setText(f"当前游戏：{game_title}")
+            self.game_title_label.setText(tr("workbench.current_game", title=game_title))
             self.game_title_label.setToolTip(game_title)
         else:
-            self.game_title_label.setText("当前游戏：未选择")
+            self.game_title_label.setText(tr("workbench.no_game"))
             self.game_title_label.setToolTip("")
 
     def has_unsaved_changes(self) -> bool:
@@ -669,7 +707,7 @@ class TranslationWorkbench(QWidget):
             return True
 
         dialog = QDialog(parent or self)
-        dialog.setWindowTitle("未保存译文")
+        dialog.setWindowTitle(tr("workbench.unsaved_title"))
         dialog.setWindowModality(Qt.WindowModal)
         dialog.setMinimumWidth(470)
         dialog.setStyleSheet(
@@ -721,7 +759,7 @@ class TranslationWorkbench(QWidget):
         layout.setContentsMargins(22, 18, 22, 18)
         layout.setSpacing(18)
 
-        message = QLabel("当前译文已修改，关闭前是否保存？")
+        message = QLabel(tr("workbench.unsaved_message"))
         message.setObjectName("unsaved_message")
         message.setWordWrap(True)
         layout.addWidget(message)
@@ -729,12 +767,12 @@ class TranslationWorkbench(QWidget):
         buttons = QHBoxLayout()
         buttons.addStretch()
 
-        cancel_button = QPushButton("取消")
+        cancel_button = QPushButton(tr("common.cancel"))
         cancel_button.setObjectName("unsaved_cancel_btn")
         cancel_button.setCursor(Qt.PointingHandCursor)
         cancel_button.clicked.connect(dialog.reject)
 
-        save_button = QPushButton("保存并关闭")
+        save_button = QPushButton(tr("workbench.save_close"))
         save_button.setObjectName("unsaved_save_btn")
         save_button.setCursor(Qt.PointingHandCursor)
         save_button.clicked.connect(dialog.accept)
@@ -798,17 +836,17 @@ class TranslationWorkbench(QWidget):
     def _update_status_label(self, entry: dict[str, Any] | None = None):
         entry = entry or self._entries_by_source.get(self._current_source) or {}
         if self.has_unsaved_changes():
-            status = "未保存草稿"
+            status = tr("workbench.status_draft")
         else:
-            status = "人工修改" if entry.get("is_manual") else "机翻/未人工修改"
-        self.status_label.setText(f"状态: {status}")
+            status = tr("workbench.status_manual") if entry.get("is_manual") else tr("workbench.status_machine")
+        self.status_label.setText(tr("workbench.status", status=status))
 
     def _set_empty_state(self):
         self._current_source = ""
         self._has_unsaved_changes = False
-        self.type_label.setText("类型: -")
-        self.speaker_label.setText("角色: -")
-        self.status_label.setText("状态: -")
+        self.type_label.setText(tr("workbench.type_empty"))
+        self.speaker_label.setText(tr("workbench.speaker_empty"))
+        self.status_label.setText(tr("workbench.status_empty"))
         self.source_view.setPlainText("")
         self._set_editor_text("")
         self.translation_edit.setEnabled(False)
@@ -829,21 +867,21 @@ class TranslationWorkbench(QWidget):
         return display_entry
 
     def _format_entry_summary(self, entry: dict[str, Any]) -> str:
-        kind = "对白" if entry.get("entry_type") != "choice" else "选项"
+        kind = tr("workbench.dialogue") if entry.get("entry_type") != "choice" else tr("workbench.choice")
         if entry.get("is_dirty"):
-            mark = "草稿"
+            mark = tr("workbench.tag_draft")
         else:
-            mark = "人工" if entry.get("is_manual") else "机翻"
+            mark = tr("workbench.tag_manual") if entry.get("is_manual") else tr("workbench.tag_machine")
 
         speaker = str(entry.get("speaker") or "").strip()
-        speaker_label = speaker or "无角色"
+        speaker_label = speaker or tr("workbench.no_speaker")
         source = str(entry.get("source") or "").strip().replace("\n", " ")
         translation = str(entry.get("translation") or "").strip().replace("\n", " ")
 
         parts = [f"[{kind}][{mark}][{speaker_label}]"]
-        parts.append(source or "(空原文)")
+        parts.append(source or tr("workbench.empty_source"))
         line1 = " ".join(parts)
-        line2 = translation or "(暂无译文)"
+        line2 = translation or tr("workbench.no_translation")
         return f"{line1}\n{line2}"
 
     def _find_item_by_source(self, source: str) -> QListWidgetItem | None:
@@ -1013,12 +1051,12 @@ class TranslationWorkbench(QWidget):
         dirty_override: bool = False,
         preserve_editor_text: bool = False,
     ):
-        kind = "对白" if entry.get("entry_type") != "choice" else "选项"
+        kind = tr("workbench.dialogue") if entry.get("entry_type") != "choice" else tr("workbench.choice")
         speaker = str(entry.get("speaker") or "").strip() or "-"
         dirty = bool(dirty_override)
 
-        self.type_label.setText(f"类型: {kind}")
-        self.speaker_label.setText(f"角色: {speaker}")
+        self.type_label.setText(tr("workbench.type", type=kind))
+        self.speaker_label.setText(tr("workbench.speaker", speaker=speaker))
         self.source_view.setPlainText(str(entry.get("source") or ""))
 
         if preserve_editor_text and self.translation_edit.isEnabled():
