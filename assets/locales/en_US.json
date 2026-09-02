@@ -252,7 +252,7 @@
   "bulk.scan_rpgmaker": "🧩 Read RPG Maker data files offline, then translate them in batches without starting the game.",
   "bulk.cache_note": "💾 Translations are saved to <code>translation_cache.db</code> in the config folder.",
   "bulk.builtin_warning_title": "⚠ Built-in Channel Notice",
-  "bulk.builtin_warning": "When using the built-in channel, contact the QQ group owner for an API Key with higher TPM/RPM limits. Otherwise, full-game translation may hit a limit and fail.",
+  "bulk.builtin_warning": "The trial API Key for the built-in channel has TPM/RPM limits, which may be hit and cause an error during full-game translation. If you need advanced APIs, please contact the author.",
   "bulk.confirm": "Confirm and Start",
   "bulk.preparing": "0% · Preparing task...",
   "bulk.cancelling": "0% · Cancelling...",

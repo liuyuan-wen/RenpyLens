@@ -3,6 +3,52 @@ import subprocess
 import sys
 import shutil
 import argparse
+from datetime import datetime
+
+
+def _is_executable_running(executable_name):
+    """Return whether a Windows process with this executable name is running."""
+    if os.name != "nt":
+        return False
+
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {executable_name}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("INFO:"):
+            continue
+        image_name = line.split(",", 1)[0].strip('"')
+        if image_name.lower() == executable_name.lower():
+            return True
+    return False
+
+
+def _select_output_name(base_name):
+    """Keep the normal name unless its executable is currently running."""
+    executable_name = f"{base_name}.exe"
+    if not _is_executable_running(executable_name):
+        return base_name
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = f"{base_name}_{timestamp}"
+    suffix = 2
+    while os.path.exists(f"{candidate}.exe"):
+        candidate = f"{base_name}_{timestamp}_{suffix}"
+        suffix += 1
+
+    print(
+        f"[WARN] {executable_name} is currently running; "
+        f"the new build will be written to {candidate}.exe."
+    )
+    return candidate
 
 def build_exe():
     parser = argparse.ArgumentParser(description="打包 RenpyLens")
@@ -10,8 +56,12 @@ def build_exe():
                         help="指定用于打包的 Python 解释器路径 (默认使用当前运行的 Python)")
     args = parser.parse_args()
 
+    # 确保在当前目录，并从项目的 src 目录读取配置
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(project_dir)
+    sys.path.append(os.path.join(project_dir, "src"))
+
     # 获取版本号
-    sys.path.append(os.path.join(os.getcwd(), "src"))
     try:
         from config import DEFAULT_CONFIG
         version = DEFAULT_CONFIG.get("version", "v1.5.0")
@@ -20,8 +70,7 @@ def build_exe():
 
     print(f"开始打包 RenpyLens {version}...")
     
-    # 确保在当前目录
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    output_name = _select_output_name(f"RenpyLens_{version}")
     
     # 使用指定的 Python 解释器
     python_exe = args.python
@@ -46,7 +95,7 @@ def build_exe():
     # 构建 PyInstaller 命令
     command = [
         python_exe, "-m", "PyInstaller",
-        "--name", f"RenpyLens_{version}",
+        "--name", output_name,
         "--windowed", # 隐藏控制台窗口
         "--onefile",   # --onedir 可以打包成一个目录
         "--paths", "src", # 将 src 目录添加到模块搜索路径
@@ -127,8 +176,8 @@ def build_exe():
     
     if result.returncode == 0:
         print("\n[OK] 打包成功！")
-        print(f"打包生成的文件 'RenpyLens_{version}.exe' 已经直接放在当前代码目录下。")
-        print(f"您可以直接双击 'RenpyLens_{version}.exe' 运行，或者将其发给用户（无需安装 Python）。")
+        print(f"打包生成的文件 '{output_name}.exe' 已经直接放在当前代码目录下。")
+        print(f"您可以直接双击 '{output_name}.exe' 运行，或者将其发给用户（无需安装 Python）。")
     else:
         print("\n[ERROR] 打包失败，请查看上面的错误信息。")
 
@@ -145,7 +194,7 @@ def build_exe():
             print(f"[WARN] 删除 build 目录失败: {e}")
             
     # 2. 清理产生的 .spec 文件
-    spec_file = os.path.join(os.getcwd(), f"RenpyLens_{version}.spec")
+    spec_file = os.path.join(os.getcwd(), f"{output_name}.spec")
     if os.path.exists(spec_file):
         try:
             os.remove(spec_file)
@@ -153,5 +202,7 @@ def build_exe():
         except Exception as e:
             print(f"[WARN] 删除 spec 文件失败: {e}")
 
+    return result.returncode
+
 if __name__ == "__main__":
-    build_exe()
+    raise SystemExit(build_exe())

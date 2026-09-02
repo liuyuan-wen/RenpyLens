@@ -60,7 +60,7 @@
     "status.game_exited_bulk": "게임이 종료되었습니다. 전체 게임 번역을 계속합니다...", "status.uninstalled": "제거됨: {detail}", "status.translation_failed": "❌ 번역 실패. 네트워크 또는 설정을 확인하세요. {support}",
     "status.prefetch_paused": "⚠️ 미리 가져오기 일시 중지: {detail}", "status.prefetch_failed": "❌ 미리 가져오기 번역 실패. 네트워크 또는 설정을 확인하세요. {support}",
     "bulk.scan_renpy": "🧩 게임을 자동 실행하고 모든 텍스트를 읽어 LLM으로 일괄 번역합니다.", "bulk.scan_rpgmaker": "🧩 게임을 실행하지 않고 RPG Maker 데이터를 읽은 뒤 일괄 번역합니다.", "bulk.cache_note": "💾 번역은 설정 폴더의 <code>translation_cache.db</code>에 저장됩니다.",
-    "bulk.builtin_warning_title": "⚠ 내장 채널 안내", "bulk.builtin_warning": "내장 채널 사용 시 QQ 그룹 관리자에게 TPM/RPM 상한이 열린 API Key를 받으세요. 그렇지 않으면 전체 번역 중 한도 오류가 발생할 수 있습니다.",
+    "bulk.builtin_warning_title": "⚠ 내장 채널 안내", "bulk.builtin_warning": "내장 채널의 체험용 API Key에는 TPM/RPM 상한이 있어 전체 번역 중 한도에 도달하여 오류가 발생할 수 있습니다. 고급 API가 필요하다면 작성자에게 문의해 주세요.",
     "bulk.scanning_rpgmaker": "0% · RPG Maker 데이터 오프라인 검색 중...", "bulk.scanning_rpgmaker_count": "0% · RPG Maker 데이터 검색 중... {count}개 발견", "bulk.cancelled_stop": "🛑 전체 게임 번역을 취소했습니다.",
     "bulk.incomplete_count": "❌ 전체 게임 번역 미완료: {done}/{total}", "bulk.paused": "⚠️ 전체 게임 번역 일시 중지: {detail}", "bulk.no_game": "❌ 게임을 선택하지 않아 시작할 수 없습니다.", "bulk.inject_failed": "❌ Hook 주입 실패: {detail}",
     "bulk.old_hook": "❌ 실행 중인 게임이 최신 Hook을 로드하지 않았습니다. RenpyLens에서 다시 주입하고 게임을 재시작하세요.", "bulk.hook_timeout": "❌ Hook 준비 대기 시간이 초과되었습니다. 다시 주입하고 게임을 재시작하세요.",

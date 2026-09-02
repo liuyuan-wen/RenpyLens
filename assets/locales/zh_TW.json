@@ -41,6 +41,7 @@
     "status.game_exited": "遊戲已結束", "status.model_ready": "✅ 模型已就緒", "status.model_switched": "✅ 模型已切換: {model}",
     "status.translating": "翻譯中...", "status.choice_translating": "選項翻譯中...",
     "bulk.title": "🚀 一鍵翻譯整個遊戲", "bulk.confirm": "確認並開始翻譯", "bulk.preparing": "0% · 正在準備工作...",
+    "bulk.builtin_warning": "內建通道的試用 API Key 有 TPM/RPM 上限，在翻譯整個遊戲的過程中可能觸發限額並發生錯誤。如有進階 API 的需求，請聯絡作者。",
     "bulk.cancelling": "0% · 正在取消...", "bulk.translating": "正在批次翻譯...", "bulk.cancelled": "⚠️ 已取消整個遊戲的翻譯。",
     "bulk.completed": "✅ 整個遊戲翻譯完成", "bulk.completed_count": "✅ 整個遊戲翻譯完成：{done}/{total}",
     "bulk.failed": "❌ 整個遊戲翻譯失敗", "bulk.failed_detail": "❌ 整個遊戲翻譯失敗：{detail}",

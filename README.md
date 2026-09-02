@@ -6,7 +6,7 @@ RenpyLens is a lightweight, real-time AI translation overlay for **Ren'Py** and 
 
 Drop a game executable into the app, choose a translation provider, and RenpyLens captures dialogue, speaker names, and visible choices through engine-native bridges. Translations appear in a movable overlay without replacing the game's original text.
 
-The interface is available in **English, Simplified Chinese, Traditional Chinese, Japanese, Korean, and Russian**.
+The interface is currently available in **English, Simplified Chinese, Traditional Chinese, Japanese, Korean, and Russian**.
 
 ## 💬 Community and Support
 
@@ -28,7 +28,7 @@ Use these communities for support, feedback, release news, and early feature pre
 - **Translation workbench:** Review and edit recent dialogue and choices while playing.
 - **Whole-game translation:** Scan supported game scripts and translate them in batches with progress tracking, rate limits, and cancellation.
 - **Translation memory:** SQLite and in-memory caching reduce duplicate requests and preserve manual edits.
-- **Localized interface:** Switch the application UI between six languages from the main window.
+- **Localized interface:** Switch the application UI between languages from the main window.
 
 ## 📸 Screenshot
 
@@ -64,17 +64,17 @@ Use these communities for support, feedback, release news, and early feature pre
    - Download the latest `RenpyLens_v1.5.0.exe` from the repository's **Releases** page.
    - Alternatively, follow the development instructions below to run it from source.
 2. **Choose a translation provider**
-   - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**.
+   - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**. If you are not in mainland China, select **Global node** in **Route**.
    - To use your own service, open **Settings → API Settings** and configure a provider, Ollama, or a custom OpenAI-compatible channel.
-3. **Select a game**
+1. **Select a game**
    - Drop the main `.exe` of a Ren'Py, RPG Maker MV, or RPG Maker MZ game into the RenpyLens window.
-4. **Load the Hook and start**
+2. **Load the Hook and start**
    - Select **Load Hook and Start Game**. RenpyLens installs the appropriate bridge and launches the game.
    - Ren'Py uses a bridge inside `game/`; RPG Maker uses a plugin inside `js/plugins/`.
-5. **Use the overlay**
+3. **Use the overlay**
    - Drag the overlay to reposition it.
    - Right-click the overlay for display controls, editing, and workbench access.
-6. **Remove the Hook when needed**
+4. **Remove the Hook when needed**
    - Select **Uninstall Hook** to remove RenpyLens bridge files safely.
 
 > **Model tip:** Real-time translation works best with models that do not emit long chain-of-thought or reasoning output. Such output increases latency and may appear in translations when a provider cannot disable it.
@@ -119,7 +119,7 @@ python build.py
 python build.py --python "C:\path\to\venv\python.exe"
 ```
 
-The build output is `RenpyLens_v1.5.0.exe`. If `upx.exe` is present in the project root, the build script uses it for compression.
+The build output is an `exe` file. If `upx.exe` is present in the project root, the build script uses it for compression.
 
 ## 🧩 Project Structure
 

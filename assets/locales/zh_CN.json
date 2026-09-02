@@ -252,7 +252,7 @@
   "bulk.scan_rpgmaker": "🧩 离线读取 RPG Maker 数据文件，无需启动游戏，随后分批翻译。",
   "bulk.cache_note": "💾 翻译结果会保存到配置目录中的 <code>translation_cache.db</code>。",
   "bulk.builtin_warning_title": "⚠ 内置通道提醒",
-  "bulk.builtin_warning": "如果使用的是内置通道，请先联系 QQ 群群主获取打开 TPM/RPM 上限的 API Key，否则全量翻译过程中可能触发限额并报错。",
+  "bulk.builtin_warning": "内置通道的试用 API Key 存在 TPM/RPM 上限，全量翻译过程中可能触发限额并报错。如对高级 API 有需求，请联系作者。",
   "bulk.confirm": "确认，开始翻译",
   "bulk.preparing": "0% · 正在准备任务...",
   "bulk.cancelling": "0% · 正在取消...",

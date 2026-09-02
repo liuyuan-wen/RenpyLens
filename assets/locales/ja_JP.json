@@ -70,7 +70,7 @@
     "status.game_launch_failed": "⚠️ ゲームを起動できませんでした。EXE を手動で起動してください。{support}", "status.game_exited_bulk": "ゲームは終了しました。ゲーム全体の翻訳を続行中...", "status.uninstalled": "削除済み: {detail}",
     "status.translation_failed": "❌ 翻訳に失敗しました。ネットワークまたは設定を確認してください。{support}", "status.prefetch_paused": "⚠️ 先読みを一時停止：{detail}", "status.prefetch_failed": "❌ 先読み翻訳に失敗しました。ネットワークまたは設定を確認してください。{support}",
     "bulk.scan_renpy": "🧩 ゲームを自動起動して全テキストを読み取り、LLM で一括翻訳します。", "bulk.scan_rpgmaker": "🧩 ゲームを起動せず RPG Maker データを読み取り、一括翻訳します。", "bulk.cache_note": "💾 訳文は設定フォルダーの <code>translation_cache.db</code> に保存されます。",
-    "bulk.builtin_warning_title": "⚠ 内蔵チャンネルについて", "bulk.builtin_warning": "内蔵チャンネルを使用する場合、TPM/RPM 上限を拡張した API Key を QQ グループ管理者から取得してください。未取得の場合、一括翻訳が上限で失敗することがあります。",
+    "bulk.builtin_warning_title": "⚠ 内蔵チャンネルについて", "bulk.builtin_warning": "内蔵チャンネルの試用 API Key には TPM/RPM 上限があり、ゲーム全体の翻訳中に上限に達してエラーになることがあります。高機能 API が必要な場合は、作者にご連絡ください。",
     "bulk.scanning_rpgmaker": "0% · RPG Maker データをオフライン走査中...", "bulk.scanning_rpgmaker_count": "0% · RPG Maker データを走査中... {count} 件検出", "bulk.cancelled_stop": "🛑 ゲーム全体の翻訳をキャンセルしました。",
     "bulk.incomplete_count": "❌ ゲーム全体の翻訳が未完了：{done}/{total}", "bulk.paused": "⚠️ ゲーム全体の翻訳を一時停止：{detail}", "bulk.no_game": "❌ ゲームが未選択のため開始できません。", "bulk.inject_failed": "❌ Hook の注入に失敗：{detail}",
     "bulk.old_hook": "❌ 実行中のゲームに新しい Hook が読み込まれていません。RenpyLens で再注入してゲームを再起動してください。", "bulk.hook_timeout": "❌ Hook の準備待ちがタイムアウトしました。再注入してゲームを再起動してください。",
