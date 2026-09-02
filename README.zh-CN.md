@@ -10,7 +10,7 @@ RenpyLens 是一款面向 Windows 的轻量级实时 AI 游戏翻译浮窗工具
 
 ## 💬 社区与支持
 
-- **Discord：**[加入 RenpyLens 全球社区](https://discord.gg/c4putqY5zs)
+- **Discord：**[https://discord.gg/c4putqY5zs](https://discord.gg/c4putqY5zs)
 - **中文 QQ 交流群：**`1058127921`
 
 欢迎加入社区获取技术支持、反馈问题、了解版本动态和体验内测功能。

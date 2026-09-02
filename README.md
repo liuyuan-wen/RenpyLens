@@ -10,7 +10,7 @@ The interface is currently available in **English, Simplified Chinese, Tradition
 
 ## 💬 Community and Support
 
-- **Discord:** [Join the global RenpyLens community](https://discord.gg/c4putqY5zs)
+- **Discord:** [https://discord.gg/c4putqY5zs](https://discord.gg/c4putqY5zs)
 - **Chinese QQ group:** `1058127921`
 
 Use these communities for support, feedback, release news, and early feature previews.
