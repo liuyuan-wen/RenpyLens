@@ -225,6 +225,34 @@ assert w.translation_edit.toPlainText()=='Unsaved user edit' and w.source_view.t
         self.assertIn("翻訳", workbench.windowTitle())
         workbench.deleteLater()
 
+    def test_workbench_footer_buttons_fit_all_locales(self):
+        for locale in ("zh_CN", "zh_TW", "en_US", "ja_JP", "ko_KR", "ru_RU"):
+            with self.subTest(locale=locale):
+                set_language(locale, self.app)
+                workbench = TranslationWorkbench(copy.deepcopy(DEFAULT_CONFIG))
+                workbench.resize(1235, 729)
+                workbench.show()
+                self.app.processEvents()
+                for button in (
+                    workbench.btn_open_config,
+                    workbench.btn_cancel,
+                    workbench.btn_save,
+                ):
+                    required_width = button.fontMetrics().horizontalAdvance(button.text())
+                    self.assertGreaterEqual(button.width(), required_width)
+                self.assertLessEqual(
+                    workbench.btn_cancel.geometry().right(),
+                    workbench.btn_save.geometry().left(),
+                )
+                button_centers = {
+                    workbench.btn_open_config.geometry().center().y(),
+                    workbench.btn_cancel.geometry().center().y(),
+                    workbench.btn_save.geometry().center().y(),
+                }
+                self.assertLessEqual(max(button_centers) - min(button_centers), 1)
+                workbench.close()
+                workbench.deleteLater()
+
     def _run_gui_subprocess(self, script: str):
         env = dict(os.environ)
         env["QT_QPA_PLATFORM"] = "offscreen"

@@ -235,7 +235,6 @@ class TranslationWorkbench(QWidget):
                 padding: 11px 22px;
                 font-size: 20px;
                 font-weight: bold;
-                min-width: 176px;
             }
             QPushButton#editor_save_btn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #3988ff, stop:1 #2a78f0);
@@ -256,7 +255,6 @@ class TranslationWorkbench(QWidget):
                 padding: 11px 20px;
                 font-size: 20px;
                 font-weight: bold;
-                min-width: 140px;
             }
             QPushButton#editor_cancel_btn:hover {
                 background-color: rgba(255, 255, 255, 0.04);
@@ -434,6 +432,7 @@ class TranslationWorkbench(QWidget):
         self.main_splitter.addWidget(self.list_widget)
 
         detail = QWidget()
+        self.detail_panel = detail
         detail_layout = QVBoxLayout(detail)
         detail_layout.setContentsMargins(8, 0, 0, 0)
         detail_layout.setSpacing(10)
@@ -478,6 +477,8 @@ class TranslationWorkbench(QWidget):
         detail_layout.addWidget(self.translation_edit, 1)
 
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(10)
         self.btn_open_config = QPushButton(tr("common.open_config"))
         self.btn_open_config.setObjectName("open_config_btn")
         self.btn_open_config.setCursor(Qt.PointingHandCursor)
@@ -508,7 +509,6 @@ class TranslationWorkbench(QWidget):
         self.btn_open_config.clicked.connect(self._on_open_config_dir)
         btn_row.addWidget(self.btn_open_config)
         btn_row.addStretch()
-        detail_layout.addLayout(btn_row)
 
         self.btn_cancel = QPushButton(tr("workbench.cancel_changes"))
         self.btn_cancel.setObjectName("editor_cancel_btn")
@@ -521,6 +521,9 @@ class TranslationWorkbench(QWidget):
         self.btn_save.setCursor(Qt.PointingHandCursor)
         self.btn_save.clicked.connect(self._save_current)
         btn_row.addWidget(self.btn_save)
+        detail_layout.addLayout(btn_row)
+
+        self._update_footer_button_widths()
 
         self._set_empty_state()
         self.set_bulk_idle()
@@ -541,6 +544,7 @@ class TranslationWorkbench(QWidget):
         self.btn_open_config.setToolTip(tr("common.open_config_tip"))
         self.btn_cancel.setText(tr("workbench.cancel_changes"))
         self.btn_save.setText(tr("workbench.save_translation"))
+        self._update_footer_button_widths()
         if self._current_source:
             entry = self._entries_by_source.get(self._current_source)
             if entry:
@@ -559,6 +563,22 @@ class TranslationWorkbench(QWidget):
                     ),
                     dirty_override=(True if is_active_dirty else None),
                 )
+
+    def _update_footer_button_widths(self):
+        """Keep translated footer labels from being compressed by the splitter."""
+        button_specs = (
+            (self.btn_open_config, 198, 38),
+            (self.btn_cancel, 182, 42),
+            (self.btn_save, 222, 46),
+        )
+        for button, base_width, horizontal_chrome in button_specs:
+            # QSS fonts are not reflected by fontMetrics() until the widget is
+            # polished.  This matters on the first launch in a non-CJK locale.
+            button.ensurePolished()
+            text_width = button.fontMetrics().horizontalAdvance(button.text())
+            button.setMinimumWidth(max(base_width, text_width + horizontal_chrome))
+        footer_width = sum(button.minimumWidth() for button, _, _ in button_specs) + 20
+        self.detail_panel.setMinimumWidth(footer_width + 8)
 
     def set_game_title(self, game_title: str):
         game_title = str(game_title or "").strip()
@@ -639,6 +659,7 @@ class TranslationWorkbench(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._update_footer_button_widths()
         if not self._splitter_default_applied:
             QTimer.singleShot(0, self._apply_default_splitter_sizes)
         self.visibility_changed.emit(True)
