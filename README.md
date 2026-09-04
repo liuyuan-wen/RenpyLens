@@ -19,6 +19,7 @@ Use these communities for support, feedback, release news, and early feature pre
 
 - **Drag-and-drop setup:** Drop the game's `.exe` into RenpyLens and launch it with the translation bridge.
 - **Multiple game engines:** Supports Ren'Py and RPG Maker MV/MZ dialogue, speaker names, and visible choices.
+- **RPGM tools:** Choose text speed, dialogue opacity, automatic advance, faster movement, no-clip, random encounters, and battle outcomes separately for each game.
 - **Flexible AI providers:**
   - **Built-in channel:** A streamlined, ready-to-use service with China mainland and global routes.
   - **Cloud providers:** OpenAI, Gemini, Anthropic Claude, DeepSeek, OpenRouter, Groq, MiniMax, SiliconFlow, Moonshot, xAI, Alibaba Qwen, Volcengine, Zhipu AI, and more.
@@ -36,7 +37,13 @@ Use these communities for support, feedback, release news, and early feature pre
 
 ## 🆕 Release Notes
 
-### v1.5.0 `Latest`
+### v1.5.1 `Latest`
+
+- **RPGM tools:** Added per-game controls for text speed, dialogue opacity, automatic advance, movement, collision, encounters, and battle outcomes.
+- **Faster contextual translation:** Combined visible text with nearby dialogue in the same request to improve context while avoiding duplicate translations.
+- **Interface polish:** Improved model input behavior, workbench window state, localized support information, and RPG Maker tool guidance.
+
+### v1.5.0
 
 - **Complete multilingual UI:** Added English, Simplified Chinese, Traditional Chinese, Japanese, Korean, and Russian interfaces with quick language switching.
 - **Built-in channel improvements:** Updated the China mainland and global routes, enabled strict TLS verification, and added route latency testing.
@@ -61,7 +68,7 @@ Use these communities for support, feedback, release news, and early feature pre
 ## 🎮 Getting Started
 
 1. **Download RenpyLens**
-   - Download the latest `RenpyLens_v1.5.0.exe` from the repository's **Releases** page.
+   - Download the latest `RenpyLens_v1.5.1.exe` from the repository's **Releases** page.
    - Alternatively, follow the development instructions below to run it from source.
 2. **Choose a translation provider**
    - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**. If you are not in mainland China, select **Global node** in **Route**.
@@ -71,6 +78,7 @@ Use these communities for support, feedback, release news, and early feature pre
 2. **Load the Hook and start**
    - Select **Load Hook and Start Game**. RenpyLens installs the appropriate bridge and launches the game.
    - Ren'Py uses a bridge inside `game/`; RPG Maker uses a plugin inside `js/plugins/`.
+   - After selecting an RPG Maker MV/MZ game, you can choose to enable **RPGM tools** and choose the tools you want from the adjacent menu.
 3. **Use the overlay**
    - Drag the overlay to reposition it.
    - Right-click the overlay for display controls, editing, and workbench access.

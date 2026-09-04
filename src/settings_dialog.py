@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QMessageBox
 )
 from PyQt5.QtCore import Qt
-from i18n import LANGUAGE_OPTIONS, localized_node_name, tr
+from i18n import LANGUAGE_OPTIONS, localized_node_name, manager as i18n_manager, tr
 from provider_registry import (
     get_provider_spec,
     iter_provider_options,
@@ -694,8 +694,15 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout(tab)
         vbox.setSpacing(16)
         
-        version = self.config.get("version", "v1.5.0")
+        version = self.config.get("version", "v1.5.1")
         
+        community_section = (
+            f'<b>{tr("settings.community")}</b>1058127921<br>'
+            f'<span style="color: #aaa; font-size: 18px;">{tr("settings.community_welcome")}</span><br>'
+            f'<span style="color: #aaa; font-size: 18px;">{tr("settings.community_contact")}</span><br>'
+            if i18n_manager().locale == "zh_CN"
+            else ""
+        )
         self.about_info_label = QLabel(
             f'<div style="font-size: 20px; font-weight: bold; margin-bottom: 10px;">RenpyLens {version}</div>'
             '<div style="line-height: 1.5; color: #ddd; font-size: 18px;">'
@@ -704,9 +711,7 @@ class SettingsDialog(QDialog):
             f'<b>{tr("settings.license")}</b>GPLv3<br>'
             f'<b>{tr("settings.project")}</b><a href="https://github.com/liuyuan-wen/RenpyLens" style="color: #4a9eff; text-decoration: none;">https://github.com/liuyuan-wen/RenpyLens</a><br>'
             f'<b>{tr("settings.discord")}</b><a href="https://discord.gg/c4putqY5zs" style="color: #4a9eff; text-decoration: none;">https://discord.gg/c4putqY5zs</a><br>'
-            f'<b>{tr("settings.community")}</b>1058127921<br>'
-            f'<span style="color: #aaa; font-size: 18px;">{tr("settings.community_welcome")}</span><br>'
-            f'<span style="color: #aaa; font-size: 18px;">{tr("settings.community_contact")}</span><br>'
+            f'{community_section}'
             f'<span style="color: #aaa; font-size: 18px;">{tr("settings.enjoy")}</span>'
             '</div>'
         )

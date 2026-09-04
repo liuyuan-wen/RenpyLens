@@ -22,6 +22,10 @@ ENGINE_RPGMAKER_MZ = "rpgmaker_mz"
 
 RPGMAKER_MARKER_BEGIN = "/* RENPYLENS_BRIDGE_BEGIN */"
 RPGMAKER_MARKER_END = "/* RENPYLENS_BRIDGE_END */"
+RPGMAKER_QOL_MARKER_BEGIN = "/* RPGMAKER_QOL_BEGIN */"
+RPGMAKER_QOL_MARKER_END = "/* RPGMAKER_QOL_END */"
+EDORIAM_QOL_MARKER_BEGIN = "/* EDORIAM_QOL_BEGIN */"
+EDORIAM_QOL_MARKER_END = "/* EDORIAM_QOL_END */"
 RPGMAKER_BRIDGE_NAME = "RenpyLensBridge"
 RPGMAKER_STATE_DIR = ".renpylens"
 RPGMAKER_MANIFEST = "install.json"
@@ -160,19 +164,45 @@ def _atomic_write(path: Path, data: bytes):
             temp.unlink()
 
 
-def _remove_marker_block(text: str) -> str:
+def _remove_named_marker_block(text: str, begin: str, end: str) -> str:
     pattern = re.compile(
-        re.escape(RPGMAKER_MARKER_BEGIN) + r".*?" + re.escape(RPGMAKER_MARKER_END) + r"(?:\r?\n)?",
+        re.escape(begin) + r".*?" + re.escape(end) + r"(?:\r?\n)?",
         flags=re.DOTALL,
     )
     return pattern.sub("", text)
 
 
-def _render_plugin_registration(socket_port: int, session_id: str) -> str:
+def _remove_marker_block(text: str) -> str:
+    return _remove_named_marker_block(text, RPGMAKER_MARKER_BEGIN, RPGMAKER_MARKER_END)
+
+
+def _remove_legacy_qol_blocks(text: str) -> str:
+    text = _remove_named_marker_block(
+        text, RPGMAKER_QOL_MARKER_BEGIN, RPGMAKER_QOL_MARKER_END
+    )
+    return _remove_named_marker_block(
+        text, EDORIAM_QOL_MARKER_BEGIN, EDORIAM_QOL_MARKER_END
+    )
+
+
+def _render_plugin_registration(
+    socket_port: int,
+    session_id: str,
+    rpgmaker_qol_enabled: bool = False,
+    rpgmaker_qol_locale: str = "en_US",
+    rpgmaker_qol_features: dict[str, bool] | None = None,
+) -> str:
+    features = {
+        str(key): bool(value)
+        for key, value in (rpgmaker_qol_features or {}).items()
+    }
     parameters = {
         "socketPort": str(int(socket_port)),
         "sessionId": str(session_id),
         "protocolVersion": "2",
+        "qolEnabled": "true" if rpgmaker_qol_enabled else "false",
+        "qolLocale": str(rpgmaker_qol_locale or "en_US"),
+        "qolFeatures": json.dumps(features, ensure_ascii=False, separators=(",", ":")),
     }
     entry = {
         "name": RPGMAKER_BRIDGE_NAME,
@@ -192,6 +222,9 @@ def _install_rpgmaker_bridge(
     bridge_source: str,
     socket_port: int,
     session_id: str,
+    rpgmaker_qol_enabled: bool = False,
+    rpgmaker_qol_locale: str = "en_US",
+    rpgmaker_qol_features: dict[str, bool] | None = None,
 ) -> tuple[bool, str]:
     content_dir = Path(target.content_dir)
     plugins_js = content_dir / "js" / "plugins.js"
@@ -210,8 +243,14 @@ def _install_rpgmaker_bridge(
         original_bytes = plugins_js.read_bytes()
         backup_bytes = backup_path.read_bytes() if backup_path.is_file() else original_bytes
         original_text = original_bytes.decode("utf-8-sig")
-        clean_text = _remove_marker_block(original_text)
-        registration = _render_plugin_registration(socket_port, session_id)
+        clean_text = _remove_legacy_qol_blocks(_remove_marker_block(original_text))
+        registration = _render_plugin_registration(
+            socket_port,
+            session_id,
+            rpgmaker_qol_enabled,
+            rpgmaker_qol_locale,
+            rpgmaker_qol_features,
+        )
         newline = "\r\n" if "\r\n" in original_text else "\n"
         if clean_text and not clean_text.endswith(("\n", "\r")):
             clean_text += newline
@@ -233,6 +272,12 @@ def _install_rpgmaker_bridge(
             "patched_sha256": _sha256(patched_bytes),
             "bridge_sha256": _sha256(bridge_bytes),
             "session_id": session_id,
+            "rpgmaker_qol_enabled": bool(rpgmaker_qol_enabled),
+            "rpgmaker_qol_locale": str(rpgmaker_qol_locale or "en_US"),
+            "rpgmaker_qol_features": {
+                str(key): bool(value)
+                for key, value in (rpgmaker_qol_features or {}).items()
+            },
         }
         _atomic_write(
             manifest_path,
@@ -290,11 +335,22 @@ def install_hook(
     rpgmaker_bridge_source: str,
     socket_port: int,
     session_id: str = "",
+    rpgmaker_qol_enabled: bool = False,
+    rpgmaker_qol_locale: str = "en_US",
+    rpgmaker_qol_features: dict[str, bool] | None = None,
 ) -> tuple[bool, str]:
     if target.engine == ENGINE_RENPY:
         return inject_renpy_hook(target.exe_path, renpy_hook_source, socket_port)
     session_id = session_id or uuid.uuid4().hex
-    return _install_rpgmaker_bridge(target, rpgmaker_bridge_source, socket_port, session_id)
+    return _install_rpgmaker_bridge(
+        target,
+        rpgmaker_bridge_source,
+        socket_port,
+        session_id,
+        rpgmaker_qol_enabled,
+        rpgmaker_qol_locale,
+        rpgmaker_qol_features,
+    )
 
 
 def uninstall_hook(target: GameTarget) -> tuple[bool, str]:

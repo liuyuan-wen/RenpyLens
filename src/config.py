@@ -16,8 +16,10 @@ else:
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "v1.5.0",
+    "version": "v1.5.1",
     "ui_language": "auto",
+    "rpgmaker_qol_games": {},
+    "rpgmaker_qol_features": {},
     "translation_engine": "builtin",
     "gemini_api_key": "",
     "gemini_url": "https://generativelanguage.googleapis.com",

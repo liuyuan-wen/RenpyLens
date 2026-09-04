@@ -12,15 +12,17 @@ import re
 import socket
 import subprocess
 import threading
+import textwrap
 import time
 import uuid
 from collections import deque
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QComboBox, QLineEdit, QTextEdit, QFileDialog,
-    QStyledItemDelegate, QDialog, QFrame, QMenu
+    QStyledItemDelegate, QDialog, QDialogButtonBox, QFrame, QMenu, QCheckBox,
+    QToolButton, QWidgetAction, QToolTip
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject, QPoint
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QColor, QPalette, QTextCursor, QPixmap
 
 from config import load_config, save_config
@@ -44,6 +46,8 @@ from overlay import TranslationOverlay
 from injector import launch_game, is_game_running
 from engine_adapters import (
     ENGINE_RENPY,
+    ENGINE_RPGMAKER_MV,
+    ENGINE_RPGMAKER_MZ,
     GameTarget,
     detect_game,
     install_hook,
@@ -74,6 +78,21 @@ else:
     HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "_translator_hook.rpy")
     RPGMAKER_BRIDGE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "RenpyLensBridge.js")
 
+RPGMAKER_TOOL_FEATURES = (
+    "textSpeed",
+    "messageOpacity",
+    "autoAdvance",
+    "moveSpeed",
+    "through",
+    "encounters",
+    "battleVictory",
+)
+RPGMAKER_TOOL_DEFAULT_FEATURES = {key: key == "textSpeed" for key in RPGMAKER_TOOL_FEATURES}
+RPGMAKER_TOOL_LEGACY_FEATURES = {
+    key: key not in {"messageOpacity", "autoAdvance"}
+    for key in RPGMAKER_TOOL_FEATURES
+}
+
 
 class LogStream(QObject):
     """将 print() 输出重定向到 QTextEdit 的流对象"""
@@ -89,6 +108,32 @@ class LogStream(QObject):
 
     def flush(self):
         pass
+
+
+class RPGMakerFeatureCheckBox(QCheckBox):
+    """Treat the full feature column as the checkbox hit area."""
+
+    def hitButton(self, pos: QPoint) -> bool:
+        return self.rect().contains(pos)
+
+
+class RPGMakerFeatureRow(QWidget):
+    """Make layout gaps in a feature row toggle its checkbox too."""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QWidget):
@@ -113,7 +158,7 @@ class MainWindow(QWidget):
         self.config = load_config()
         set_language(self.config.get("ui_language", "auto"), QApplication.instance())
 
-        version = self.config.get("version", "v1.5.0")
+        version = self.config.get("version", "v1.5.1")
         self.setWindowTitle(tr("app.title", version=version))
         self.resize(800, 10)
         self.setAcceptDrops(True)
@@ -136,6 +181,7 @@ class MainWindow(QWidget):
         self._game_process = None
         self._selected_game_detected_running = False
         self._hook_installed = False
+        self._hook_config_dirty = False
         self._translator_lock = threading.RLock() # 保护翻译器实例的切换与访问
         self._update_checking = False
         self._update_checking = False
@@ -238,6 +284,15 @@ class MainWindow(QWidget):
     def _set_translation_controls_enabled(self, enabled: bool):
         self.engine_combo.setEnabled(enabled)
         self.model_combo.setEnabled(enabled)
+        if hasattr(self, "btn_rpgmaker_qol"):
+            self.btn_rpgmaker_qol.setEnabled(
+                enabled and self.rpgmaker_qol_container.isVisible()
+            )
+        if hasattr(self, "btn_rpgmaker_qol_features"):
+            self.btn_rpgmaker_qol_features.setEnabled(
+                enabled
+                and self.rpgmaker_qol_container.isVisible()
+            )
         if enabled:
             self._update_url_visibility()
             is_builtin = self.config.get("translation_engine", "builtin") == "builtin"
@@ -412,6 +467,14 @@ class MainWindow(QWidget):
         self.btn_clear_cache.setToolTip(tr("main.clear_cache_tip"))
         layout.addLayout(btn_layout)
 
+        # 翻译引擎和模型选择区；RPGM 速通开关占用右侧空白区域。
+        translation_selection_layout = QHBoxLayout()
+        translation_selection_layout.setContentsMargins(0, 0, 0, 0)
+        translation_selection_layout.setSpacing(16)
+        selection_fields_layout = QVBoxLayout()
+        selection_fields_layout.setContentsMargins(0, 0, 0, 0)
+        selection_fields_layout.setSpacing(14)
+
         # 翻译引擎选择行
         engine_layout = QHBoxLayout()
         self.engine_label = QLabel(tr("main.engine"))
@@ -448,7 +511,7 @@ class MainWindow(QWidget):
         self.engine_combo.setFixedHeight(48)
         engine_layout.addWidget(self.engine_combo)
         engine_layout.addStretch()
-        layout.addLayout(engine_layout)
+        selection_fields_layout.addLayout(engine_layout)
 
         # 模型选择行
         model_layout = QHBoxLayout()
@@ -481,14 +544,160 @@ class MainWindow(QWidget):
             }
         """)
         self._update_model_combo()  # 填充模型列表
-        self.model_combo.currentTextChanged.connect(self._on_model_changed)
+        # 下拉选择立即提交；手动输入只在回车或失去焦点后提交，避免每次
+        # 按键都重建翻译器并清空缓存。
+        self.model_combo.activated[str].connect(self._on_model_changed)
+        model_editor = self.model_combo.lineEdit()
+        if model_editor:
+            model_editor.editingFinished.connect(self._on_model_editing_finished)
         self.model_combo.setFixedHeight(48)
         model_layout.addWidget(self.model_combo)
         self.model_hint = QLabel(tr("main.model_editable"))
         self.model_hint.setStyleSheet("font-size: 18px; color: #666;")
         model_layout.addWidget(self.model_hint)
         model_layout.addStretch()
-        layout.addLayout(model_layout)
+        selection_fields_layout.addLayout(model_layout)
+        translation_selection_layout.addLayout(selection_fields_layout, 1)
+
+        self.rpgmaker_qol_container = QWidget()
+        qol_layout = QHBoxLayout(self.rpgmaker_qol_container)
+        qol_layout.setContentsMargins(0, 0, 0, 0)
+        qol_layout.setSpacing(6)
+
+        self.rpgmaker_qol_switch_group = QFrame()
+        self.rpgmaker_qol_switch_group.setObjectName("rpgmakerQolSwitchGroup")
+        self.rpgmaker_qol_switch_group.setFixedHeight(48)
+        self.rpgmaker_qol_switch_group.setStyleSheet("""
+            QFrame#rpgmakerQolSwitchGroup {
+                background-color: #303044;
+                border: 1px solid #55576a;
+                border-radius: 6px;
+            }
+        """)
+        qol_switch_layout = QHBoxLayout(self.rpgmaker_qol_switch_group)
+        qol_switch_layout.setContentsMargins(1, 1, 1, 1)
+        qol_switch_layout.setSpacing(0)
+
+        self.btn_rpgmaker_qol = QPushButton()
+        self.btn_rpgmaker_qol.setCheckable(True)
+        self.btn_rpgmaker_qol.setCursor(Qt.PointingHandCursor)
+        self.btn_rpgmaker_qol.setFixedHeight(46)
+        self.btn_rpgmaker_qol.setMinimumWidth(160)
+        self.btn_rpgmaker_qol.setStyleSheet("""
+            QPushButton {
+                background-color: transparent; color: #aaa;
+                border: none; border-radius: 5px;
+                padding: 8px 14px; font-size: 18px;
+            }
+            QPushButton:hover { background-color: #38394e; color: #eee; }
+            QPushButton:checked {
+                background-color: #174b38; color: #69e3a9;
+            }
+            QPushButton:disabled { background-color: transparent; color: #666; }
+        """)
+        self.btn_rpgmaker_qol.toggled.connect(self._on_rpgmaker_qol_toggled)
+        qol_switch_layout.addWidget(self.btn_rpgmaker_qol)
+
+        qol_separator = QFrame()
+        qol_separator.setObjectName("rpgmakerQolSeparator")
+        qol_separator.setFixedSize(1, 28)
+        qol_separator.setStyleSheet(
+            "QFrame#rpgmakerQolSeparator { background-color: #505165; border: none; }"
+        )
+        qol_switch_layout.addWidget(qol_separator, 0, Qt.AlignVCenter)
+
+        self.btn_rpgmaker_qol_features = QToolButton()
+        self.btn_rpgmaker_qol_features.setCursor(Qt.PointingHandCursor)
+        self.btn_rpgmaker_qol_features.setFixedSize(42, 46)
+        self.btn_rpgmaker_qol_features.setText("▼")
+        self.btn_rpgmaker_qol_features.setPopupMode(QToolButton.InstantPopup)
+        self.btn_rpgmaker_qol_features.setStyleSheet("""
+            QToolButton {
+                background-color: transparent; color: #85879b;
+                border: none; border-radius: 5px;
+                padding: 0; font-size: 18px;
+            }
+            QToolButton:hover {
+                background-color: #38394e; color: #c5c8d8;
+            }
+            QToolButton:pressed, QToolButton:checked {
+                background-color: #252638; color: #d7d9e5;
+            }
+            QToolButton:disabled {
+                background-color: transparent; color: #505163;
+            }
+            QToolButton::menu-indicator { image: none; width: 0px; }
+        """)
+        self.rpgmaker_qol_feature_menu = QMenu(self.btn_rpgmaker_qol_features)
+        self.rpgmaker_qol_feature_menu.aboutToShow.connect(
+            lambda: self.btn_rpgmaker_qol_features.setText("▲")
+        )
+        self.rpgmaker_qol_feature_menu.aboutToHide.connect(
+            lambda: self.btn_rpgmaker_qol_features.setText("▼")
+        )
+        self.rpgmaker_qol_feature_checks = {}
+        self.rpgmaker_qol_feature_help = {}
+        qol_help_style = """
+            QPushButton {
+                background-color: transparent; color: #9698a5;
+                border: 1px solid #696b79; border-radius: 14px;
+                padding: 0; font-size: 16px; font-weight: normal;
+            }
+            QPushButton:hover {
+                background-color: #303144; color: #d0d1d8; border-color: #9193a0;
+            }
+            QToolTip {
+                font-size: 18px; color: #eee; background-color: #2a2a3e;
+                border: 1px solid #555; padding: 6px 10px;
+            }
+        """
+        for feature in RPGMAKER_TOOL_FEATURES:
+            row = RPGMakerFeatureRow()
+            row.setCursor(Qt.PointingHandCursor)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(10, 4, 8, 4)
+            row_layout.setSpacing(8)
+            checkbox = RPGMakerFeatureCheckBox()
+            checkbox.setCursor(Qt.PointingHandCursor)
+            row.clicked.connect(checkbox.toggle)
+            checkbox.toggled.connect(
+                lambda checked, selected=feature: self._on_rpgmaker_qol_feature_toggled(
+                    selected, checked
+                )
+            )
+            row_layout.addWidget(checkbox, 1)
+            help_label = QPushButton("?")
+            help_label.setCursor(Qt.PointingHandCursor)
+            help_label.setFixedSize(28, 28)
+            help_label.setStyleSheet(qol_help_style)
+            help_label.clicked.connect(
+                lambda _checked=False, widget=help_label:
+                    self._show_rpgmaker_qol_help(widget)
+            )
+            row_layout.addWidget(help_label)
+            action = QWidgetAction(self.rpgmaker_qol_feature_menu)
+            action.setDefaultWidget(row)
+            self.rpgmaker_qol_feature_menu.addAction(action)
+            self.rpgmaker_qol_feature_checks[feature] = checkbox
+            self.rpgmaker_qol_feature_help[feature] = help_label
+        self.btn_rpgmaker_qol_features.setMenu(self.rpgmaker_qol_feature_menu)
+        qol_switch_layout.addWidget(self.btn_rpgmaker_qol_features)
+        qol_layout.addWidget(self.rpgmaker_qol_switch_group)
+
+        self.btn_rpgmaker_qol_help = QPushButton("?")
+        self.btn_rpgmaker_qol_help.setCursor(Qt.PointingHandCursor)
+        self.btn_rpgmaker_qol_help.setFixedSize(28, 28)
+        self.btn_rpgmaker_qol_help.setStyleSheet(qol_help_style)
+        self.btn_rpgmaker_qol_help.clicked.connect(
+            lambda _checked=False: self._show_rpgmaker_qol_help_dialog()
+        )
+        qol_layout.addWidget(self.btn_rpgmaker_qol_help)
+        self.rpgmaker_qol_container.setVisible(True)
+        translation_selection_layout.addWidget(
+            self.rpgmaker_qol_container, 0, Qt.AlignRight | Qt.AlignTop
+        )
+        layout.addLayout(translation_selection_layout)
+        self._refresh_rpgmaker_qol_control()
 
         # ── 引擎设置区域（固定高度容器，防止切换引擎时布局跳动）──
         self.engine_settings_container = QWidget()
@@ -985,6 +1194,202 @@ class MainWindow(QWidget):
         self._status_message = (key, dict(params))
         self.status_label.setText(tr(key, **params))
 
+    def _is_rpgmaker_selected(self) -> bool:
+        return bool(
+            self._current_game
+            and self._current_game.engine in {ENGINE_RPGMAKER_MV, ENGINE_RPGMAKER_MZ}
+        )
+
+    def _rpgmaker_qol_enabled(self) -> bool:
+        if not self._is_rpgmaker_selected():
+            return False
+        states = self.config.get("rpgmaker_qol_games", {})
+        if not isinstance(states, dict):
+            return False
+        return bool(states.get(self._current_game.cache_id, False))
+
+    def _rpgmaker_qol_features(self) -> dict[str, bool]:
+        if not self._is_rpgmaker_selected():
+            return dict(RPGMAKER_TOOL_DEFAULT_FEATURES)
+        cache_id = self._current_game.cache_id
+        feature_games = self.config.get("rpgmaker_qol_features", {})
+        if isinstance(feature_games, dict) and isinstance(feature_games.get(cache_id), dict):
+            selected = feature_games[cache_id]
+            return {
+                key: bool(selected.get(key, False))
+                for key in RPGMAKER_TOOL_FEATURES
+            }
+        enabled_games = self.config.get("rpgmaker_qol_games", {})
+        if isinstance(enabled_games, dict) and cache_id in enabled_games:
+            return dict(RPGMAKER_TOOL_LEGACY_FEATURES)
+        return dict(RPGMAKER_TOOL_DEFAULT_FEATURES)
+
+    @staticmethod
+    def _format_rpgmaker_tooltip(text: str) -> str:
+        normalized = re.sub(r"([;；.。])\s*", r"\1\n", str(text or "")).strip()
+        wrapper = textwrap.TextWrapper(
+            width=26,
+            break_long_words=True,
+            break_on_hyphens=False,
+            replace_whitespace=False,
+            drop_whitespace=True,
+        )
+        wrapped_lines = []
+        for line in normalized.splitlines():
+            wrapped_lines.extend(wrapper.wrap(line) or [""])
+        return "\n".join(wrapped_lines)
+
+    def _refresh_rpgmaker_qol_control(self):
+        if not hasattr(self, "rpgmaker_qol_container"):
+            return
+        rpgmaker_selected = self._is_rpgmaker_selected()
+        self.rpgmaker_qol_container.setVisible(True)
+        enabled = self._rpgmaker_qol_enabled() if rpgmaker_selected else False
+        self.btn_rpgmaker_qol.blockSignals(True)
+        try:
+            self.btn_rpgmaker_qol.setChecked(enabled)
+        finally:
+            self.btn_rpgmaker_qol.blockSignals(False)
+        self.btn_rpgmaker_qol.setText(
+            tr("main.rpgmaker_qol_on" if enabled else "main.rpgmaker_qol_off")
+        )
+        help_text = self._format_rpgmaker_tooltip(tr("main.rpgmaker_qol_help"))
+        self.btn_rpgmaker_qol.setToolTip(help_text)
+        self.btn_rpgmaker_qol_help.setToolTip(help_text)
+        controls_enabled = (
+            not self._selected_game_detected_running and not self._game_process
+        )
+        self.btn_rpgmaker_qol.setEnabled(controls_enabled)
+        if hasattr(self, "btn_rpgmaker_qol_features"):
+            self.btn_rpgmaker_qol_features.setEnabled(controls_enabled)
+            feature_menu = getattr(self, "rpgmaker_qol_feature_menu", None)
+            if feature_menu is None or not feature_menu.isVisible():
+                self.btn_rpgmaker_qol_features.setText("▼")
+            matched_width = max(
+                160,
+                self.btn_rpgmaker_qol.fontMetrics().horizontalAdvance(
+                    self.btn_rpgmaker_qol.text()
+                ) + 36,
+            )
+            self.btn_rpgmaker_qol.setFixedWidth(matched_width)
+        selected_features = self._rpgmaker_qol_features()
+        for feature, checkbox in getattr(self, "rpgmaker_qol_feature_checks", {}).items():
+            checkbox.blockSignals(True)
+            try:
+                checkbox.setChecked(selected_features.get(feature, False))
+                checkbox.setText(tr(f"main.rpgmaker_tool_{feature}"))
+            finally:
+                checkbox.blockSignals(False)
+            help_label = self.rpgmaker_qol_feature_help.get(feature)
+            if help_label is not None:
+                help_label.setToolTip(self._format_rpgmaker_tooltip(
+                    tr(f"main.rpgmaker_tool_{feature}_tip")
+                ))
+
+    def _on_rpgmaker_qol_toggled(self, checked: bool):
+        if not self._is_rpgmaker_selected():
+            if checked:
+                self.btn_rpgmaker_qol.blockSignals(True)
+                try:
+                    self.btn_rpgmaker_qol.setChecked(False)
+                    self.btn_rpgmaker_qol.setText(tr("main.rpgmaker_qol_off"))
+                finally:
+                    self.btn_rpgmaker_qol.blockSignals(False)
+                QMessageBox.information(
+                    self,
+                    tr("main.rpgmaker_qol_help_title"),
+                    tr("main.rpgmaker_qol_no_game"),
+                )
+            return
+        cache_id = self._current_game.cache_id
+        selected_features = self._rpgmaker_qol_features()
+        feature_games = self.config.get("rpgmaker_qol_features", {})
+        feature_games = dict(feature_games) if isinstance(feature_games, dict) else {}
+        if not isinstance(feature_games.get(cache_id), dict):
+            feature_games[cache_id] = selected_features
+            self.config["rpgmaker_qol_features"] = feature_games
+        states = self.config.get("rpgmaker_qol_games", {})
+        if not isinstance(states, dict):
+            states = {}
+        else:
+            states = dict(states)
+        states[cache_id] = bool(checked)
+        self.config["rpgmaker_qol_games"] = states
+        save_config(self.config)
+        self._hook_config_dirty = True
+        self._refresh_rpgmaker_qol_control()
+
+    def _on_rpgmaker_qol_feature_toggled(self, feature: str, checked: bool):
+        if not self._is_rpgmaker_selected() or feature not in RPGMAKER_TOOL_FEATURES:
+            return
+        feature_games = self.config.get("rpgmaker_qol_features", {})
+        feature_games = dict(feature_games) if isinstance(feature_games, dict) else {}
+        selected = self._rpgmaker_qol_features()
+        selected[feature] = bool(checked)
+        feature_games[self._current_game.cache_id] = selected
+        self.config["rpgmaker_qol_features"] = feature_games
+        save_config(self.config)
+        self._hook_config_dirty = True
+
+    def _show_rpgmaker_qol_help(self, widget=None):
+        if widget is None:
+            widget = self.btn_rpgmaker_qol_help
+        QToolTip.showText(
+            widget.mapToGlobal(QPoint(0, widget.height() + 6)),
+            widget.toolTip(),
+            widget,
+            widget.rect(),
+            6000,
+        )
+
+    def _show_rpgmaker_qol_help_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("main.rpgmaker_qol_help_title"))
+        dialog.setModal(True)
+        dialog.setStyleSheet("""
+            QDialog { background-color: #1a1a2e; }
+            QTextEdit#rpgmakerQolHelpContent {
+                background-color: transparent; color: #eeeeee;
+                border: none; padding: 4px; font-size: 21px;
+            }
+            QDialogButtonBox QPushButton {
+                min-width: 88px; min-height: 36px;
+                padding: 4px 16px; border: 1px solid #5a5d73;
+                border-radius: 5px; background-color: #303248;
+                color: #eeeeee; font-size: 18px;
+            }
+            QDialogButtonBox QPushButton:hover {
+                background-color: #3a3d56; border-color: #777b96;
+            }
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setSpacing(14)
+
+        content = QTextEdit(dialog)
+        content.setObjectName("rpgmakerQolHelpContent")
+        content.setReadOnly(True)
+        content.setPlainText(tr("main.rpgmaker_qol_help_dialog"))
+        content.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        content.document().setDocumentMargin(8)
+        layout.addWidget(content, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        screen = QApplication.screenAt(self.frameGeometry().center())
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        available = screen.availableGeometry()
+        width = min(760, max(420, available.width() - 120))
+        height = min(620, max(360, available.height() - 120))
+        dialog.setMinimumSize(min(560, width), min(420, height))
+        dialog.resize(width, height)
+        dialog.exec_()
+        return dialog
+
     def _on_status_signal(self, text):
         if isinstance(text, LocalizedString):
             self._status_message = (text.key, text.params)
@@ -1024,7 +1429,7 @@ class MainWindow(QWidget):
             self.engine_combo.blockSignals(False)
 
     def retranslate_ui(self, *_):
-        version = self.config.get("version", "v1.5.0")
+        version = self.config.get("version", "v1.5.1")
         self.setWindowTitle(tr("app.title", version=version))
         self.btn_settings.setText(tr("main.settings"))
         self.btn_pin.setText(tr("common.pin"))
@@ -1037,6 +1442,9 @@ class MainWindow(QWidget):
         self.engine_label.setText(tr("main.engine"))
         self.model_label.setText(tr("main.model"))
         self.model_hint.setText(tr("main.model_editable"))
+        if self._is_rpgmaker_selected() and self._hook_installed:
+            self._hook_config_dirty = True
+        self._refresh_rpgmaker_qol_control()
         self.node_label.setText(tr("main.route"))
         self._render_latency_button()
         self.btn_trial_key.setText(tr("main.get_trial"))
@@ -1076,6 +1484,9 @@ class MainWindow(QWidget):
     def _show_workbench(self, focus_source: str = ""):
         if not hasattr(self, "workbench") or not self.workbench:
             return
+        if not self.workbench.isVisible():
+            self.config["workbench_pinned"] = self._is_pinned
+            self.workbench.update_config(self.config)
         self._refresh_workbench_entries(selected_source=focus_source)
         if self.workbench.isMinimized():
             self.workbench.showNormal()
@@ -1569,7 +1980,8 @@ class MainWindow(QWidget):
             cursor.removeSelectedText()
 
     def _support_tip(self) -> str:
-        return tr("status.support", number=self.SUPPORT_QQ_GROUP)
+        number = self.SUPPORT_QQ_GROUP if i18n_manager().locale == "zh_CN" else ""
+        return tr("status.support", number=number).strip()
 
     def _auto_check_updates(self):
         self._start_update_check()
@@ -1647,7 +2059,12 @@ class MainWindow(QWidget):
         reply = QMessageBox.question(
             self,
             tr("dialog.new_version"),
-            tr("dialog.update_question", latest=latest_tag, current=current_version, number=self.SUPPORT_QQ_GROUP),
+            tr(
+                "dialog.update_question",
+                latest=latest_tag,
+                current=current_version,
+                number=self.SUPPORT_QQ_GROUP if i18n_manager().locale == "zh_CN" else "",
+            ).rstrip(),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
@@ -2697,6 +3114,8 @@ class MainWindow(QWidget):
             self.workbench.set_game_title(self.game_title)
         self.btn_clear_cache.setEnabled(not self.cache.is_empty())
         self.btn_workbench_toggle.setEnabled(True)
+        self._hook_config_dirty = False
+        self._refresh_rpgmaker_qol_control()
         self._set_selected_game_running_state(is_game_running(exe_path))
         self.btn_uninstall.setEnabled(False)
         self._hook_installed = False
@@ -2706,6 +3125,7 @@ class MainWindow(QWidget):
     def _set_selected_game_running_state(self, running: bool):
         """Keep the start action disabled while the selected EXE is already running."""
         self._selected_game_detected_running = bool(running)
+        self._refresh_rpgmaker_qol_control()
         if not self._current_game_exe:
             self.selected_game_timer.stop()
             return
@@ -2758,6 +3178,9 @@ class MainWindow(QWidget):
             RPGMAKER_BRIDGE_SCRIPT,
             self.config.get("socket_port", 19876),
             self._hook_session_id,
+            rpgmaker_qol_enabled=self._rpgmaker_qol_enabled(),
+            rpgmaker_qol_locale=i18n_manager().locale,
+            rpgmaker_qol_features=self._rpgmaker_qol_features(),
         )
         if not ok:
             QMessageBox.critical(self, tr("dialog.inject_failed"), f"{msg}\n\n{self._support_tip()}")
@@ -2771,6 +3194,7 @@ class MainWindow(QWidget):
         self.btn_uninstall.setEnabled(True)
         self.btn_start_game.setEnabled(True)
         self._hook_installed = True
+        self._hook_config_dirty = False
         print(f"[Main] {msg}")
 
     def _on_start_game(self):
@@ -2781,7 +3205,7 @@ class MainWindow(QWidget):
             self._set_selected_game_running_state(True)
             return
         # 若尚未装载 Hook，自动装载
-        if not self._hook_installed:
+        if not self._hook_installed or self._hook_config_dirty:
             self._on_install_hook()
             if not self._hook_installed:
                 return  # 装载失败，中止
@@ -2838,6 +3262,7 @@ class MainWindow(QWidget):
                 self.btn_start_game.setEnabled(True)
             self._game_process = None
             self._reset_hook_session_state()
+            self._refresh_rpgmaker_qol_control()
 
             keep_translator_alive = False
             bulk_job_id = ""
@@ -3014,18 +3439,28 @@ class MainWindow(QWidget):
 
         self.model_combo.blockSignals(False)
 
+    def _on_model_editing_finished(self):
+        """手动输入模型名后，在回车或失去焦点时统一提交。"""
+        self._on_model_changed(self.model_combo.currentText())
+
     def _on_model_changed(self, model_name: str):
-        """模型选择/输入变化"""
-        if not model_name.strip():
+        """提交模型选择或手动输入的模型名。"""
+        model_name = model_name.strip()
+        if not model_name:
             return
         engine = self.config.get("translation_engine", "builtin")
         if engine == "builtin":
             # 将友好名称映射回真实模型名
             model_map = getattr(self, '_builtin_model_map', {})
             real_name = model_map.get(model_name, model_name)
+            if self.config.get("builtin_model") == real_name:
+                return
             self.config["builtin_model"] = real_name
             model_name = real_name  # 用于后续日志
         else:
+            provider = resolve_provider(self.config, engine)
+            if provider is not None and provider.model == model_name:
+                return
             update_provider(self.config, engine, model=model_name)
 
         self._rebuild_translator(clear_cache=True)
@@ -3042,6 +3477,7 @@ class MainWindow(QWidget):
                 self.btn_start_game.setEnabled(True)
 
                 self._hook_installed = False
+                self._hook_config_dirty = False
                 self._reset_hook_session_state()
                 self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{os.path.basename(self._current_game_exe)}')
                 self.overlay.hide()
@@ -3259,26 +3695,13 @@ class MainWindow(QWidget):
         return stolen
 
     def _release_outdated_inflight_for_current(self, texts: list[str], gen: int) -> int:
-        """Let visible text take priority over stale prefetch or older page work."""
-        now = time.perf_counter()
-        released = 0
-        for text in texts:
-            if not text or self.cache.get(text) is not None or text not in self._inflight_texts:
-                continue
-            meta = self._inflight_meta.get(text, {})
-            owner = str(meta.get("owner") or "")
-            meta_gen = meta.get("gen")
-            if owner == "prefetch" or (meta_gen is not None and meta_gen != gen):
-                age = now - float(meta.get("started", now))
-                print(
-                    f"[Inflight] release for current owner={owner or '?'} "
-                    f"gen={meta_gen} current_gen={gen} age={age:.1f}s "
-                    f"text={self._preview_text(text)}"
-                )
-                self._inflight_texts.discard(text)
-                self._inflight_meta.pop(text, None)
-                released += 1
-        return released
+        """Keep ownership while an earlier batch may still produce this text.
+
+        A prefetched line often becomes the visible line before its request
+        finishes. Stealing it here lets both workers translate the same source.
+        The bounded waits below already take over if the owner exits or stalls.
+        """
+        return 0
 
     def _translate_batch_with_current(
         self,
@@ -3382,10 +3805,20 @@ class MainWindow(QWidget):
             # 超时仍未就绪 → 继续走翻译流程
 
         t_build_start = _time.perf_counter()
-        # 构建实时批次：只包含当前句 + 当前菜单选项，预取稍后单独补。
+        # 构建实时批次：当前句/选项优先，并把可用的连续后文放进同一请求。
+        # 这样当前翻译能利用紧邻语境，且无需先做一个独立的单句请求。
         seen = set()
         with self._inflight_lock:
             for text in required_texts:
+                if text and text not in seen \
+                        and self.cache.get(text) is None \
+                        and text not in self._inflight_texts:
+                    batch_texts.append(text)
+                    seen.add(text)
+
+            prefetch_count = max(0, int(self.config.get("prefetch_count", 5)))
+            for item in self._latest_prefetch_items[:prefetch_count]:
+                text = str(item.get("what", "") or "").strip()
                 if text and text not in seen \
                         and self.cache.get(text) is None \
                         and text not in self._inflight_texts:

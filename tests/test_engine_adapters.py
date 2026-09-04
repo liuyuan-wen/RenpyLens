@@ -10,6 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from engine_adapters import (  # noqa: E402
+    EDORIAM_QOL_MARKER_BEGIN,
+    EDORIAM_QOL_MARKER_END,
     ENGINE_RPGMAKER_MV,
     ENGINE_RPGMAKER_MZ,
     RPGMAKER_MARKER_BEGIN,
@@ -94,6 +96,51 @@ class RpgMakerAdapterTests(unittest.TestCase):
         self.assertTrue(ok, message)
         self.assertEqual(plugins_js.read_bytes(), original)
         self.assertFalse((content / "js" / "plugins" / "RenpyLensBridge.js").exists())
+
+    def test_install_passes_qol_settings_to_bridge_registration(self):
+        exe, content = self._make_game()
+        target = detect_game(str(exe))
+
+        ok, message = install_hook(
+            target,
+            str(self.renpy_hook),
+            str(self.bridge),
+            19876,
+            "qol-session",
+            rpgmaker_qol_enabled=True,
+            rpgmaker_qol_locale="zh_CN",
+            rpgmaker_qol_features={"textSpeed": True, "moveSpeed": False},
+        )
+
+        self.assertTrue(ok, message)
+        registry = (content / "js" / "plugins.js").read_text(encoding="utf-8")
+        self.assertIn('"qolEnabled":"true"', registry)
+        self.assertIn('"qolLocale":"zh_CN"', registry)
+        self.assertIn('\\"textSpeed\\":true', registry)
+        self.assertIn('\\"moveSpeed\\":false', registry)
+
+    def test_install_temporarily_replaces_legacy_qol_and_uninstall_restores_it(self):
+        exe, content = self._make_game()
+        target = detect_game(str(exe))
+        plugins_js = content / "js" / "plugins.js"
+        legacy = (
+            plugins_js.read_text(encoding="utf-8")
+            + f"{EDORIAM_QOL_MARKER_BEGIN}\n"
+            + '$plugins.push({"name":"EdoriamQoL","status":true});\n'
+            + f"{EDORIAM_QOL_MARKER_END}\n"
+        )
+        plugins_js.write_text(legacy, encoding="utf-8", newline="")
+        original = plugins_js.read_bytes()
+
+        ok, message = install_hook(
+            target, str(self.renpy_hook), str(self.bridge), 19876, "session"
+        )
+        self.assertTrue(ok, message)
+        self.assertNotIn(EDORIAM_QOL_MARKER_BEGIN, plugins_js.read_text(encoding="utf-8"))
+
+        ok, message = uninstall_hook(target)
+        self.assertTrue(ok, message)
+        self.assertEqual(plugins_js.read_bytes(), original)
 
     def test_uninstall_preserves_external_plugin_registry_changes(self):
         exe, content = self._make_game()
