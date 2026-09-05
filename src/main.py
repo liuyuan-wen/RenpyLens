@@ -158,7 +158,7 @@ class MainWindow(QWidget):
         self.config = load_config()
         set_language(self.config.get("ui_language", "auto"), QApplication.instance())
 
-        version = self.config.get("version", "v1.5.1")
+        version = self.config.get("version", "v1.5.2")
         self.setWindowTitle(tr("app.title", version=version))
         self.resize(800, 10)
         self.setAcceptDrops(True)
@@ -1429,7 +1429,7 @@ class MainWindow(QWidget):
             self.engine_combo.blockSignals(False)
 
     def retranslate_ui(self, *_):
-        version = self.config.get("version", "v1.5.1")
+        version = self.config.get("version", "v1.5.2")
         self.setWindowTitle(tr("app.title", version=version))
         self.btn_settings.setText(tr("main.settings"))
         self.btn_pin.setText(tr("common.pin"))

@@ -44,6 +44,7 @@ Game_Event.prototype.checkEventTriggerTouch = function() {{ this.touchChecks += 
 function Scene_Base() {{}} Scene_Base.prototype.update = function() {{}};
 function Scene_Title() {{}} function Scene_Boot() {{}}
 function Game_Interpreter() {{}} Game_Interpreter.prototype.command101 = () => true;
+Game_Interpreter.prototype.updateWaitMode = function() {{ return this._waitMode === 'route'; }};
 function Window_Message() {{}} Window_Message.prototype.startMessage = function() {{}};
 Window_Message.prototype.convertEscapeCharacters = value => value;
 Window_Message.prototype.updateMessage = () => false;
@@ -90,6 +91,16 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync({bridge}, 'utf8'), context);
 context.$gameSystem = new context.Game_System(); context.$gameSystem.initialize();
 context.SceneManager._scene.update();
+const blockedCharacter = {{
+  _moveRouteForcing:true, _moveRoute:{{skippable:false}}, _moveRouteIndex:2,
+  _waitCount:0, _x:10, _y:12, isMoving:() => false
+}};
+const blockedInterpreter = new context.Game_Interpreter();
+blockedInterpreter._waitMode = 'route'; blockedInterpreter._character = blockedCharacter;
+for (let frame=0; frame<119; frame += 1) blockedInterpreter.updateWaitMode();
+if (blockedCharacter._moveRoute.skippable) throw new Error('move route was released too early');
+blockedInterpreter.updateWaitMode();
+if (!blockedCharacter._moveRoute.skippable) throw new Error('blocked move route stayed locked');
 const controls = document.getElementById('renpylens-qol-controls');
 if (!controls || controls.children.length !== 3) throw new Error('QoL controls missing');
 const exploration = controls.children[0];

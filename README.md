@@ -19,7 +19,7 @@ Use these communities for support, feedback, release news, and early feature pre
 
 - **Drag-and-drop setup:** Drop the game's `.exe` into RenpyLens and launch it with the translation bridge.
 - **Multiple game engines:** Supports Ren'Py and RPG Maker MV/MZ dialogue, speaker names, and visible choices.
-- **RPGM tools:** Choose text speed, dialogue opacity, automatic advance, faster movement, no-clip, random encounters, and battle outcomes separately for each game.
+- **RPGM tools:** Useful tools like text speed, dialogue opacity, automatic advance, faster movement, no-clip, random encounters, and battle outcomes.
 - **Flexible AI providers:**
   - **Built-in channel:** A streamlined, ready-to-use service with China mainland and global routes.
   - **Cloud providers:** OpenAI, Gemini, Anthropic Claude, DeepSeek, OpenRouter, Groq, MiniMax, SiliconFlow, Moonshot, xAI, Alibaba Qwen, Volcengine, Zhipu AI, and more.
@@ -37,7 +37,13 @@ Use these communities for support, feedback, release news, and early feature pre
 
 ## 🆕 Release Notes
 
-### v1.5.1 `Latest`
+### v1.5.2 `Latest`
+
+- **RPGM stability:** Prevented blocked forced move routes from permanently locking autorun scenes.
+- **Overlay interaction:** Recovered lost drag and resize release events so the overlay cannot remain stuck in an active pointer state.
+- **Portable packaging:** Included Conda's `libexpat.dll` when required by the bundled `pyexpat` module, fixing startup failures on clean Windows systems.
+
+### v1.5.1
 
 - **RPGM tools:** Added per-game controls for text speed, dialogue opacity, automatic advance, movement, collision, encounters, and battle outcomes.
 - **Faster contextual translation:** Combined visible text with nearby dialogue in the same request to improve context while avoiding duplicate translations.
@@ -68,7 +74,7 @@ Use these communities for support, feedback, release news, and early feature pre
 ## 🎮 Getting Started
 
 1. **Download RenpyLens**
-   - Download the latest `RenpyLens_v1.5.1.exe` from the repository's **Releases** page.
+   - Download the latest `RenpyLens_v1.5.2.exe` from the repository's **Releases** page.
    - Alternatively, follow the development instructions below to run it from source.
 2. **Choose a translation provider**
    - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**. If you are not in mainland China, select **Global node** in **Route**.
@@ -127,7 +133,11 @@ python build.py
 python build.py --python "C:\path\to\venv\python.exe"
 ```
 
-The build output is an `exe` file. If `upx.exe` is present in the project root, the build script uses it for compression.
+The build output is an `exe` file. If `upx.exe` is present in the project root, the build script uses it for compression by default. If the resulting executable is blocked by antivirus software or fails to start, build it without UPX:
+
+```powershell
+python build.py --noupx
+```
 
 ## 🧩 Project Structure
 

@@ -4,19 +4,46 @@ import sys
 import shutil
 import argparse
 
+
+def find_python_runtime_dll(python_exe, dll_name):
+    """Locate a DLL supplied by the selected Python distribution."""
+    script = """
+import os
+import sys
+
+dll_name = sys.argv[1]
+roots = [sys.prefix, sys.base_prefix, os.path.dirname(sys.executable)]
+for root in dict.fromkeys(roots):
+    for relative_dir in (os.path.join("Library", "bin"), "DLLs", ""):
+        candidate = os.path.join(root, relative_dir, dll_name)
+        if os.path.isfile(candidate):
+            print(candidate)
+            raise SystemExit
+"""
+    try:
+        return subprocess.check_output(
+            [python_exe, "-c", script, dll_name],
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
 def build_exe():
     parser = argparse.ArgumentParser(description="打包 RenpyLens")
     parser.add_argument("--python", type=str, default=sys.executable,
                         help="指定用于打包的 Python 解释器路径 (默认使用当前运行的 Python)")
+    parser.add_argument("--noupx", action="store_true",
+                        help="Disable UPX compression (use if the built executable is blocked or fails to start)")
     args = parser.parse_args()
 
     # 获取版本号
     sys.path.append(os.path.join(os.getcwd(), "src"))
     try:
         from config import DEFAULT_CONFIG
-        version = DEFAULT_CONFIG.get("version", "v1.5.1")
+        version = DEFAULT_CONFIG.get("version", "v1.5.2")
     except ImportError:
-        version = "v1.5.1"
+        version = "v1.5.2"
 
     print(f"开始打包 RenpyLens {version}...")
     
@@ -28,6 +55,10 @@ def build_exe():
     if not os.path.exists(python_exe):
         print(f"[WARN] 指定的 Python 解释器不存在: {python_exe}，将回退使用默认解释器")
         python_exe = sys.executable
+
+    # Conda builds of pyexpat link to this external DLL. PyInstaller does not
+    # always discover it automatically when analyzing the standard library.
+    libexpat_path = find_python_runtime_dll(python_exe, "libexpat.dll")
 
     qt_translation_dir = ""
     try:
@@ -44,6 +75,9 @@ def build_exe():
         print(f"[WARN] 无法定位 Qt 翻译资源，将依赖 PyInstaller 默认收集: {exc}")
 
     # 构建 PyInstaller 命令
+    # UPX is enabled by default when upx.exe is available. Use --noupx to disable it.
+    upx_options = ["--noupx"] if args.noupx else ["--upx-dir", "."]
+
     command = [
         python_exe, "-m", "PyInstaller",
         "--name", f"RenpyLens_{version}",
@@ -104,14 +138,19 @@ def build_exe():
         "--exclude-module", "PyQt5.QtQuick3D",
         "--exclude-module", "PyQt5.QtQml",
         
-        # 启用 UPX 压缩 (需要当前目录有 upx.exe)
-        "--upx-dir", ".",
+        # 默认启用 UPX 压缩；使用 --noupx 时禁用
+        *upx_options,
         
         "--clean",
         "--noconfirm",
         "--distpath", ".",  # 将输出目录修改为当前目录，不使用默认的 dist
         "src/main.py"
     ]
+
+    if libexpat_path:
+        command[command.index("src/main.py"):command.index("src/main.py")] = [
+            "--add-binary", f"{libexpat_path};."
+        ]
 
     if qt_translation_dir and os.path.isdir(qt_translation_dir):
         for locale in ("zh_CN", "zh_TW", "en", "ja", "ko", "ru"):

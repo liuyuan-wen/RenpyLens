@@ -353,6 +353,7 @@ class TranslationOverlay(QWidget):
 
     def hideEvent(self, event):
         self._topmost_timer.stop()
+        self._clear_pointer_interaction()
         super().hideEvent(event)
         self.visibility_changed.emit(False)
 
@@ -531,6 +532,15 @@ class TranslationOverlay(QWidget):
                 self.config["overlay_width"] = self.width()
         self._save_config()
 
+    def _clear_pointer_interaction(self):
+        """End any drag/resize whose release event may have been lost."""
+        self._drag_pos = None
+        self._is_resizing = False
+        self._resize_start_pos = None
+        self._resize_start_size = None
+        self.setCursor(Qt.OpenHandCursor)
+        self.editor_footer.setCursor(Qt.OpenHandCursor)
+
     def eventFilter(self, watched, event):
         if watched is self.editor_container and event.type() == QEvent.Resize:
             self._position_resize_handle()
@@ -547,10 +557,14 @@ class TranslationOverlay(QWidget):
             self.editor_footer.setCursor(Qt.ClosedHandCursor)
             return True
         if event.type() == QEvent.MouseMove:
-            if self._drag_pos is not None and event.buttons() & Qt.LeftButton:
-                self.move(event.globalPos() - self._drag_pos)
-                self.config["overlay_x"] = self.x()
-                self.config["overlay_y"] = self.y()
+            if self._drag_pos is not None:
+                if event.buttons() & Qt.LeftButton:
+                    self.move(event.globalPos() - self._drag_pos)
+                    self.config["overlay_x"] = self.x()
+                    self.config["overlay_y"] = self.y()
+                    return True
+                self._clear_pointer_interaction()
+                self._persist_window_geometry()
                 return True
             self.editor_footer.setCursor(Qt.OpenHandCursor)
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
@@ -568,15 +582,19 @@ class TranslationOverlay(QWidget):
             self._resize_start_pos = event.globalPos()
             self._resize_start_size = self.size()
             return True
-        if event.type() == QEvent.MouseMove and self._is_resizing and event.buttons() & Qt.LeftButton:
-            delta = event.globalPos() - self._resize_start_pos
-            width, height = self._clamp_edit_size(
-                self._resize_start_size.width() + delta.x(),
-                self._resize_start_size.height() + delta.y(),
-            )
-            self.resize(width, height)
-            self.config["overlay_edit_width"] = width
-            self.config["overlay_edit_height"] = height
+        if event.type() == QEvent.MouseMove and self._is_resizing:
+            if event.buttons() & Qt.LeftButton:
+                delta = event.globalPos() - self._resize_start_pos
+                width, height = self._clamp_edit_size(
+                    self._resize_start_size.width() + delta.x(),
+                    self._resize_start_size.height() + delta.y(),
+                )
+                self.resize(width, height)
+                self.config["overlay_edit_width"] = width
+                self.config["overlay_edit_height"] = height
+                return True
+            self._clear_pointer_interaction()
+            self._persist_window_geometry(include_size=True)
             return True
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
             resized = self._is_resizing
@@ -708,6 +726,7 @@ class TranslationOverlay(QWidget):
         self.edit_saved.emit(payload)
 
     def reset_to_default_position(self):
+        self._clear_pointer_interaction()
         primary_screen = QApplication.primaryScreen()
         if primary_screen:
             screen = primary_screen.geometry()
@@ -792,6 +811,11 @@ class TranslationOverlay(QWidget):
     def mouseMoveEvent(self, event):
         if self.editor_container.isVisible():
             return super().mouseMoveEvent(event)
+        if (self._drag_pos is not None or self._is_resizing) and not event.buttons() & Qt.LeftButton:
+            self._clear_pointer_interaction()
+            self._persist_window_geometry(include_size=True)
+            event.accept()
+            return
         if self._is_resizing:
             new_width = self._clamp_overlay_width(event.globalPos().x() - self.x())
             self.resize(new_width, self.height())
@@ -816,6 +840,7 @@ class TranslationOverlay(QWidget):
         event.accept()
 
     def _show_context_menu(self, pos):
+        self._clear_pointer_interaction()
         menu = QMenu(self)
         menu.setStyleSheet(
             """

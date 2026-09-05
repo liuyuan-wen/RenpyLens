@@ -4,9 +4,6 @@ import os
 import sys
 import unittest
 
-from PyQt5.QtCore import QCoreApplication
-
-
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
@@ -16,10 +13,6 @@ from hook_server import HookServer
 
 
 class HookServerProtocolTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QCoreApplication.instance() or QCoreApplication([])
-
     def test_structured_rpgmaker_event_keeps_source_display_tokens_and_choices(self):
         server = HookServer()
         events = []

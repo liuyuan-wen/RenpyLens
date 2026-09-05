@@ -943,6 +943,35 @@
             return featureEnabled("moveSpeed") && data && data.speed ? Math.max(speed, 6) : speed;
         };
 
+        // A number of RPG Maker games wait forever when a non-skippable
+        // forced move route is blocked by another character. Preserve normal
+        // routes, but let a genuinely stationary route advance after two
+        // seconds so an autorun cutscene cannot permanently lock player input.
+        var originalUpdateWaitMode = Game_Interpreter.prototype.updateWaitMode;
+        if (typeof originalUpdateWaitMode === "function") {
+            Game_Interpreter.prototype.updateWaitMode = function() {
+                var character = this._waitMode === "route" ? this._character : null;
+                var route = character && character._moveRoute;
+                var stationary = !!(character && character._moveRouteForcing && route &&
+                    !route.skippable && Number(character._waitCount || 0) <= 0 &&
+                    (!character.isMoving || !character.isMoving()));
+                if (stationary) {
+                    var key = [character._moveRouteIndex, character._x, character._y].join(":");
+                    if (this._renpyLensRouteStallKey === key) {
+                        this._renpyLensRouteStallFrames = Number(this._renpyLensRouteStallFrames || 0) + 1;
+                    } else {
+                        this._renpyLensRouteStallKey = key;
+                        this._renpyLensRouteStallFrames = 1;
+                    }
+                    if (this._renpyLensRouteStallFrames >= 120) route.skippable = true;
+                } else {
+                    this._renpyLensRouteStallKey = null;
+                    this._renpyLensRouteStallFrames = 0;
+                }
+                return originalUpdateWaitMode.call(this);
+            };
+        }
+
         var originalExecuteEncounter = Game_Player.prototype.executeEncounter;
         Game_Player.prototype.executeEncounter = function() {
             var data = state();
