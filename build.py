@@ -5,28 +5,46 @@ import shutil
 import argparse
 
 
-def find_python_runtime_dll(python_exe, dll_name):
-    """Locate a DLL supplied by the selected Python distribution."""
+def find_python_runtime_dirs(python_exe):
+    """Locate DLL directories supplied by the selected Python distribution."""
     script = """
 import os
 import sys
 
-dll_name = sys.argv[1]
 roots = [sys.prefix, sys.base_prefix, os.path.dirname(sys.executable)]
+seen = set()
 for root in dict.fromkeys(roots):
     for relative_dir in (os.path.join("Library", "bin"), "DLLs", ""):
-        candidate = os.path.join(root, relative_dir, dll_name)
-        if os.path.isfile(candidate):
+        candidate = os.path.normpath(os.path.join(root, relative_dir))
+        if candidate not in seen and os.path.isdir(candidate):
+            seen.add(candidate)
             print(candidate)
-            raise SystemExit
 """
     try:
-        return subprocess.check_output(
-            [python_exe, "-c", script, dll_name],
+        output = subprocess.check_output(
+            [python_exe, "-c", script],
             text=True,
-        ).strip()
+        )
+        return [line for line in output.splitlines() if line]
     except (OSError, subprocess.CalledProcessError):
-        return ""
+        return []
+
+
+def select_output_name(version, output_dir):
+    """Use a numbered name when the normal output executable is in use."""
+    base_name = f"RenpyLens_{version}"
+    target = os.path.join(output_dir, f"{base_name}.exe")
+    if not os.path.isfile(target):
+        return base_name
+
+    try:
+        with open(target, "r+b"):
+            return base_name
+    except PermissionError:
+        suffix = 1
+        while os.path.exists(os.path.join(output_dir, f"{base_name}_{suffix}.exe")):
+            suffix += 1
+        return f"{base_name}_{suffix}"
 
 
 def build_exe():
@@ -41,14 +59,17 @@ def build_exe():
     sys.path.append(os.path.join(os.getcwd(), "src"))
     try:
         from config import DEFAULT_CONFIG
-        version = DEFAULT_CONFIG.get("version", "v1.5.2")
+        version = DEFAULT_CONFIG.get("version", "v1.5.2.1")
     except ImportError:
-        version = "v1.5.2"
+        version = "v1.5.2.1"
 
     print(f"开始打包 RenpyLens {version}...")
     
     # 确保在当前目录
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    output_name = select_output_name(version, os.getcwd())
+    if output_name != f"RenpyLens_{version}":
+        print(f"[WARN] 标准输出文件正在使用，将改为生成 {output_name}.exe")
     
     # 使用指定的 Python 解释器
     python_exe = args.python
@@ -56,9 +77,25 @@ def build_exe():
         print(f"[WARN] 指定的 Python 解释器不存在: {python_exe}，将回退使用默认解释器")
         python_exe = sys.executable
 
-    # Conda builds of pyexpat link to this external DLL. PyInstaller does not
-    # always discover it automatically when analyzing the standard library.
-    libexpat_path = find_python_runtime_dll(python_exe, "libexpat.dll")
+    # PyInstaller does not always search Conda's Library/bin when the selected
+    # interpreter is invoked outside an activated environment. Add all runtime
+    # DLL directories to its search path so extension-module dependencies such
+    # as OpenSSL, Expat, SQLite, and compression libraries are collected.
+    runtime_dll_dirs = find_python_runtime_dirs(python_exe)
+    build_env = os.environ.copy()
+    if runtime_dll_dirs:
+        build_env["PATH"] = os.pathsep.join(
+            runtime_dll_dirs + [build_env.get("PATH", "")]
+        )
+
+    libexpat_path = next(
+        (
+            os.path.join(directory, "libexpat.dll")
+            for directory in runtime_dll_dirs
+            if os.path.isfile(os.path.join(directory, "libexpat.dll"))
+        ),
+        "",
+    )
 
     qt_translation_dir = ""
     try:
@@ -70,6 +107,7 @@ def build_exe():
                 "print(QLibraryInfo.location(QLibraryInfo.TranslationsPath))",
             ],
             text=True,
+            env=build_env,
         ).strip()
     except Exception as exc:
         print(f"[WARN] 无法定位 Qt 翻译资源，将依赖 PyInstaller 默认收集: {exc}")
@@ -80,7 +118,7 @@ def build_exe():
 
     command = [
         python_exe, "-m", "PyInstaller",
-        "--name", f"RenpyLens_{version}",
+        "--name", output_name,
         "--windowed", # 隐藏控制台窗口
         "--onefile",   # --onedir 可以打包成一个目录
         "--paths", "src", # 将 src 目录添加到模块搜索路径
@@ -162,12 +200,12 @@ def build_exe():
                     ]
     
     print(f"运行命令: {' '.join(command)}")
-    result = subprocess.run(command)
+    result = subprocess.run(command, env=build_env)
     
     if result.returncode == 0:
         print("\n[OK] 打包成功！")
-        print(f"打包生成的文件 'RenpyLens_{version}.exe' 已经直接放在当前代码目录下。")
-        print(f"您可以直接双击 'RenpyLens_{version}.exe' 运行，或者将其发给用户（无需安装 Python）。")
+        print(f"打包生成的文件 '{output_name}.exe' 已经直接放在当前代码目录下。")
+        print(f"您可以直接双击 '{output_name}.exe' 运行，或者将其发给用户（无需安装 Python）。")
     else:
         print("\n[ERROR] 打包失败，请查看上面的错误信息。")
 
@@ -184,7 +222,7 @@ def build_exe():
             print(f"[WARN] 删除 build 目录失败: {e}")
             
     # 2. 清理产生的 .spec 文件
-    spec_file = os.path.join(os.getcwd(), f"RenpyLens_{version}.spec")
+    spec_file = os.path.join(os.getcwd(), f"{output_name}.spec")
     if os.path.exists(spec_file):
         try:
             os.remove(spec_file)

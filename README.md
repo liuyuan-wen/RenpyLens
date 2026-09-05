@@ -39,7 +39,7 @@ Use these communities for support, feedback, release news, and early feature pre
 
 ## 🆕 Release Notes
 
-### v1.5.2 `Latest`
+### v1.5.2.1 `Latest`
 
 - **RPGM stability:** Prevented blocked forced move routes from permanently locking autorun scenes.
 - **Overlay interaction:** Recovered lost drag and resize release events so the overlay cannot remain stuck in an active pointer state.
@@ -76,7 +76,7 @@ Use these communities for support, feedback, release news, and early feature pre
 ## 🎮 Getting Started
 
 1. **Download RenpyLens**
-   - Download the latest `RenpyLens_v1.5.2.exe` from the repository's **Releases** page.
+   - Download the latest `RenpyLens_v1.5.2.1.exe` from the repository's **Releases** page.
    - Alternatively, follow the development instructions below to run it from source.
 2. **Choose a translation provider**
    - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**. If you are not in mainland China, select **Global node** in **Route**.

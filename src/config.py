@@ -16,7 +16,7 @@ else:
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "v1.5.2",
+    "version": "v1.5.2.1",
     "ui_language": "auto",
     "rpgmaker_qol_games": {},
     "rpgmaker_qol_features": {},
