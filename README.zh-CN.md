@@ -6,8 +6,6 @@ RenpyLens 是一款面向 Windows 的轻量级实时 AI 游戏翻译浮窗工具
 
 将游戏主程序拖入软件、选择翻译服务后，RenpyLens 会通过引擎原生桥接捕获对白、说话人和当前可见选项，并在可移动浮窗中显示译文，不会替换游戏原文。
 
-软件界面支持 **简体中文、繁體中文、English、日本語、한국어和Русский**。
-
 ## 💬 社区与支持
 
 - **Discord：**[https://discord.gg/c4putqY5zs](https://discord.gg/c4putqY5zs)

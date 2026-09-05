@@ -6,6 +6,7 @@ RenpyLens is a lightweight, real-time AI translation overlay for **Ren'Py** and 
 
 Drop a game executable into the app, choose a translation provider, and RenpyLens captures dialogue, speaker names, and visible choices through engine-native bridges. Translations appear in a movable overlay without replacing the game's original text.
 
+As translation is powered by general-purpose LLMs, almost any target language is supported.
 The interface is currently available in **English, Simplified Chinese, Traditional Chinese, Japanese, Korean, and Russian**.
 
 ## 💬 Community and Support
