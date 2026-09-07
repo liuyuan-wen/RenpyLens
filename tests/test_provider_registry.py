@@ -137,6 +137,71 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertIsNotNone(window.translator)
         window.translator.close()
 
+    def test_model_switch_reuses_current_game_cache(self):
+        rebuild_calls = []
+        window = SimpleNamespace(
+            config=copy.deepcopy(DEFAULT_CONFIG),
+            _builtin_model_map={},
+            _rebuild_translator=lambda clear_cache=False: rebuild_calls.append(clear_cache),
+            _set_status=lambda *_args, **_kwargs: None,
+        )
+
+        with patch("main.save_config"):
+            MainWindow._on_model_changed(window, "another-model")
+
+        self.assertEqual(window.config["builtin_model"], "another-model")
+        self.assertEqual(rebuild_calls, [False])
+
+    def test_engine_switch_reuses_current_game_cache(self):
+        class ImmediateThread:
+            def __init__(self, target, daemon=False):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        class FieldStub:
+            def setText(self, _text):
+                pass
+
+            def setPlaceholderText(self, _text):
+                pass
+
+        class OldTranslator:
+            def close(self):
+                pass
+
+        class CacheStub:
+            def clear(self):
+                raise AssertionError("Switching engines must preserve the translation cache")
+
+        window = SimpleNamespace(
+            config=copy.deepcopy(DEFAULT_CONFIG),
+            engine_combo=SimpleNamespace(
+                itemData=lambda _index: "deepseek",
+                currentText=lambda: "DeepSeek",
+            ),
+            model_combo=SimpleNamespace(currentText=lambda: "deepseek-chat"),
+            url_input=FieldStub(),
+            key_input=FieldStub(),
+            translator=OldTranslator(),
+            cache=CacheStub(),
+            _translator_lock=threading.RLock(),
+            _update_url_visibility=lambda: None,
+            _update_model_combo=lambda: None,
+            _set_status=lambda *_args, **_kwargs: None,
+            _status_signal=SimpleNamespace(emit=lambda _message: None),
+        )
+        replacement = SimpleNamespace()
+
+        with patch("main.threading.Thread", ImmediateThread), patch(
+            "main.create_translator", return_value=replacement
+        ), patch("main.save_config"):
+            MainWindow._on_engine_changed(window, 1)
+
+        self.assertEqual(window.config["translation_engine"], "deepseek")
+        self.assertIs(window.translator, replacement)
+
 
 class ProviderSettingsTests(unittest.TestCase):
     def _run_gui_script(self, script: str):

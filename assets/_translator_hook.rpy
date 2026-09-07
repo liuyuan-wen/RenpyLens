@@ -178,7 +178,11 @@ init python:
         if not text:
             return ""
 
-        cleaned = str(text)
+        try:
+            string_types = (basestring,)
+        except NameError:
+            string_types = (str,)
+        cleaned = text if isinstance(text, string_types) else str(text)
         for _ in range(3):
             new_cleaned = _tre.sub(r"\{[^{}]*\}", "", cleaned)
             if new_cleaned == cleaned:
@@ -378,13 +382,28 @@ init python:
         if widget is None:
             return ""
         try:
+            try:
+                string_types = (basestring,)
+            except NameError:
+                string_types = (str,)
             text_value = getattr(widget, "text", "")
-            if isinstance(text_value, (list, tuple)):
-                parts = []
-                for item in text_value:
-                    if isinstance(item, str):
-                        parts.append(item)
-                text_value = "".join(parts)
+            parts = []
+
+            def _append_text(value):
+                if isinstance(value, string_types):
+                    parts.append(value)
+                    return
+                try:
+                    iterator = iter(value)
+                except TypeError:
+                    return
+                for nested_value in iterator:
+                    _append_text(nested_value)
+
+            _append_text(text_value)
+            if not parts:
+                return ""
+            text_value = u"".join(parts)
             return _translator_clean_text(renpy, text_value)
         except Exception:
             return ""
@@ -490,6 +509,215 @@ init python:
             pass
 
         return ""
+
+    def _translator_collect_displayable_text(renpy, displayable):
+        body = []
+        choices = []
+        seen_displayables = set()
+        seen_body = set()
+        seen_choices = set()
+
+        def _children(node):
+            # Container.visit() changed from render order in Ren'Py 6 to
+            # reverse/event order in Ren'Py 7. The children attribute keeps
+            # declaration/render order on both versions.
+            children = getattr(node, "children", None)
+            if children is not None:
+                return children
+            try:
+                return node.visit() or []
+            except Exception:
+                return []
+
+        def _button_text(node):
+            parts = []
+            visited = set()
+
+            def _collect(current, root=False):
+                if current is None or id(current) in visited:
+                    return
+                visited.add(id(current))
+
+                class_name = current.__class__.__name__
+                if not root and class_name in (
+                    "Button",
+                    "ImageButton",
+                    "TextButton",
+                ):
+                    return
+                if class_name == "Text":
+                    clean_text = _translator_extract_widget_text(renpy, current)
+                    if clean_text:
+                        parts.append(clean_text)
+                    return
+                for child in _children(current):
+                    _collect(child)
+
+            _collect(node, root=True)
+            return " ".join(parts)
+
+        def _button_is_toggle(node):
+            pending = [
+                getattr(node, "action", None),
+                getattr(node, "clicked", None),
+            ]
+            visited = set()
+            while pending:
+                action = pending.pop()
+                if action is None or id(action) in visited:
+                    continue
+                visited.add(id(action))
+                class_name = action.__class__.__name__
+                if class_name.startswith("Toggle"):
+                    return True
+                if class_name in ("list", "tuple", "RevertableList"):
+                    pending.extend(action)
+            return False
+
+        def _button_is_interactive(node):
+            # Ren'Py screens commonly use a bare ``button`` as a styled
+            # container. It looks like a Button in the display tree but has
+            # no input action, so its text is ordinary screen copy rather
+            # than a selectable choice.
+            for attribute in ("action", "clicked", "alternate"):
+                if getattr(node, attribute, None) is not None:
+                    return True
+            return bool(getattr(node, "keymap", None))
+
+        def _walk(node, inside_button=False):
+            if node is None:
+                return
+
+            marker = id(node)
+            if marker in seen_displayables:
+                return
+            seen_displayables.add(marker)
+
+            class_name = node.__class__.__name__
+            is_button = class_name in (
+                "Button",
+                "ImageButton",
+                "TextButton",
+            )
+
+            if is_button:
+                interactive = _button_is_interactive(node)
+                clean_text = _button_text(node) if interactive else ""
+                if interactive and _button_is_toggle(node):
+                    if clean_text and clean_text not in seen_body:
+                        seen_body.add(clean_text)
+                        body.append(clean_text)
+                elif interactive and clean_text and clean_text not in seen_choices:
+                    seen_choices.add(clean_text)
+                    choices.append(clean_text)
+            elif class_name == "Text" and not inside_button:
+                clean_text = _translator_extract_widget_text(renpy, node)
+                if clean_text and clean_text not in seen_body:
+                    seen_body.add(clean_text)
+                    body.append(clean_text)
+
+            for child in _children(node):
+                _walk(
+                    child,
+                    inside_button or (is_button and _button_is_interactive(node)),
+                )
+
+        _walk(displayable)
+        return body, choices
+
+    def _translator_get_custom_screen_payload(renpy):
+        try:
+            scene_lists = renpy.game.context().scene_lists
+            transient_screens = set(
+                getattr(scene_lists, "additional_transient", None) or []
+            )
+            layers = getattr(scene_lists, "layers", None) or {}
+        except Exception:
+            return None
+
+        candidates = []
+        for layer, entries in layers.items():
+            for entry in (entries or []):
+                screen = getattr(entry, "displayable", None)
+                if screen is None or screen.__class__.__name__ != "ScreenDisplayable":
+                    continue
+
+                tag = getattr(entry, "tag", None)
+                if "$" in str(tag or ""):
+                    continue
+
+                screen_name = getattr(screen, "screen_name", ()) or ()
+                if isinstance(screen_name, str):
+                    screen_name = (screen_name,)
+                primary_name = str(screen_name[0] if screen_name else "")
+                if primary_name in ("say", "multiple_say", "nvl"):
+                    continue
+
+                is_transient = (layer, tag) in transient_screens
+                if not is_transient and not bool(getattr(screen, "modal", False)):
+                    continue
+
+                body, choices = _translator_collect_displayable_text(renpy, screen)
+                if not body and not choices:
+                    continue
+
+                candidates.append(
+                    {
+                        "screen": primary_name,
+                        "what": "\n".join(body),
+                        "choices": choices,
+                        "zorder": getattr(entry, "zorder", 0),
+                    }
+                )
+
+        if not candidates:
+            return None
+
+        # Scene-list order resolves equal zorders; the final item is the
+        # screen closest to the player.
+        candidates.sort(key=lambda item: item["zorder"])
+        return candidates[-1]
+
+    def _translator_custom_screen_interact_callback():
+        import renpy
+
+        global _translator_last_current_msg
+        global _translator_last_visible_signature
+
+        try:
+            if _translator_get_visible_what(renpy):
+                return False
+
+            cur = _translator_get_current_node(renpy)
+            if cur and cur.__class__.__name__ == "Menu":
+                return False
+
+            payload = _translator_get_custom_screen_payload(renpy)
+            if not payload:
+                _translator_last_visible_signature = None
+                return False
+
+            what = payload.get("what", "")
+            choices = payload.get("choices", [])
+            signature = (payload.get("screen", ""), what, tuple(choices))
+            if signature == _translator_last_visible_signature:
+                return False
+
+            _translator_last_visible_signature = signature
+            msg = {
+                "type": "current",
+                "who": "",
+                "what": what,
+                "italic": False,
+                "choices": choices,
+                "menu_active": bool(choices),
+                "screen_text": True,
+            }
+            _translator_last_current_msg = dict(msg)
+            _translator_start_thread(_translator_send, (msg,))
+        except Exception:
+            pass
+        return False
 
     def _translator_resolve_who(renpy, who_value, cur_node=None):
         candidates = []
@@ -1193,6 +1421,13 @@ init python:
             config.start_interact_callbacks.append(_translator_interact_callback)
         elif hasattr(config, "interact_callbacks"):
             config.interact_callbacks.append(_translator_interact_callback)
+
+        if hasattr(config, "needs_redraw_callbacks"):
+            config.needs_redraw_callbacks.append(
+                _translator_custom_screen_interact_callback
+            )
+        elif hasattr(config, "interact_callbacks"):
+            config.interact_callbacks.append(_translator_custom_screen_interact_callback)
     except Exception:
         pass
 

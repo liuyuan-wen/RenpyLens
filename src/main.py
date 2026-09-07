@@ -82,6 +82,7 @@ RPGMAKER_TOOL_FEATURES = (
     "textSpeed",
     "messageOpacity",
     "autoAdvance",
+    "saveAnywhere",
     "moveSpeed",
     "through",
     "encounters",
@@ -89,7 +90,7 @@ RPGMAKER_TOOL_FEATURES = (
 )
 RPGMAKER_TOOL_DEFAULT_FEATURES = {key: key == "textSpeed" for key in RPGMAKER_TOOL_FEATURES}
 RPGMAKER_TOOL_LEGACY_FEATURES = {
-    key: key not in {"messageOpacity", "autoAdvance"}
+    key: key not in {"messageOpacity", "autoAdvance", "saveAnywhere"}
     for key in RPGMAKER_TOOL_FEATURES
 }
 
@@ -158,7 +159,7 @@ class MainWindow(QWidget):
         self.config = load_config()
         set_language(self.config.get("ui_language", "auto"), QApplication.instance())
 
-        version = self.config.get("version", "v1.5.2.1")
+        version = self.config.get("version", "v1.5.3")
         self.setWindowTitle(tr("app.title", version=version))
         self.resize(800, 10)
         self.setAcceptDrops(True)
@@ -545,7 +546,7 @@ class MainWindow(QWidget):
         """)
         self._update_model_combo()  # 填充模型列表
         # 下拉选择立即提交；手动输入只在回车或失去焦点后提交，避免每次
-        # 按键都重建翻译器并清空缓存。
+        # 按键都重建翻译器。
         self.model_combo.activated[str].connect(self._on_model_changed)
         model_editor = self.model_combo.lineEdit()
         if model_editor:
@@ -955,11 +956,82 @@ class MainWindow(QWidget):
             QPushButton:disabled { color: #444; border-color: #333; }
         """
 
-        # 1. 显示浮窗
+        # 1. 显示浮窗与位置菜单
+        self.overlay_toggle_group = QFrame()
+        self.overlay_toggle_group.setObjectName("overlayToggleGroup")
+        self.overlay_toggle_group.setFixedHeight(40)
+        self.overlay_toggle_group.setStyleSheet("""
+            QFrame#overlayToggleGroup {
+                background-color: transparent;
+                border: 1px solid #444;
+                border-radius: 4px;
+            }
+        """)
+        overlay_toggle_layout = QHBoxLayout(self.overlay_toggle_group)
+        overlay_toggle_layout.setContentsMargins(1, 1, 1, 1)
+        overlay_toggle_layout.setSpacing(0)
+
         self.btn_overlay_toggle = QPushButton(tr("main.show_overlay"))
-        self.btn_overlay_toggle.setStyleSheet(_footer_btn_style)
+        self.btn_overlay_toggle.setFixedHeight(38)
+        self.btn_overlay_toggle.setStyleSheet("""
+            QPushButton {
+                background-color: transparent; color: #888;
+                border: none; border-radius: 3px;
+                padding: 6px 16px; font-size: 18px; font-weight: normal;
+            }
+            QPushButton:hover { background-color: #16213e; color: #ccc; }
+            QPushButton:disabled { background-color: transparent; color: #444; }
+        """)
         self.btn_overlay_toggle.clicked.connect(self._toggle_overlay_visibility)
-        log_toggle_layout.addWidget(self.btn_overlay_toggle)
+        overlay_toggle_layout.addWidget(self.btn_overlay_toggle)
+
+        overlay_separator = QFrame()
+        overlay_separator.setObjectName("overlayToggleSeparator")
+        overlay_separator.setFixedSize(1, 22)
+        overlay_separator.setStyleSheet(
+            "QFrame#overlayToggleSeparator { background-color: #3d3e50; border: none; }"
+        )
+        overlay_toggle_layout.addWidget(overlay_separator, 0, Qt.AlignVCenter)
+
+        self.btn_overlay_menu = QToolButton()
+        self.btn_overlay_menu.setCursor(Qt.PointingHandCursor)
+        self.btn_overlay_menu.setFixedSize(34, 38)
+        self.btn_overlay_menu.setText("▼")
+        self.btn_overlay_menu.setStyleSheet("""
+            QToolButton {
+                background-color: transparent; color: #888;
+                border: none; border-radius: 3px;
+                padding: 6px 4px; font-size: 18px;
+            }
+            QToolButton:hover { background-color: #16213e; color: #ccc; }
+            QToolButton:pressed { background-color: #111a30; color: #4a9eff; }
+            QToolButton::menu-indicator { image: none; width: 0px; }
+        """)
+        self.overlay_menu = QMenu(self.btn_overlay_menu)
+        self.overlay_menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a2e; color: #eee;
+                border: 1px solid #444; padding: 5px;
+                font-size: 18px; font-weight: normal;
+            }
+            QMenu::item { padding: 6px 16px; border-radius: 3px; }
+            QMenu::item:selected { background-color: #16213e; color: #4a9eff; }
+        """)
+        self.overlay_menu.aboutToShow.connect(
+            lambda: self.btn_overlay_menu.setText("▲")
+        )
+        self.overlay_menu.aboutToHide.connect(
+            lambda: self.btn_overlay_menu.setText("▼")
+        )
+        self.action_reset_overlay_position = self.overlay_menu.addAction(
+            tr("main.reset_overlay_position")
+        )
+        self.action_reset_overlay_position.triggered.connect(
+            self._reset_overlay_position
+        )
+        self.btn_overlay_menu.clicked.connect(self._show_overlay_menu)
+        overlay_toggle_layout.addWidget(self.btn_overlay_menu)
+        log_toggle_layout.addWidget(self.overlay_toggle_group)
 
         # 2. 译文工作台
         self.btn_workbench_toggle = QPushButton(tr("main.workbench"))
@@ -1429,7 +1501,7 @@ class MainWindow(QWidget):
             self.engine_combo.blockSignals(False)
 
     def retranslate_ui(self, *_):
-        version = self.config.get("version", "v1.5.2.1")
+        version = self.config.get("version", "v1.5.3")
         self.setWindowTitle(tr("app.title", version=version))
         self.btn_settings.setText(tr("main.settings"))
         self.btn_pin.setText(tr("common.pin"))
@@ -1915,6 +1987,7 @@ class MainWindow(QWidget):
     def _update_overlay_toggle_button(self, *_):
         visible = hasattr(self, "overlay") and self.overlay and self.overlay.isVisible()
         self.btn_overlay_toggle.setText(tr("main.hide_overlay" if visible else "main.show_overlay"))
+        self.action_reset_overlay_position.setText(tr("main.reset_overlay_position"))
         self._fit_footer_buttons()
 
     def _fit_footer_buttons(self):
@@ -1962,8 +2035,21 @@ class MainWindow(QWidget):
         if self.overlay.isVisible():
             self.overlay.hide()
         else:
-            self.overlay.reset_to_default_position()
             self.overlay.show()
+
+    def _show_overlay_menu(self, *_):
+        menu_width = self.overlay_menu.sizeHint().width()
+        button_bottom_right = self.btn_overlay_menu.mapToGlobal(
+            QPoint(self.btn_overlay_menu.width(), self.btn_overlay_menu.height())
+        )
+        self.overlay_menu.popup(
+            QPoint(button_bottom_right.x() - menu_width, button_bottom_right.y())
+        )
+
+    def _reset_overlay_position(self):
+        if not hasattr(self, "overlay") or not self.overlay:
+            return
+        self.overlay.reset_to_default_position()
 
     def _append_log(self, text: str):
         """向日志面板追加文本"""
@@ -2152,6 +2238,7 @@ class MainWindow(QWidget):
         self.overlay.show_workbench_requested.connect(self._show_workbench)
         self.overlay.visibility_changed.connect(self._update_overlay_toggle_button)
         self._update_overlay_toggle_button()
+        self._screen_text_active = False
 
         self.workbench = TranslationWorkbench(self.config)
         self.workbench.config_updated.connect(self._on_workbench_config_changed)
@@ -2798,6 +2885,10 @@ class MainWindow(QWidget):
         if not msg_type:
             return
 
+        if msg_type == "current" and hasattr(self, "overlay"):
+            self._screen_text_active = bool((message or {}).get("screen_text", False))
+            self.overlay.set_screen_text_mode(self._screen_text_active)
+
         if msg_type == "hook_ready":
             self._hook_session_ready = True
             self._hook_ready_event.set()
@@ -3367,9 +3458,6 @@ class MainWindow(QWidget):
                 # 创建新翻译器 (现在是延迟初始化的，其实很快，但在线程里更稳)
                 new_translator = create_translator(engine, self.config)
                 
-                # 清理缓存 (磁盘 IO)
-                self.cache.clear()
-                
                 # 保存配置 (磁盘 IO)
                 save_config(self.config)
                 
@@ -3463,7 +3551,7 @@ class MainWindow(QWidget):
                 return
             update_provider(self.config, engine, model=model_name)
 
-        self._rebuild_translator(clear_cache=True)
+        self._rebuild_translator(clear_cache=False)
         self._set_status("status.model_switched", model=model_name)
         print(f"[Main] Model switched: {model_name}")
         save_config(self.config)
@@ -4301,6 +4389,39 @@ class MainWindow(QWidget):
         if choices and original and choices[0].strip() == original.strip():
             first_is_caption = True
 
+        language_row_pattern = re.compile(
+            r'^\s*([A-Z]{2,3})\s+(\d+(?:\.\d+)+)\s+(.+?)\s*$'
+        )
+        language_row_count = sum(
+            1 for choice in choices if language_row_pattern.match(str(choice or ""))
+        )
+        language_row_count += len(
+            re.findall(r'(?m)\b[A-Z]{2,3}\s+\d+(?:\.\d+)+\b', str(original or ""))
+        )
+        language_selector = bool(
+            getattr(self, "_screen_text_active", False) and language_row_count >= 2
+        )
+
+        def _format_screen_choice(source: str, translated: str) -> str:
+            if not language_selector:
+                return translated
+            source = str(source or "").strip()
+            match = language_row_pattern.match(source)
+            if match:
+                language_code, version, detail = match.groups()
+                if re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]*', detail):
+                    rendered_detail = detail
+                else:
+                    rendered_detail = re.sub(
+                        r'^\s*' + re.escape(language_code) + r'\s+' + re.escape(version) + r'\s+',
+                        '',
+                        translated,
+                    ).strip() or detail
+                return f"{language_code} {version} {rendered_detail}"
+            if re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]*', source):
+                return source
+            return translated
+
         lines = []
 
         # 2. 提取说明文本 (Caption) 并显示
@@ -4325,6 +4446,7 @@ class MainWindow(QWidget):
         for i in range(choice_start_idx, len(choices)):
             trans = choice_translations[i] if i < len(choice_translations) else ""
             clean_trans = _clean_line(self._resolve_runtime_tokens(trans, choices[i]))
+            clean_trans = _format_screen_choice(choices[i], clean_trans)
             if clean_trans:
                 idx_num = i + 1 - choice_start_idx
                 lines.append(f"[{idx_num}] {clean_trans}")

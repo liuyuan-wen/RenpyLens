@@ -3,10 +3,40 @@
 
 from __future__ import annotations
 
+import ast
 import json
 
 from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtNetwork import QHostAddress, QTcpServer
+
+
+def normalize_legacy_renpy_text(value) -> str:
+    """Unwrap the repr of Python 2 text sequences sent by old Ren'Py."""
+    text = value if isinstance(value, str) else str(value or "")
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "[(" or stripped[-1] not in ")]":
+        return text
+
+    try:
+        parsed = ast.literal_eval(stripped)
+    except (SyntaxError, ValueError):
+        return text
+    if not isinstance(parsed, (list, tuple)):
+        return text
+
+    parts = []
+
+    def append_strings(item):
+        if isinstance(item, str):
+            parts.append(item)
+            return True
+        if isinstance(item, (list, tuple)):
+            return all(append_strings(child) for child in item)
+        return False
+
+    if not append_strings(parsed):
+        return text
+    return "".join(parts)
 
 
 class HookServer(QObject):
@@ -108,7 +138,7 @@ class HookServer(QObject):
             return
 
         who = str(msg.get("who", "") or "")
-        what = str(msg.get("what", "") or "")
+        what = normalize_legacy_renpy_text(msg.get("what", ""))
         prefetch_debug = msg.get("prefetch_debug")
         if isinstance(prefetch_debug, dict):
             print(
@@ -119,7 +149,7 @@ class HookServer(QObject):
         choices = []
         if isinstance(raw_choices, list):
             for item in raw_choices:
-                text = item if isinstance(item, str) else str(item or "")
+                text = normalize_legacy_renpy_text(item)
                 text = text.strip()
                 if text:
                     choices.append(text)

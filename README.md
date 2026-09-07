@@ -21,7 +21,7 @@ Use these communities for support, feedback, release news, and early feature pre
 
 - **Drag-and-drop setup:** Drop the game's `.exe` into RenpyLens and launch it with the translation bridge.
 - **Multiple game engines:** Supports Ren'Py and RPG Maker MV/MZ dialogue, speaker names, and visible choices.
-- **RPGM tools:** Useful tools like text speed, dialogue opacity, automatic advance, faster movement, no-clip, random encounters, and battle outcomes.
+- **RPGM tools:** Useful tools like text speed, dialogue opacity, automatic advance, save anywhere, faster movement, no-clip, random encounters, and battle outcomes.
 - **Flexible AI providers:**
   - **Built-in channel:** A streamlined, ready-to-use service with China mainland and global routes.
   - **Cloud providers:** OpenAI, Gemini, Anthropic Claude, DeepSeek, OpenRouter, Groq, MiniMax, SiliconFlow, Moonshot, xAI, Alibaba Qwen, Volcengine, Zhipu AI, and more.
@@ -39,7 +39,13 @@ Use these communities for support, feedback, release news, and early feature pre
 
 ## 🆕 Release Notes
 
-### v1.5.2.1 `Latest`
+### v1.5.3 `Latest`
+
+- **RPGM save anywhere:** Added an optional save-anywhere tool with an in-game toolbar button and `Ctrl+S`. Saves made during dialogue or choices restore from the current dialogue checkpoint.
+- **Long translation overlay:** Long screen text now uses a scrollable, resizable panel, with a menu action for resetting the overlay position and smoother drag and resize interactions.
+- **Engine compatibility:** Improved Ren'Py screen text, character and choice extraction, legacy text sequence handling, and RPG Maker line-break handling.
+
+### v1.5.2.1
 
 - **RPGM stability:** Prevented blocked forced move routes from permanently locking autorun scenes.
 - **Overlay interaction:** Recovered lost drag and resize release events so the overlay cannot remain stuck in an active pointer state.
@@ -76,7 +82,7 @@ Use these communities for support, feedback, release news, and early feature pre
 ## 🎮 Getting Started
 
 1. **Download RenpyLens**
-   - Download the latest `RenpyLens_v1.5.2.1.exe` from the repository's **Releases** page.
+   - Download the latest `RenpyLens_v1.5.3.exe` from the repository's **Releases** page.
    - Alternatively, follow the development instructions below to run it from source.
 2. **Choose a translation provider**
    - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**. If you are not in mainland China, select **Global node** in **Route**.
@@ -87,6 +93,7 @@ Use these communities for support, feedback, release news, and early feature pre
    - Select **Load Hook and Start Game**. RenpyLens installs the appropriate bridge and launches the game.
    - Ren'Py uses a bridge inside `game/`; RPG Maker uses a plugin inside `js/plugins/`.
    - After selecting an RPG Maker MV/MZ game, you can choose to enable **RPGM tools** and choose the tools you want from the adjacent menu.
+   - With **Save anywhere** enabled, click **Save** in the in-game toolbar or press `Ctrl+S` to open the native save screen during map events or dialogue. Saves made during dialogue or choices reload from the current dialogue with the choice unselected.
 3. **Use the overlay**
    - Drag the overlay to reposition it.
    - Right-click the overlay for display controls, editing, and workbench access.

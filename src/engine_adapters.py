@@ -369,6 +369,7 @@ _TIMING_CODE_RE = re.compile(r"\\[.\\|!><^{}]")
 
 def normalize_rpgmaker_text(text: str) -> str:
     value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
     value = _DYNAMIC_CODE_RE.sub(
         lambda match: f"⟦RL_{match.group(1).upper()}_{int(match.group(2))}⟧",
         value,

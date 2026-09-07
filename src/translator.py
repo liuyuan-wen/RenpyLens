@@ -163,9 +163,21 @@ class BaseTranslator:
                 if attempt < max_retries - 1:
                     print(f"[Translator] Batch parse failed ({e}), retrying {attempt+1}/{max_retries}...")
                     continue
-                # 重试机会耗尽，启用降级解析
-                print(f"[Translator] Batch parse final failure, fallback parsing enabled ({e})")
-                return self._parse_batch(result_text, len(texts), strict=False)
+                # A line-based fallback can silently associate a partial model
+                # response with the wrong source text (for example, saving only
+                # "[1] Speaker:" for a full multiline dialogue).  Once the
+                # numbered response has failed repeatedly, translate each item
+                # independently so incomplete batch output is never cached.
+                print(f"[Translator] Batch parse final failure, translating items individually ({e})")
+                return [
+                    self.translate(
+                        text,
+                        source_lang=sl,
+                        target_lang=tl,
+                        game_title=game_title,
+                    )
+                    for text in texts
+                ]
         return []
 
     def _parse_batch(self, result_text: str, expected_count: int, strict: bool = False) -> list:

@@ -189,8 +189,10 @@ class RpgMakerAdapterTests(unittest.TestCase):
         self.assertIn("Scrolling text", by_source)
 
     def test_normalize_preserves_dynamic_tokens_and_removes_formatting(self):
-        value = normalize_rpgmaker_text(r"\C[2]Gold: \V[1] \SE[hero]\G")
-        self.assertEqual(value, "Gold: ⟦RL_V_1⟧ ⟦RL_G⟧")
+        value = normalize_rpgmaker_text(
+            "\\C[2]Gold: \\V[1] \\SE[hero]\\G<br>Next<BR />Last<br />"
+        )
+        self.assertEqual(value, "Gold: ⟦RL_V_1⟧ ⟦RL_G⟧\nNext\nLast")
 
 
 if __name__ == "__main__":

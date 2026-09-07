@@ -481,7 +481,13 @@ assert 'font-size: 21px' in dialog.styleSheet()
         set_language("zh_CN", self.app)
         help_text = tr("main.rpgmaker_qol_help_dialog")
         self.assertIn("快捷键（游戏内按键）：", help_text)
-        for shortcut in ("G：切换高速移动", "H：切换穿墙", "N：切换随机遇敌", "K：立即战胜"):
+        for shortcut in (
+            "Ctrl+S：打开保存界面",
+            "G：切换高速移动",
+            "H：切换穿墙",
+            "N：切换随机遇敌",
+            "K：立即战胜",
+        ):
             self.assertIn(shortcut, help_text)
 
     def test_rpgmaker_qol_toggle_is_remembered_per_game(self):
@@ -515,6 +521,7 @@ assert 'font-size: 21px' in dialog.styleSheet()
                 "through": False,
                 "encounters": False,
                 "battleVictory": False,
+                "saveAnywhere": False,
             },
         )
 
@@ -526,6 +533,7 @@ assert 'font-size: 21px' in dialog.styleSheet()
         )))
         self.assertFalse(migrated["messageOpacity"])
         self.assertFalse(migrated["autoAdvance"])
+        self.assertFalse(migrated["saveAnywhere"])
 
         with patch("main.save_config") as save:
             MainWindow._on_rpgmaker_qol_feature_toggled(host, "through", False)

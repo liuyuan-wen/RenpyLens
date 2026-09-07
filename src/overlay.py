@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -13,9 +15,10 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QPushButton,
     QHBoxLayout,
+    QScrollBar,
 )
 from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QPainter, QPainterPath, QColor, QFontMetrics, QPen, QTransform, QTextCursor
+from PyQt5.QtGui import QFont, QPainter, QPixmap, QColor, QFontMetrics, QTextCursor
 import win32con
 import win32gui
 from i18n import manager as i18n_manager, tr
@@ -32,6 +35,15 @@ class OutlinedLabel(QLabel):
         self._font_bold = True
         self._text_color = QColor(255, 255, 255)
         self._outline_color = QColor(0, 0, 0)
+        self._screen_text_mode = False
+        self._text_layout_cache_key = None
+        self._text_layout_cache = None
+        self._paint_cache_key = None
+        self._paint_cache = None
+        self._long_text_mode = False
+        self._scroll_offset = 0
+        self._paint_frozen = False
+        self._line_images = OrderedDict()
         self.setFont(QFont(self._font_family, self._font_size, QFont.Bold if self._font_bold else QFont.Normal))
         self.setTextFormat(Qt.RichText)
         self.setWordWrap(True)
@@ -58,13 +70,36 @@ class OutlinedLabel(QLabel):
         self._text_color = QColor(color_str)
         self.update()
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+    def set_screen_text_mode(self, enabled: bool):
+        self._screen_text_mode = bool(enabled)
+        self.update()
 
-        text = self.text()
-        if not text:
+    def set_long_text_mode(self, enabled: bool):
+        self._long_text_mode = bool(enabled)
+        self.update()
+
+    def set_scroll_offset(self, value: int):
+        value = max(0, int(value))
+        if value == self._scroll_offset:
             return
+        self._scroll_offset = value
+        self.update()
+
+    def set_paint_frozen(self, frozen: bool):
+        self._paint_frozen = bool(frozen)
+
+    def _get_text_layout(self):
+        text = self.text()
+        font_normal = self.font()
+        available_width = self.width() - self._outline_width * 4
+        cache_key = (
+            text,
+            available_width,
+            font_normal.toString(),
+            self._outline_width,
+        )
+        if cache_key == self._text_layout_cache_key:
+            return self._text_layout_cache
 
         text = text.replace("<b>", "").replace("</b>", "")
         text = text.replace("<div style='font-weight: 900;'>", "").replace("</div>", "")
@@ -83,13 +118,11 @@ class OutlinedLabel(QLabel):
                 for char in token:
                     char_list.append((char, is_italic))
 
-        font_normal = self.font()
         fm_normal = QFontMetrics(font_normal)
-        available_width = self.width() - self._outline_width * 4
-
         lines = []
         current_line = []
         current_line_width = 0
+        char_widths = {}
         for char, italic in char_list:
             if char == "\n":
                 lines.append(current_line)
@@ -97,7 +130,9 @@ class OutlinedLabel(QLabel):
                 current_line_width = 0
                 continue
 
-            char_w = fm_normal.horizontalAdvance(char)
+            if char not in char_widths:
+                char_widths[char] = fm_normal.horizontalAdvance(char)
+            char_w = char_widths[char]
             if current_line_width + char_w > available_width and current_line:
                 lines.append(current_line)
                 current_line = [(char, italic)]
@@ -109,50 +144,115 @@ class OutlinedLabel(QLabel):
         if current_line:
             lines.append(current_line)
 
-        path = QPainterPath()
-        y_offset = fm_normal.ascent() + self._outline_width
-        for line in lines:
-            x_offset = self._outline_width * 2
-            merged_chunks = []
-            for char, italic in line:
-                if not merged_chunks:
-                    merged_chunks.append([char, italic])
-                elif merged_chunks[-1][1] == italic:
-                    merged_chunks[-1][0] += char
-                else:
-                    merged_chunks.append([char, italic])
-
-            for text_chunk, italic in merged_chunks:
-                sub_path = QPainterPath()
-                sub_path.addText(0, 0, font_normal, text_chunk)
-                if italic:
-                    sub_path = QTransform().shear(-0.25, 0.0).map(sub_path)
-                path.addPath(sub_path.translated(x_offset, y_offset))
-                x_offset += fm_normal.horizontalAdvance(text_chunk)
-
-            y_offset += fm_normal.height()
-
-        painter.setPen(
-            QPen(
-                self._outline_color,
-                self._outline_width * 2,
-                Qt.SolidLine,
-                Qt.RoundCap,
-                Qt.RoundJoin,
-            )
+        # Measuring height must not construct outlines for the whole document.
+        # Rasterize only the lines intersecting the viewport.
+        needed_height = int(
+            fm_normal.ascent() + self._outline_width * 3
+            + len(lines) * fm_normal.height()
         )
-        painter.setBrush(Qt.NoBrush)
-        painter.drawPath(path)
+        self._text_layout_cache_key = cache_key
+        self._text_layout_cache = (lines, needed_height)
+        return self._text_layout_cache
 
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(self._text_color)
-        painter.drawPath(path)
+    def _get_line_image(self, line):
+        # Cache pixels, not vector outlines: stroking hundreds of Chinese glyphs
+        # on every wheel event is substantially more expensive than compositing.
+        key = (tuple(line), self.font().toString(), self._text_color.rgba(),
+               self._outline_color.rgba(), self._outline_width, self.devicePixelRatioF())
+        if key in self._line_images:
+            self._line_images.move_to_end(key)
+            return self._line_images[key]
+        fm = self.fontMetrics()
+        chunks = []
+        for char, italic in line:
+            if chunks and chunks[-1][1] == italic:
+                chunks[-1][0] += char
+            else:
+                chunks.append([char, italic])
+        margin = self._outline_width * 2
+        width = sum(fm.horizontalAdvance(text) for text, _ in chunks)
+        dpr = self.devicePixelRatioF()
+        pixmap = QPixmap(int((width + margin * 2 + fm.height()) * dpr),
+                         int((fm.height() + margin * 2) * dpr))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setFont(self.font())
+        painter.setRenderHint(QPainter.TextAntialiasing)
+        x = margin
+        for text, italic in chunks:
+            painter.save()
+            painter.translate(x, fm.ascent() + self._outline_width)
+            if italic:
+                painter.shear(-0.25, 0)
+            painter.setPen(self._outline_color)
+            radius = self._outline_width
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    if 0 < dx * dx + dy * dy <= radius * radius:
+                        painter.drawText(dx, dy, text)
+            painter.setPen(self._text_color)
+            painter.drawText(0, 0, text)
+            painter.restore()
+            x += fm.horizontalAdvance(text)
+        painter.end()
+        self._line_images[key] = pixmap
+        if len(self._line_images) > 256:
+            self._line_images.popitem(last=False)
+        return pixmap
+
+    def _get_painted_text(self, path):
+        cache_key = (
+            self._text_layout_cache_key,
+            self.width(),
+            self.height(),
+            self._scroll_offset,
+            self.devicePixelRatioF(),
+            self._screen_text_mode,
+            self._long_text_mode,
+            self._text_color.rgba(),
+            self._outline_color.rgba(),
+        )
+        if self._paint_frozen and self._paint_cache is not None:
+            return self._paint_cache
+        if cache_key == self._paint_cache_key:
+            return self._paint_cache
+
+        # Long text can be tens of thousands of pixels tall. Rasterizing that
+        # entire off-screen surface makes width changes visibly stall after the
+        # mouse is released. Cache only the visible viewport instead.
+        dpr = self.devicePixelRatioF()
+        pixmap = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        content_height = self._text_layout_cache[1] if self._text_layout_cache else self.height()
+        source_y = min(self._scroll_offset, max(0, content_height - self.height()))
+        line_height = self.fontMetrics().height()
+        first = max(0, source_y // line_height - 1)
+        last = min(len(path), (source_y + self.height()) // line_height + 2)
+        for index in range(first, last):
+            painter.drawPixmap(0, index * line_height - source_y,
+                               self._get_line_image(path[index]))
         painter.end()
 
-        needed_height = int(y_offset + self._outline_width * 2)
-        if getattr(self, "_last_needed_height", None) != needed_height:
-            self._last_needed_height = needed_height
-            self.setFixedHeight(needed_height)
+        self._paint_cache_key = cache_key
+        self._paint_cache = pixmap
+        return pixmap
+
+    def paintEvent(self, event):
+        if not self.text():
+            return
+        if self._paint_frozen and self._text_layout_cache is not None:
+            path, _ = self._text_layout_cache
+        else:
+            path, _ = self._get_text_layout()
+
+        pixmap = self._get_painted_text(path)
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
 
 
 class TranslationOverlay(QWidget):
@@ -166,6 +266,13 @@ class TranslationOverlay(QWidget):
     EDIT_MIN_WIDTH = 420
     EDIT_MIN_HEIGHT = 150
     RESIZE_HOTZONE = 16
+    LONG_TEXT_THRESHOLD_RATIO = 0.35
+    LONG_TEXT_HEIGHT_RATIO = 0.30
+    LONG_TEXT_MIN_HEIGHT = 120
+    LONG_TEXT_PANEL_PADDING = 8
+    READ_OUTER_MARGIN = 4
+    READ_RESIZE_HANDLE_SIZE = 10
+    READ_RESIZE_CORNER_SIZE = 18
     TOPMOST_ENFORCE_INTERVAL_MS = 250
 
     def __init__(self, config: dict):
@@ -173,8 +280,11 @@ class TranslationOverlay(QWidget):
         self.config = config
         self._drag_pos = None
         self._is_resizing = False
+        self._resize_edges = set()
         self._resize_start_pos = None
         self._resize_start_size = None
+        self._resize_start_geometry = None
+        self._long_text_mode = False
         self._edit_context = {"dialogue": None, "choices": []}
         self._editing_target = None
         self._pending_text = None
@@ -196,17 +306,64 @@ class TranslationOverlay(QWidget):
         self._topmost_timer.setInterval(self.TOPMOST_ENFORCE_INTERVAL_MS)
         self._topmost_timer.timeout.connect(self._enforce_topmost)
 
+        self._height_adjust_timer = QTimer(self)
+        self._height_adjust_timer.setSingleShot(True)
+        self._height_adjust_timer.timeout.connect(self._adjust_height)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
         self._showing_waiting_text = True
-        self.label = OutlinedLabel(tr("overlay.waiting"), self)
+        self.read_container = QWidget(self)
+        self.read_container.setObjectName("readContainer")
+        self.read_container.setCursor(Qt.OpenHandCursor)
+        read_layout = QHBoxLayout(self.read_container)
+        read_layout.setContentsMargins(0, 0, 0, 0)
+        read_layout.setSpacing(0)
+        self._read_layout = read_layout
+
+        self.label = OutlinedLabel(tr("overlay.waiting"), self.read_container)
         self.label.set_font_family(config.get("font_family", "Microsoft YaHei"))
         self.label.set_font_size(config.get("font_size", 22))
         self.label.set_font_bold(config.get("font_bold", True))
         self.label.set_text_color(config.get("font_color", "#FFFFFF"))
-        layout.addWidget(self.label)
+        self.label.setCursor(Qt.OpenHandCursor)
+        read_layout.addWidget(self.label, 1)
+
+        self.text_scrollbar = QScrollBar(Qt.Vertical, self.read_container)
+        self.text_scrollbar.setCursor(Qt.ArrowCursor)
+        self.text_scrollbar.setFixedWidth(16)
+        self.text_scrollbar.setStyleSheet(
+            """
+            QScrollBar:vertical {
+                background: rgba(8, 10, 16, 190);
+                width: 16px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(210, 220, 235, 150);
+                border-radius: 5px;
+                min-height: 28px;
+                margin: 2px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(235, 240, 250, 195);
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            """
+        )
+        self.text_scrollbar.valueChanged.connect(self.label.set_scroll_offset)
+        self.text_scrollbar.hide()
+        read_layout.addWidget(self.text_scrollbar)
+        layout.addWidget(self.read_container)
 
         self.editor_container = QWidget(self)
         self.editor_container.setObjectName("editorContainer")
@@ -316,6 +473,7 @@ class TranslationOverlay(QWidget):
 
         editor_layout.addWidget(self.editor_footer)
 
+        self.read_container.installEventFilter(self)
         self.editor_container.installEventFilter(self)
         self.editor_footer.installEventFilter(self)
         self.resize_handle.installEventFilter(self)
@@ -324,6 +482,25 @@ class TranslationOverlay(QWidget):
 
         self.editor_container.hide()
         layout.addWidget(self.editor_container)
+
+        self._read_resize_handles = {}
+        handle_cursors = {
+            "left": Qt.SizeHorCursor,
+            "right": Qt.SizeHorCursor,
+            "top": Qt.SizeVerCursor,
+            "bottom": Qt.SizeVerCursor,
+            "top_left": Qt.SizeFDiagCursor,
+            "top_right": Qt.SizeBDiagCursor,
+            "bottom_left": Qt.SizeBDiagCursor,
+            "bottom_right": Qt.SizeFDiagCursor,
+        }
+        for name, cursor in handle_cursors.items():
+            handle = QWidget(self)
+            handle.setCursor(cursor)
+            handle.setMouseTracking(True)
+            handle.installEventFilter(self)
+            handle.hide()
+            self._read_resize_handles[name] = handle
 
         self.setGeometry(
             config.get("overlay_x", 560),
@@ -424,6 +601,39 @@ class TranslationOverlay(QWidget):
         self.resize_handle.move(x, y)
         self.resize_handle.raise_()
 
+    def _position_read_resize_handles(self):
+        if not hasattr(self, "_read_resize_handles"):
+            return
+        visible = self._long_text_mode and not self.editor_container.isVisible()
+        if not visible:
+            for handle in self._read_resize_handles.values():
+                handle.hide()
+            return
+
+        edge = self.READ_RESIZE_HANDLE_SIZE
+        corner = self.READ_RESIZE_CORNER_SIZE
+        width = self.width()
+        height = self.height()
+        geometries = {
+            "left": (0, corner, edge, max(1, height - corner * 2)),
+            "right": (max(0, width - edge), corner, edge, max(1, height - corner * 2)),
+            "top": (corner, 0, max(1, width - corner * 2), edge),
+            "bottom": (corner, max(0, height - edge), max(1, width - corner * 2), edge),
+            "top_left": (0, 0, corner, corner),
+            "top_right": (max(0, width - corner), 0, corner, corner),
+            "bottom_left": (0, max(0, height - corner), corner, corner),
+            "bottom_right": (max(0, width - corner), max(0, height - corner), corner, corner),
+        }
+        for name, handle in self._read_resize_handles.items():
+            handle.setGeometry(*geometries[name])
+            handle.show()
+            handle.raise_()
+
+    def resizeEvent(self, event):
+        self._position_read_resize_handles()
+        self._position_resize_handle()
+        super().resizeEvent(event)
+
     def _set_edit_dirty_state(self, dirty: bool, base_text: str | None = None):
         self._edit_is_dirty = bool(dirty and self._editing_target)
         if base_text is not None:
@@ -476,11 +686,13 @@ class TranslationOverlay(QWidget):
         return None
 
     def _apply_edit_target(self, target: dict, move_cursor_end: bool = True):
+        if not self._editing_target:
+            self.config["overlay_edit_width"] = self.width()
         self._editing_target = dict(target)
         base_text = str(target.get("translation") or "")
         self._set_edit_dirty_state(False, base_text=base_text)
         self._set_edit_text_programmatically(base_text)
-        self.label.hide()
+        self.read_container.hide()
         self.editor_container.show()
         self._restore_edit_window()
         self.edit_text.setFocus()
@@ -492,8 +704,11 @@ class TranslationOverlay(QWidget):
         self._editing_target = None
         self._set_edit_dirty_state(False, base_text="")
         self.editor_container.hide()
+        self.read_container.show()
         self.label.show()
         if self._pending_text is not None:
+            self.text_scrollbar.setValue(0)
+            self.label.set_scroll_offset(0)
             self.label.setText(self._pending_text)
             self._pending_text = None
         self._restore_read_window()
@@ -512,9 +727,20 @@ class TranslationOverlay(QWidget):
         self.resize(self.config["overlay_width"], self.height())
         self._adjust_height()
 
+    def _apply_read_window_size(self, width: int, height: int):
+        """Refresh nested layout constraints before shrinking the top-level window."""
+        self._read_layout.invalidate()
+        root_layout = self.layout()
+        root_layout.invalidate()
+        self._read_layout.activate()
+        root_layout.activate()
+        self.resize(width, height)
+        root_layout.activate()
+        self._read_layout.activate()
+
     def _restore_edit_window(self):
-        width = self.config.get("overlay_edit_width", 480)
-        height = self.config.get("overlay_edit_height", 150)
+        width = self.config.get("overlay_edit_width", self.width())
+        height = self.config.get("overlay_edit_height", 300)
         width, height = self._clamp_edit_size(width, height)
         self.config["overlay_edit_width"] = width
         self.config["overlay_edit_height"] = height
@@ -530,18 +756,33 @@ class TranslationOverlay(QWidget):
                 self.config["overlay_edit_height"] = self.height()
             else:
                 self.config["overlay_width"] = self.width()
+                if self._long_text_mode:
+                    self.config["overlay_long_height"] = self.read_container.height()
         self._save_config()
+
+    def _set_read_drag_cursor(self, cursor):
+        """Update the draggable body without coupling it to edge hovering."""
+        self.setCursor(cursor)
+        self.read_container.setCursor(cursor)
+        self.label.setCursor(cursor)
 
     def _clear_pointer_interaction(self):
         """End any drag/resize whose release event may have been lost."""
         self._drag_pos = None
         self._is_resizing = False
+        self._resize_edges = set()
         self._resize_start_pos = None
         self._resize_start_size = None
-        self.setCursor(Qt.OpenHandCursor)
+        self._resize_start_geometry = None
+        self.label.set_paint_frozen(False)
+        self._set_read_drag_cursor(Qt.OpenHandCursor)
         self.editor_footer.setCursor(Qt.OpenHandCursor)
 
     def eventFilter(self, watched, event):
+        if watched in getattr(self, "_read_resize_handles", {}).values():
+            return self._handle_read_resize_event(watched, event)
+        if watched is self.read_container and event.type() == QEvent.Wheel:
+            return self._scroll_long_text_with_wheel(event)
         if watched is self.editor_container and event.type() == QEvent.Resize:
             self._position_resize_handle()
             return False
@@ -550,6 +791,56 @@ class TranslationOverlay(QWidget):
         if watched is self.resize_handle:
             return self._handle_editor_resize_event(event)
         return super().eventFilter(watched, event)
+
+    def _scroll_long_text_with_wheel(self, event) -> bool:
+        if not self._long_text_mode or self.text_scrollbar.maximum() <= 0:
+            return False
+
+        pixel_delta = event.pixelDelta().y()
+        if pixel_delta:
+            delta = -pixel_delta
+        else:
+            angle_delta = event.angleDelta().y()
+            if not angle_delta:
+                return False
+            lines = angle_delta / 120.0
+            delta = int(-lines * self.text_scrollbar.singleStep() * 3)
+
+        self.text_scrollbar.setValue(self.text_scrollbar.value() + delta)
+        event.accept()
+        return True
+
+    def wheelEvent(self, event):
+        if self._scroll_long_text_with_wheel(event):
+            return
+        super().wheelEvent(event)
+
+    def _handle_read_resize_event(self, watched, event):
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            name = next(
+                key for key, handle in self._read_resize_handles.items() if handle is watched
+            )
+            self._height_adjust_timer.stop()
+            self._resize_edges = set(name.split("_"))
+            self._is_resizing = True
+            self._resize_start_pos = event.globalPos()
+            self._resize_start_geometry = self.geometry()
+            self.label.set_paint_frozen(False)
+            return True
+        if event.type() == QEvent.MouseMove and self._is_resizing:
+            if event.buttons() & Qt.LeftButton:
+                self._resize_read_window(event.globalPos())
+            else:
+                self._clear_pointer_interaction()
+                self._adjust_height()
+                self._persist_window_geometry(include_size=True)
+            return True
+        if event.type() == QEvent.MouseButtonRelease and self._is_resizing:
+            self._clear_pointer_interaction()
+            self._adjust_height()
+            self._persist_window_geometry(include_size=True)
+            return True
+        return False
 
     def _handle_editor_footer_event(self, event):
         if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -676,9 +967,15 @@ class TranslationOverlay(QWidget):
             return
         self._pending_text = None
         self._showing_waiting_text = False
+        self.text_scrollbar.setValue(0)
+        self.label.set_scroll_offset(0)
         self.label.setText(text)
+        self._height_adjust_timer.stop()
+        self._adjust_height()
         self._enforce_topmost()
-        QTimer.singleShot(20, self._adjust_height)
+
+    def set_screen_text_mode(self, enabled: bool):
+        self.label.set_screen_text_mode(enabled)
 
     def _original_text_for_clipboard(self) -> str:
         dialogue_target = self._edit_context.get("dialogue") or {}
@@ -745,10 +1042,141 @@ class TranslationOverlay(QWidget):
         if self.editor_container.isVisible():
             self._restore_edit_window()
             return
-        needed = self.label.height() + 12
         width = self._clamp_overlay_width(self.config.get("overlay_width", self.width()))
         self.config["overlay_width"] = width
-        self.resize(width, max(needed, 40))
+        self.resize(width, self.height())
+
+        outer_margins = self.READ_OUTER_MARGIN * 2
+        scrollbar_width = self.text_scrollbar.width()
+        self._read_layout.setContentsMargins(0, 0, 0, 0)
+        self.label.resize(max(1, width - outer_margins), self.label.height())
+        _, content_height = self.label._get_text_layout()
+        _, screen_height = self._screen_limits()
+        long_text = content_height > int(screen_height * self.LONG_TEXT_THRESHOLD_RATIO)
+
+        self._long_text_mode = long_text
+        self.label.set_long_text_mode(long_text)
+        if long_text:
+            padding = self.LONG_TEXT_PANEL_PADDING
+            self.read_container.setStyleSheet(
+                "QWidget#readContainer {"
+                " background-color: rgba(8, 10, 16, 190);"
+                " border: 1px solid rgba(115, 128, 150, 120);"
+                " border-radius: 8px;"
+                "}"
+            )
+            self._read_layout.setContentsMargins(padding, padding, padding, padding)
+            self.text_scrollbar.show()
+            self.label.resize(
+                max(1, width - outer_margins - scrollbar_width - padding * 2),
+                self.label.height(),
+            )
+            _, content_height = self.label._get_text_layout()
+            configured_height = int(self.config.get("overlay_long_height", 0) or 0)
+            panel_height = configured_height or int(screen_height * self.LONG_TEXT_HEIGHT_RATIO)
+            panel_height = max(
+                self.LONG_TEXT_MIN_HEIGHT,
+                min(panel_height, screen_height - 24),
+            )
+            visible_height = max(1, panel_height - padding * 2)
+            self.label.setFixedHeight(visible_height)
+            self.text_scrollbar.setPageStep(visible_height)
+            self.text_scrollbar.setRange(0, max(0, content_height - visible_height))
+            self.text_scrollbar.setSingleStep(max(20, self.label.fontMetrics().height()))
+            self._apply_read_window_size(width, panel_height + outer_margins)
+        else:
+            self.read_container.setStyleSheet(
+                "QWidget#readContainer { background: transparent; border: none; }"
+            )
+            self.text_scrollbar.hide()
+            self.text_scrollbar.setRange(0, 0)
+            self.label.set_scroll_offset(0)
+            self.label.setFixedHeight(content_height)
+            self._apply_read_window_size(
+                width,
+                max(content_height + outer_margins, 40),
+            )
+        self._position_read_resize_handles()
+
+    def _resize_edges_at(self, pos) -> set[str]:
+        edges = set()
+        if pos.x() <= self.RESIZE_HOTZONE:
+            edges.add("left")
+        elif pos.x() >= self.width() - self.RESIZE_HOTZONE:
+            edges.add("right")
+        if self._long_text_mode:
+            if pos.y() <= self.RESIZE_HOTZONE:
+                edges.add("top")
+            elif pos.y() >= self.height() - self.RESIZE_HOTZONE:
+                edges.add("bottom")
+        return edges
+
+    @staticmethod
+    def _cursor_for_edges(edges: set[str]):
+        if ("left" in edges and "top" in edges) or ("right" in edges and "bottom" in edges):
+            return Qt.SizeFDiagCursor
+        if ("right" in edges and "top" in edges) or ("left" in edges and "bottom" in edges):
+            return Qt.SizeBDiagCursor
+        if "left" in edges or "right" in edges:
+            return Qt.SizeHorCursor
+        if "top" in edges or "bottom" in edges:
+            return Qt.SizeVerCursor
+        return Qt.OpenHandCursor
+
+    def _resize_read_window(self, global_pos):
+        start = self._resize_start_geometry
+        if start is None:
+            return
+        delta = global_pos - self._resize_start_pos
+        left = start.left()
+        top = start.top()
+        right = start.right() + 1
+        bottom = start.bottom() + 1
+
+        if "left" in self._resize_edges:
+            left += delta.x()
+        if "right" in self._resize_edges:
+            right += delta.x()
+        if "top" in self._resize_edges:
+            top += delta.y()
+        if "bottom" in self._resize_edges:
+            bottom += delta.y()
+
+        min_width = self.READ_MIN_WIDTH
+        if right - left < min_width:
+            if "left" in self._resize_edges:
+                left = right - min_width
+            else:
+                right = left + min_width
+
+        if self._long_text_mode:
+            outer_margins = self.READ_OUTER_MARGIN * 2
+            min_window_height = self.LONG_TEXT_MIN_HEIGHT + outer_margins
+            if bottom - top < min_window_height:
+                if "top" in self._resize_edges:
+                    top = bottom - min_window_height
+                else:
+                    bottom = top + min_window_height
+
+        width = self._clamp_overlay_width(right - left)
+        if "left" in self._resize_edges:
+            left = right - width
+        height = bottom - top
+        self.setGeometry(left, top, width, height)
+        self.config["overlay_width"] = width
+
+        if self._long_text_mode:
+            outer_margins = self.READ_OUTER_MARGIN * 2
+            padding = self.LONG_TEXT_PANEL_PADDING
+            panel_height = max(self.LONG_TEXT_MIN_HEIGHT, height - outer_margins)
+            visible_height = max(1, panel_height - padding * 2)
+            self.label.setFixedHeight(visible_height)
+            self.config["overlay_long_height"] = panel_height
+            self.layout().activate()
+            self._read_layout.activate()
+            _, content_height = self.label._get_text_layout()
+            self.text_scrollbar.setPageStep(visible_height)
+            self.text_scrollbar.setRange(0, max(0, content_height - visible_height))
 
     def set_font_size(self, size: int):
         self.config["font_size"] = size
@@ -780,11 +1208,17 @@ class TranslationOverlay(QWidget):
         if self.editor_container.isVisible():
             return super().mousePressEvent(event)
         if event.button() == Qt.LeftButton:
-            if event.pos().x() >= self.width() - self.RESIZE_HOTZONE:
+            self._height_adjust_timer.stop()
+            self._resize_edges = self._resize_edges_at(event.pos())
+            if self._resize_edges:
                 self._is_resizing = True
+                self._resize_start_pos = event.globalPos()
+                self._resize_start_geometry = self.geometry()
+                self.label.set_paint_frozen(False)
+                self.setCursor(self._cursor_for_edges(self._resize_edges))
             else:
                 self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
-                self.setCursor(Qt.ClosedHandCursor)
+                self._set_read_drag_cursor(Qt.ClosedHandCursor)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -794,7 +1228,7 @@ class TranslationOverlay(QWidget):
             return super().mouseDoubleClickEvent(event)
         if event.button() != Qt.LeftButton:
             return super().mouseDoubleClickEvent(event)
-        if event.pos().x() >= self.width() - self.RESIZE_HOTZONE:
+        if self._resize_edges_at(event.pos()):
             return super().mouseDoubleClickEvent(event)
 
         # 双击正文时直接进入当前对白的编辑模式，不影响右侧拖拽调宽热区。
@@ -804,7 +1238,7 @@ class TranslationOverlay(QWidget):
 
         self._drag_pos = None
         self._is_resizing = False
-        self.setCursor(Qt.OpenHandCursor)
+        self._set_read_drag_cursor(Qt.OpenHandCursor)
         self.start_edit(target)
         event.accept()
 
@@ -812,31 +1246,36 @@ class TranslationOverlay(QWidget):
         if self.editor_container.isVisible():
             return super().mouseMoveEvent(event)
         if (self._drag_pos is not None or self._is_resizing) and not event.buttons() & Qt.LeftButton:
+            was_resizing = self._is_resizing
             self._clear_pointer_interaction()
-            self._persist_window_geometry(include_size=True)
+            if was_resizing:
+                self._adjust_height()
+            self._persist_window_geometry(include_size=was_resizing)
             event.accept()
             return
         if self._is_resizing:
-            new_width = self._clamp_overlay_width(event.globalPos().x() - self.x())
-            self.resize(new_width, self.height())
-            self.config["overlay_width"] = new_width
+            self._resize_read_window(event.globalPos())
         elif self._drag_pos is not None:
             self.move(event.globalPos() - self._drag_pos)
             self.config["overlay_x"] = self.x()
             self.config["overlay_y"] = self.y()
         else:
-            self.setCursor(Qt.SizeHorCursor if event.pos().x() >= self.width() - self.RESIZE_HOTZONE else Qt.OpenHandCursor)
+            # Resize handles and the outer window use resize cursors. The
+            # read_container keeps its own OpenHandCursor, so entering the body
+            # immediately restores the drag affordance without a click.
+            self.setCursor(self._cursor_for_edges(self._resize_edges_at(event.pos())))
         event.accept()
 
     def mouseReleaseEvent(self, event):
         if self.editor_container.isVisible():
             return super().mouseReleaseEvent(event)
         changed = self._drag_pos is not None or self._is_resizing
-        self._drag_pos = None
-        self._is_resizing = False
-        self.setCursor(Qt.OpenHandCursor)
+        was_resizing = self._is_resizing
+        self._clear_pointer_interaction()
         if changed:
-            self._persist_window_geometry(include_size=True)
+            if was_resizing:
+                self._adjust_height()
+            self._persist_window_geometry(include_size=was_resizing)
         event.accept()
 
     def _show_context_menu(self, pos):

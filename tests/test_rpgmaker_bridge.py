@@ -12,6 +12,344 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is required for bridge tests")
 class RpgMakerBridgeTests(unittest.TestCase):
+    def test_save_anywhere_uses_native_save_scene_only_from_map(self):
+        bridge = json.dumps(str(ROOT / "assets" / "RenpyLensBridge.js"))
+        script = f"""
+const fs = require('fs');
+const vm = require('vm');
+function Element() {{ this.children=[]; this.listeners={{}}; this.style={{}}; this.parentNode=null; this.id=''; this.textContent=''; }}
+Element.prototype.appendChild = function(child) {{ child.parentNode=this; this.children.push(child); }};
+Element.prototype.addEventListener = function(name, fn) {{ this.listeners[name]=fn; }};
+Element.prototype.setAttribute = function() {{}};
+function findById(node, id) {{
+  if (node.id === id) return node;
+  for (const child of node.children) {{ const found=findById(child,id); if (found) return found; }}
+  return null;
+}}
+const body = new Element();
+const documentListeners = {{}};
+const document = {{
+  body, createElement: () => new Element(), getElementById: id => findById(body,id),
+  addEventListener: (name, fn) => {{ documentListeners[name]=fn; }}
+}};
+function Game_System() {{}} Game_System.prototype.initialize = function() {{}};
+Game_System.prototype.isSaveEnabled = function() {{ return false; }};
+function Game_Player() {{}} Game_Player.prototype.isThrough = () => false;
+Game_Player.prototype.realMoveSpeed = () => 4;
+Game_Player.prototype.executeEncounter = () => true;
+function Game_Interpreter() {{}} Game_Interpreter.prototype.command101 = () => true;
+Game_Interpreter.prototype.updateWaitMode = () => false;
+function Window_Message() {{}} Window_Message.prototype.startMessage = function() {{}};
+Window_Message.prototype.convertEscapeCharacters = value => value;
+Window_Message.prototype.updateMessage = () => false;
+function Window_ChoiceList() {{ this._list=[]; }} Window_ChoiceList.prototype.start = function() {{}};
+function Scene_Base() {{}} Scene_Base.prototype.update = function() {{}};
+function inheritScene(child) {{ child.prototype=Object.create(Scene_Base.prototype); child.prototype.constructor=child; }}
+function Scene_Title() {{}} inheritScene(Scene_Title);
+function Scene_Boot() {{}} inheritScene(Scene_Boot);
+function Scene_Map() {{}} inheritScene(Scene_Map);
+function Scene_Save() {{}} inheritScene(Scene_Save);
+function Scene_Menu() {{}} inheritScene(Scene_Menu);
+function Scene_Battle() {{}} inheritScene(Scene_Battle);
+const pushed = [];
+const SceneManager = {{ _scene:new Scene_Map(), push: scene => pushed.push(scene) }};
+let messageBusy = false;
+let eventRunning = false;
+const context = {{
+  console, JSON, Object, String, Number, Math, Array,
+  PluginManager: {{ parameters: () => ({{
+    qolEnabled:'true', qolLocale:'en_US', socketPort:'1',
+    qolFeatures:JSON.stringify({{saveAnywhere:true}})
+  }}) }},
+  Utils: {{ RPGMAKER_NAME:'MV', RPGMAKER_VERSION:'1.6.2' }},
+  Game_System, Game_Player, Game_Interpreter, Window_Message, Window_ChoiceList,
+  Scene_Base, Scene_Title, Scene_Boot, Scene_Map, Scene_Save, Scene_Menu, Scene_Battle,
+  SceneManager, document,
+  window: {{ setTimeout: () => 1, clearTimeout: () => {{}}, addEventListener: () => {{}} }},
+  $gameMessage: {{ allText: () => '', isBusy: () => messageBusy }},
+  $gameMap: {{ isEventRunning: () => eventRunning }},
+  $gameParty: {{ inBattle: () => false, members: () => [] }},
+  $gameVariables: {{ value: () => 0 }}, $gameActors: {{ actor: () => null }},
+  TextManager: {{ currencyUnit:'G' }},
+  require: () => {{ throw new Error('disabled'); }}
+}};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync({bridge}, 'utf8'), context);
+context.$gameSystem = new context.Game_System(); context.$gameSystem.initialize();
+context.SceneManager._scene.update();
+const controls = document.getElementById('renpylens-qol-controls');
+if (!controls || controls.children.length !== 1) throw new Error('save button missing');
+const saveButton = controls.children[0];
+if (saveButton.textContent !== 'Save' || saveButton.style.display !== 'block') {{
+  throw new Error('save button was not visible on the map');
+}}
+saveButton.listeners.click({{preventDefault(){{}},stopPropagation(){{}}}});
+saveButton.listeners.click({{preventDefault(){{}},stopPropagation(){{}}}});
+if (pushed.length !== 1 || pushed[0] !== context.Scene_Save) {{
+  throw new Error('map save did not open exactly once');
+}}
+context.SceneManager._scene = new context.Scene_Save(); context.SceneManager._scene.update();
+context.SceneManager._scene = new context.Scene_Map(); context.SceneManager._scene.update();
+eventRunning = true;
+saveButton.listeners.click({{preventDefault(){{}},stopPropagation(){{}}}});
+if (pushed.length !== 2) throw new Error('running event blocked save');
+context.SceneManager._scene = new context.Scene_Save(); context.SceneManager._scene.update();
+context.SceneManager._scene = new context.Scene_Map(); context.SceneManager._scene.update();
+eventRunning = false;
+messageBusy = true;
+saveButton.listeners.click({{preventDefault(){{}},stopPropagation(){{}}}});
+if (pushed.length !== 3) throw new Error('dialogue blocked save');
+context.SceneManager._scene = new context.Scene_Save(); context.SceneManager._scene.update();
+context.SceneManager._scene = new context.Scene_Map(); context.SceneManager._scene.update();
+let prevented = false;
+documentListeners.keydown({{
+  repeat:false, ctrlKey:true, altKey:false, metaKey:false, keyCode:83,
+  preventDefault() {{ prevented=true; }}
+}});
+documentListeners.keydown({{
+  repeat:true, ctrlKey:true, altKey:false, metaKey:false, keyCode:83,
+  preventDefault() {{ throw new Error('repeat was handled'); }}
+}});
+if (!prevented || pushed.length !== 4) throw new Error('Ctrl+S did not open save exactly once');
+for (const scene of [new context.Scene_Title(), new context.Scene_Menu(), new context.Scene_Battle(), new context.Scene_Save()]) {{
+  context.SceneManager._scene = scene; scene.update();
+  let blockedPrevented = false;
+  documentListeners.keydown({{
+    repeat:false, ctrlKey:true, altKey:false, metaKey:false, keyCode:83,
+    preventDefault() {{ blockedPrevented=true; }}
+  }});
+  if (!blockedPrevented || pushed.length !== 4) throw new Error('save opened outside the map');
+  if (saveButton.style.display !== 'none') throw new Error('save button visible outside the map');
+}}
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_save_anywhere_uses_pre_dialogue_and_pre_choice_checkpoint(self):
+        bridge = json.dumps(str(ROOT / "assets" / "RenpyLensBridge.js"))
+        script = f"""
+const fs = require('fs');
+const vm = require('vm');
+function Element() {{ this.children=[]; this.listeners={{}}; this.style={{}}; this.parentNode=null; this.id=''; this.textContent=''; }}
+Element.prototype.appendChild = function(child) {{ child.parentNode=this; this.children.push(child); }};
+Element.prototype.addEventListener = function(name, fn) {{ this.listeners[name]=fn; }};
+Element.prototype.setAttribute = function() {{}};
+function findById(node, id) {{
+  if (node.id === id) return node;
+  for (const child of node.children) {{ const found=findById(child,id); if (found) return found; }}
+  return null;
+}}
+const body = new Element();
+const document = {{
+  body, createElement: () => new Element(), getElementById: id => findById(body,id),
+  addEventListener: () => {{}}
+}};
+function Game_System() {{}} Game_System.prototype.initialize = function() {{}};
+function Game_Player() {{}} Game_Player.prototype.isThrough = () => false;
+Game_Player.prototype.realMoveSpeed = () => 4;
+Game_Player.prototype.executeEncounter = () => true;
+let attachChoice = false;
+function Game_Interpreter() {{ this._index=0; this._indent=0; this._branch={{}}; this._list=[]; }}
+Game_Interpreter.prototype.currentCommand = function() {{ return this._list[this._index]; }};
+Game_Interpreter.prototype.command101 = function() {{
+  this._index += 1;
+  if (attachChoice) this.setupChoices([]);
+  return false;
+}};
+Game_Interpreter.prototype.command102 = function() {{ this.setupChoices([]); this._index += 1; return false; }};
+Game_Interpreter.prototype.setupChoices = function() {{}};
+Game_Interpreter.prototype.command404 = function() {{ return true; }};
+Game_Interpreter.prototype.clear = function() {{ this._branch={{}}; }};
+Game_Interpreter.prototype.updateWaitMode = () => false;
+function Window_Message() {{}} Window_Message.prototype.startMessage = function() {{}};
+Window_Message.prototype.convertEscapeCharacters = value => value;
+Window_Message.prototype.updateMessage = () => false;
+function Window_ChoiceList() {{ this._list=[]; }} Window_ChoiceList.prototype.start = function() {{}};
+function Scene_Base() {{}} Scene_Base.prototype.update = function() {{}};
+function inheritScene(child) {{ child.prototype=Object.create(Scene_Base.prototype); child.prototype.constructor=child; }}
+function Scene_Title() {{}} inheritScene(Scene_Title);
+function Scene_Boot() {{}} inheritScene(Scene_Boot);
+function Scene_Map() {{}} inheritScene(Scene_Map);
+function Scene_Save() {{}} inheritScene(Scene_Save); Scene_Save.prototype.terminate = function() {{}};
+let marker = 0;
+let activeInterpreter = null;
+const DataManager = {{
+  makeSaveContents: () => ({{
+    marker,
+    interpreterIndex: activeInterpreter ? activeInterpreter._index : -1,
+    branch: activeInterpreter ? Object.assign({{}}, activeInterpreter._branch) : {{}}
+  }})
+}};
+const JsonEx = {{ stringify: JSON.stringify, parse: JSON.parse }};
+const pushed = [];
+const mapScene = new Scene_Map();
+const SceneManager = {{ _scene:mapScene, push: scene => pushed.push(scene) }};
+let messageBusy = false;
+const context = {{
+  console, JSON, Object, String, Number, Math, Array,
+  PluginManager: {{ parameters: () => ({{
+    qolEnabled:'true', qolLocale:'en_US', socketPort:'1',
+    qolFeatures:JSON.stringify({{saveAnywhere:true}})
+  }}) }},
+  Utils: {{ RPGMAKER_NAME:'MV', RPGMAKER_VERSION:'1.6.2' }},
+  Game_System, Game_Player, Game_Interpreter, Window_Message, Window_ChoiceList,
+  Scene_Base, Scene_Title, Scene_Boot, Scene_Map, Scene_Save,
+  SceneManager, DataManager, JsonEx, document,
+  window: {{ setTimeout: () => 1, clearTimeout: () => {{}}, addEventListener: () => {{}} }},
+  $gameMessage: {{ allText: () => '', isBusy: () => messageBusy }},
+  $gameMap: {{ isEventRunning: () => true }},
+  $gameParty: {{ inBattle: () => false, members: () => [] }},
+  $gameVariables: {{ value: () => 0 }}, $gameActors: {{ actor: () => null }},
+  TextManager: {{ currencyUnit:'G' }},
+  require: () => {{ throw new Error('disabled'); }}
+}};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync({bridge}, 'utf8'), context);
+context.$gameSystem = new context.Game_System(); context.$gameSystem.initialize();
+mapScene.update();
+const saveButton = document.getElementById('renpylens-qol-controls').children[0];
+const interpreter = new context.Game_Interpreter();
+activeInterpreter = interpreter;
+interpreter._list = [
+  {{code:101, indent:0, parameters:[]}},
+  {{code:102, indent:0, parameters:[]}},
+  {{code:402, indent:0, parameters:[1]}},
+  {{code:404, indent:0, parameters:[]}},
+  {{code:101, indent:0, parameters:[]}},
+  {{code:0, indent:0, parameters:[]}}
+];
+
+marker = 10;
+attachChoice = true;
+interpreter.command101();
+interpreter._branch[0] = 1;
+marker = 20;
+messageBusy = true;
+saveButton.listeners.click({{preventDefault(){{}},stopPropagation(){{}}}});
+const choiceSave = context.DataManager.makeSaveContents();
+if (choiceSave.marker !== 10 || choiceSave.interpreterIndex !== 0 ||
+    Object.keys(choiceSave.branch).length !== 0) {{
+  throw new Error('selected choice was not restored to its unopened checkpoint');
+}}
+if (marker !== 20 || interpreter._branch[0] !== 1) {{
+  throw new Error('checkpoint save changed the live event state');
+}}
+
+const firstSaveScene = new context.Scene_Save();
+context.SceneManager._scene = firstSaveScene; firstSaveScene.update(); firstSaveScene.terminate();
+context.SceneManager._scene = mapScene; mapScene.update();
+messageBusy = false;
+interpreter._index = 3;
+interpreter.command404();
+marker = 30;
+attachChoice = false;
+interpreter._index = 4;
+interpreter.command101();
+marker = 40;
+messageBusy = true;
+saveButton.listeners.click({{preventDefault(){{}},stopPropagation(){{}}}});
+const dialogueSave = context.DataManager.makeSaveContents();
+if (dialogueSave.marker !== 30 || dialogueSave.interpreterIndex !== 4) {{
+  throw new Error('dialogue was not saved from immediately before it opened');
+}}
+
+const secondSaveScene = new context.Scene_Save();
+context.SceneManager._scene = secondSaveScene; secondSaveScene.update(); secondSaveScene.terminate();
+context.SceneManager._scene = mapScene; mapScene.update();
+messageBusy = false;
+marker = 50;
+saveButton.listeners.click({{preventDefault(){{}},stopPropagation(){{}}}});
+const ordinarySave = context.DataManager.makeSaveContents();
+if (ordinarySave.marker !== 50) throw new Error('ordinary map save used a stale dialogue checkpoint');
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_prefetch_escape_conversion_does_not_change_live_message_state(self):
+        bridge = json.dumps(str(ROOT / "assets" / "RenpyLensBridge.js"))
+        script = f"""
+const fs = require('fs');
+const vm = require('vm');
+function Game_Interpreter() {{ this._index = 0; this._list = []; }}
+Game_Interpreter.prototype.command101 = function() {{ return true; }};
+function Window_Message() {{ this._wordWrap = false; }}
+Window_Message.prototype.startMessage = function() {{
+  this._wordWrap = String(context.$gameMessage.allText()).includes('<WordWrap>');
+}};
+Window_Message.prototype.convertEscapeCharacters = function(value) {{
+  this._wordWrap = String(value).includes('<WordWrap>');
+  return String(value).replace(/<\\/?WordWrap>/gi, '');
+}};
+function Window_ChoiceList() {{ this._list = []; }}
+Window_ChoiceList.prototype.start = function() {{}};
+const messages = [];
+const fakeNet = {{
+  createConnection: (options, callback) => {{
+    const socket = {{
+      end: data => messages.push(JSON.parse(data)),
+      setTimeout: () => {{}}, on: () => {{}}, destroy: () => {{}}
+    }};
+    queueMicrotask(callback);
+    return socket;
+  }}
+}};
+const context = {{
+  console, JSON, Object, String, Number, Math, Array, queueMicrotask,
+  PluginManager: {{ parameters: () => ({{socketPort:'1'}}) }},
+  Utils: {{ RPGMAKER_NAME:'MV', RPGMAKER_VERSION:'1.6.2' }},
+  Game_Interpreter, Window_Message, Window_ChoiceList,
+  require: name => {{ if (name === 'net') return fakeNet; throw new Error(name); }},
+  $gameMessage: {{ allText: () => '<WordWrap>First<br>Second<BR />Third<br />Fourth' }},
+  $gameVariables: {{ value: () => 0 }},
+  $gameActors: {{ actor: () => null }},
+  $gameParty: {{ members: () => [] }},
+  TextManager: {{ currencyUnit:'G' }}
+}};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync({bridge}, 'utf8'), context);
+const interpreter = new context.Game_Interpreter();
+interpreter._list = [
+  {{code:101,parameters:[]}},
+  {{code:401,parameters:['<WordWrap>First<br>Second<BR />Third<br />Fourth']}},
+  {{code:101,parameters:[]}},
+  {{code:401,parameters:['A future dialogue without a wrap tag.']}}
+];
+interpreter.command101();
+const message = new context.Window_Message();
+message.startMessage();
+if (!message._wordWrap) {{
+  throw new Error('prefetch escape conversion changed the live word-wrap state');
+}}
+queueMicrotask(() => {{
+  const current = messages.filter(item => item.type === 'current').pop();
+  const expected = 'First\\nSecond\\nThird\\nFourth';
+  if (!current || current.current_segment.source !== expected ||
+      current.current_segment.display_text !== expected) {{
+    throw new Error('HTML break tags were not normalized to line breaks');
+  }}
+}});
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_qol_encounter_guard_battle_outcomes_and_pointer_isolation(self):
         bridge = json.dumps(str(ROOT / "assets" / "RenpyLensBridge.js"))
         script = f"""
@@ -435,6 +773,8 @@ if (context.$gameSystem._rpgMakerQoL.autoAdvance || autoPanel.style.display !== 
 let prevented = false;
 document.keydown({{repeat:false,ctrlKey:false,altKey:false,metaKey:false,keyCode:71,preventDefault(){{prevented=true;}}}});
 if (prevented || context.$gameSystem._rpgMakerQoL.speed) throw new Error('disabled shortcut ran');
+document.keydown({{repeat:false,ctrlKey:true,altKey:false,metaKey:false,keyCode:83,preventDefault(){{prevented=true;}}}});
+if (prevented) throw new Error('disabled save shortcut ran');
 """
         result = subprocess.run(
             [shutil.which("node"), "-e", script],

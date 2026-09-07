@@ -16,7 +16,7 @@ else:
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "v1.5.2.1",
+    "version": "v1.5.3",
     "ui_language": "auto",
     "rpgmaker_qol_games": {},
     "rpgmaker_qol_features": {},
@@ -102,9 +102,10 @@ DEFAULT_CONFIG = {
     "overlay_x": 100,
     "overlay_y": 100,
     "overlay_width": 800,
-    "overlay_edit_width": 480,
-    "overlay_edit_height": 150,
-    "overlay_edit_ui_version": 5,
+    "overlay_long_height": 0,
+    "overlay_edit_width": 800,
+    "overlay_edit_height": 300,
+    "overlay_edit_ui_version": 6,
     "prefetch_count": 5,
     "debounce_ms": 100,
     "bulk_translate_batch_size": 5,

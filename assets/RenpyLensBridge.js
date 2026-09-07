@@ -35,7 +35,8 @@
         encounters: true,
         battleVictory: true,
         messageOpacity: true,
-        autoAdvance: true
+        autoAdvance: true,
+        saveAnywhere: false
     };
     try {
         if (parameters.qolFeatures) {
@@ -52,6 +53,112 @@
     var lastMessageSegment = null;
     var lastInterpreter = null;
     var lastSignature = "";
+    var saveAnywhereDialogueCheckpoint = null;
+    var saveAnywhereChoiceCheckpoints = [];
+    var saveAnywherePendingCheckpoint = null;
+    var saveAnywhereOriginalMakeSaveContents = null;
+
+    function saveAnywhereEnabled() {
+        return qolEnabled && qolFeatures.saveAnywhere === true;
+    }
+
+    function saveAnywhereMessageBusy() {
+        try {
+            return typeof $gameMessage !== "undefined" && $gameMessage &&
+                typeof $gameMessage.isBusy === "function" && $gameMessage.isBusy();
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function captureSaveAnywhereCheckpoint(interpreter) {
+        if (!saveAnywhereEnabled() || saveAnywhereMessageBusy() ||
+                typeof DataManager === "undefined" || !DataManager ||
+                typeof JsonEx === "undefined" || !JsonEx ||
+                typeof JsonEx.stringify !== "function") {
+            return null;
+        }
+        var makeContents = saveAnywhereOriginalMakeSaveContents || DataManager.makeSaveContents;
+        if (typeof makeContents !== "function") return null;
+        try {
+            var snapshot = JsonEx.stringify(makeContents.call(DataManager));
+            saveAnywhereDialogueCheckpoint = {
+                interpreter: interpreter,
+                snapshot: snapshot
+            };
+            return snapshot;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function beginSaveAnywhereChoice(interpreter) {
+        if (!saveAnywhereEnabled() || !interpreter) return;
+        var checkpoint = saveAnywhereDialogueCheckpoint;
+        var snapshot = checkpoint && checkpoint.interpreter === interpreter
+            ? checkpoint.snapshot : captureSaveAnywhereCheckpoint(interpreter);
+        if (!snapshot) return;
+        var command = typeof interpreter.currentCommand === "function"
+            ? interpreter.currentCommand() :
+            (interpreter._list && interpreter._list[interpreter._index]);
+        saveAnywhereChoiceCheckpoints.push({
+            interpreter: interpreter,
+            indent: Number(command && command.indent || interpreter._indent || 0),
+            snapshot: snapshot
+        });
+    }
+
+    function endSaveAnywhereChoice(interpreter) {
+        if (!interpreter) return;
+        var command = typeof interpreter.currentCommand === "function"
+            ? interpreter.currentCommand() :
+            (interpreter._list && interpreter._list[interpreter._index]);
+        var indent = Number(command && command.indent || interpreter._indent || 0);
+        for (var index = saveAnywhereChoiceCheckpoints.length - 1; index >= 0; index -= 1) {
+            var checkpoint = saveAnywhereChoiceCheckpoints[index];
+            if (checkpoint.interpreter === interpreter && checkpoint.indent === indent) {
+                saveAnywhereChoiceCheckpoints.splice(index, 1);
+                return;
+            }
+        }
+    }
+
+    function clearSaveAnywhereChoices(interpreter) {
+        saveAnywhereChoiceCheckpoints = saveAnywhereChoiceCheckpoints.filter(function(checkpoint) {
+            return checkpoint.interpreter !== interpreter;
+        });
+    }
+
+    function prepareSaveAnywhereCheckpoint() {
+        var choice = saveAnywhereChoiceCheckpoints.length
+            ? saveAnywhereChoiceCheckpoints[saveAnywhereChoiceCheckpoints.length - 1] : null;
+        if (choice) {
+            saveAnywherePendingCheckpoint = choice.snapshot;
+        } else if (saveAnywhereMessageBusy() && saveAnywhereDialogueCheckpoint) {
+            saveAnywherePendingCheckpoint = saveAnywhereDialogueCheckpoint.snapshot;
+        } else {
+            saveAnywherePendingCheckpoint = null;
+        }
+    }
+
+    function installSaveAnywhereCheckpointHook() {
+        if (!saveAnywhereEnabled() || saveAnywhereOriginalMakeSaveContents ||
+                typeof DataManager === "undefined" || !DataManager ||
+                typeof DataManager.makeSaveContents !== "function" ||
+                typeof JsonEx === "undefined" || !JsonEx ||
+                typeof JsonEx.parse !== "function") {
+            return;
+        }
+        saveAnywhereOriginalMakeSaveContents = DataManager.makeSaveContents;
+        DataManager.makeSaveContents = function() {
+            if (saveAnywherePendingCheckpoint) {
+                try {
+                    return JsonEx.parse(saveAnywherePendingCheckpoint);
+                } catch (error) {}
+            }
+            return saveAnywhereOriginalMakeSaveContents.apply(this, arguments);
+        };
+    }
 
     function send(payload) {
         try {
@@ -91,6 +198,7 @@
     function tokenData(raw) {
         var values = {};
         var source = String(raw || "").replace(/\r\n?/g, "\n");
+        source = source.replace(/<br\s*\/?>/gi, "\n");
         source = source.replace(/\\(V|N|P)\[(\d+)\]/gi, function(match, kind, id) {
             kind = String(kind).toUpperCase();
             id = String(Number(id));
@@ -123,7 +231,8 @@
     }
 
     function stripRendered(text) {
-        var value = String(text || "").replace(/\x1b[A-Z]+(?:\[[^\]]*\]|<[^>]*>)?/gi, "");
+        var value = String(text || "").replace(/<br\s*\/?>/gi, "\n");
+        value = value.replace(/\x1b[A-Z]+(?:\[[^\]]*\]|<[^>]*>)?/gi, "");
         value = value.replace(/\x1b[.\\|!><^{}]/g, "");
         value = value.replace(/<\/?(?:WordWrap|CENTER|LEFT|RIGHT|TOP|MIDDLE|BOTTOM)>/gi, "");
         return value.replace(/[ \t]+\n/g, "\n").trim();
@@ -131,7 +240,17 @@
 
     function resolveRaw(windowObject, raw) {
         try {
-            return stripRendered(windowObject.convertEscapeCharacters(String(raw || "")));
+            // Message plugins may update rendering state (for example
+            // `_wordWrap`) while converting escape characters.  Do the
+            // extraction on a shadow object so inspecting current or
+            // prefetched dialogue cannot alter the live message window.
+            var conversionWindow = Object.create(windowObject);
+            return stripRendered(
+                windowObject.convertEscapeCharacters.call(
+                    conversionWindow,
+                    String(raw || "")
+                )
+            );
         } catch (error) {
             return stripRendered(raw);
         }
@@ -368,42 +487,42 @@
         var dictionaries = {
             zh_CN: {
                 textSpeed: "文字速度", moveSpeed: "高速", normal: "1×", fast: "2×", instant: "即时",
-                opacity: "对话框", auto: "自动",
+                opacity: "对话框", auto: "自动", save: "保存",
                 speed: "高速", through: "穿墙", encounters: "随机遇敌", victory: "战胜", defeat: "战败",
                 on: "开", off: "关", noBattle: "当前不在战斗中",
                 winning: "敌人已全部击倒，正在结算胜利", losing: "队伍已被击倒，正在结算战败"
             },
             zh_TW: {
                 textSpeed: "文字速度", moveSpeed: "高速移動", normal: "1×", fast: "2×", instant: "即時",
-                opacity: "對話框", auto: "自動",
+                opacity: "對話框", auto: "自動", save: "儲存",
                 speed: "高速", through: "穿牆", encounters: "隨機遇敵", victory: "戰勝", defeat: "戰敗",
                 on: "開", off: "關", noBattle: "目前不在戰鬥中",
                 winning: "敵人已全部擊倒，正在結算勝利", losing: "隊伍已被擊倒，正在結算戰敗"
             },
             en_US: {
                 textSpeed: "Text speed", moveSpeed: "High speed", normal: "1×", fast: "2×", instant: "Instant",
-                opacity: "Dialogue", auto: "Auto",
+                opacity: "Dialogue", auto: "Auto", save: "Save",
                 speed: "Speed", through: "No clip", encounters: "Encounters", victory: "Win", defeat: "Lose",
                 on: "On", off: "Off", noBattle: "Not currently in battle",
                 winning: "Enemies defeated; resolving victory", losing: "Party defeated; resolving defeat"
             },
             ja_JP: {
                 textSpeed: "文字速度", moveSpeed: "高速移動", normal: "1×", fast: "2×", instant: "即時",
-                opacity: "会話枠", auto: "自動",
+                opacity: "会話枠", auto: "自動", save: "セーブ",
                 speed: "高速", through: "壁抜け", encounters: "ランダム遭遇", victory: "勝利", defeat: "敗北",
                 on: "オン", off: "オフ", noBattle: "戦闘中ではありません",
                 winning: "敵を倒しました。勝利処理中です", losing: "味方が倒れました。敗北処理中です"
             },
             ko_KR: {
                 textSpeed: "텍스트 속도", moveSpeed: "고속 이동", normal: "1×", fast: "2×", instant: "즉시",
-                opacity: "대화창", auto: "자동",
+                opacity: "대화창", auto: "자동", save: "저장",
                 speed: "고속", through: "벽 통과", encounters: "랜덤 전투", victory: "승리", defeat: "패배",
                 on: "켜짐", off: "꺼짐", noBattle: "현재 전투 중이 아닙니다",
                 winning: "적을 모두 쓰러뜨렸습니다. 승리를 처리합니다", losing: "파티가 쓰러졌습니다. 패배를 처리합니다"
             },
             ru_RU: {
                 textSpeed: "Скорость текста", moveSpeed: "Быстрое движение", normal: "1×", fast: "2×", instant: "Мгновенно",
-                opacity: "Диалог", auto: "Авто",
+                opacity: "Диалог", auto: "Авто", save: "Сохранить",
                 speed: "Скорость", through: "Сквозь стены", encounters: "Случайные бои", victory: "Победа", defeat: "Поражение",
                 on: "Вкл", off: "Выкл", noBattle: "Сейчас нет боя",
                 winning: "Враги побеждены; завершается бой", losing: "Отряд побеждён; завершается поражение"
@@ -414,6 +533,19 @@
         var buttons = {};
         var toastTimer = 0;
         var autoPanelOpen = false;
+        var saveSceneOpening = false;
+
+        installSaveAnywhereCheckpointHook();
+
+        if (typeof Scene_Save !== "undefined" && Scene_Save &&
+                typeof Scene_Save.prototype.terminate === "function") {
+            var originalSaveSceneTerminate = Scene_Save.prototype.terminate;
+            Scene_Save.prototype.terminate = function() {
+                var result = originalSaveSceneTerminate.apply(this, arguments);
+                saveAnywherePendingCheckpoint = null;
+                return result;
+            };
+        }
 
         function featureEnabled(key) {
             return qolFeatures[key] === true;
@@ -476,10 +608,16 @@
             if (!controls) return;
             var data = state();
             var scene = typeof SceneManager !== "undefined" ? SceneManager._scene : null;
+            var mapScene = typeof Scene_Map !== "undefined" && scene instanceof Scene_Map;
             var title = typeof Scene_Title !== "undefined" && scene instanceof Scene_Title;
             var boot = typeof Scene_Boot !== "undefined" && scene instanceof Scene_Boot;
             var visible = !!data && !!scene && !title && !boot;
             controls.style.display = visible ? "flex" : "none";
+            if (buttons.saveAnywhere) {
+                buttons.saveAnywhere.textContent = text.save;
+                buttons.saveAnywhere.style.display = mapScene ? "block" : "none";
+            }
+            if (!mapScene) saveSceneOpening = false;
             if (!visible) {
                 autoPanelOpen = false;
                 return;
@@ -583,6 +721,21 @@
             if (!autoPanelOpen) return;
             autoPanelOpen = false;
             refreshControls();
+        }
+
+        function openSaveAnywhere() {
+            if (!featureEnabled("saveAnywhere") || saveSceneOpening ||
+                    typeof SceneManager === "undefined" || !SceneManager ||
+                    typeof Scene_Map === "undefined" ||
+                    !(SceneManager._scene instanceof Scene_Map) ||
+                    typeof Scene_Save === "undefined") {
+                return false;
+            }
+            saveSceneOpening = true;
+            prepareSaveAnywhereCheckpoint();
+            closeAutoPanel();
+            SceneManager.push(Scene_Save);
+            return true;
         }
 
         function toggleSpeed() {
@@ -907,6 +1060,7 @@
             if (featureEnabled("textSpeed")) makeButton("textSpeed", cycleTextSpeed);
             if (featureEnabled("messageOpacity")) makeButton("opacity", cycleMessageOpacity);
             if (featureEnabled("autoAdvance")) makeAutoControl();
+            if (featureEnabled("saveAnywhere")) makeButton("saveAnywhere", openSaveAnywhere);
             if (featureEnabled("moveSpeed") || featureEnabled("through")) {
                 makeExplorationControl();
             }
@@ -1053,7 +1207,13 @@
         };
 
         document.addEventListener("keydown", function(event) {
-            if (event.repeat || event.ctrlKey || event.altKey || event.metaKey) return;
+            if (event.repeat || event.altKey || event.metaKey) return;
+            if (event.ctrlKey && event.keyCode === 83 && featureEnabled("saveAnywhere")) {
+                event.preventDefault();
+                openSaveAnywhere();
+                return;
+            }
+            if (event.ctrlKey) return;
             if (event.keyCode === 71 && featureEnabled("moveSpeed")) toggleSpeed();
             else if (event.keyCode === 72 && featureEnabled("through")) toggleThrough();
             else if (event.keyCode === 78 && featureEnabled("encounters")) toggleEncounters();
@@ -1200,9 +1360,43 @@
 
     var originalCommand101 = Game_Interpreter.prototype.command101;
     Game_Interpreter.prototype.command101 = function() {
+        captureSaveAnywhereCheckpoint(this);
         lastInterpreter = this;
         return originalCommand101.apply(this, arguments);
     };
+
+    var originalCommand102 = Game_Interpreter.prototype.command102;
+    if (typeof originalCommand102 === "function") {
+        Game_Interpreter.prototype.command102 = function() {
+            captureSaveAnywhereCheckpoint(this);
+            return originalCommand102.apply(this, arguments);
+        };
+    }
+
+    var originalSetupChoices = Game_Interpreter.prototype.setupChoices;
+    if (typeof originalSetupChoices === "function") {
+        Game_Interpreter.prototype.setupChoices = function() {
+            beginSaveAnywhereChoice(this);
+            return originalSetupChoices.apply(this, arguments);
+        };
+    }
+
+    var originalCommand404 = Game_Interpreter.prototype.command404;
+    if (typeof originalCommand404 === "function") {
+        Game_Interpreter.prototype.command404 = function() {
+            var result = originalCommand404.apply(this, arguments);
+            endSaveAnywhereChoice(this);
+            return result;
+        };
+    }
+
+    var originalInterpreterClear = Game_Interpreter.prototype.clear;
+    if (typeof originalInterpreterClear === "function") {
+        Game_Interpreter.prototype.clear = function() {
+            clearSaveAnywhereChoices(this);
+            return originalInterpreterClear.apply(this, arguments);
+        };
+    }
 
     var originalStartMessage = Window_Message.prototype.startMessage;
     Window_Message.prototype.startMessage = function() {

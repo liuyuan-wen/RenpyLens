@@ -9,7 +9,7 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from hook_server import HookServer
+from hook_server import HookServer, normalize_legacy_renpy_text
 
 
 class HookServerProtocolTests(unittest.TestCase):
@@ -72,6 +72,29 @@ class HookServerProtocolTests(unittest.TestCase):
         )
 
         self.assertEqual(received, [("Eileen", "Hello", True, ["Yes", "No"], True)])
+
+    def test_python2_unicode_sequence_repr_is_unwrapped(self):
+        self.assertEqual(
+            normalize_legacy_renpy_text("[u'Hello ', [u'world']]"),
+            "Hello world",
+        )
+        self.assertEqual(normalize_legacy_renpy_text("[1, 2]"), "[1, 2]")
+
+        server = HookServer()
+        received = []
+        server.text_received.connect(lambda *args: received.append(args))
+        server._emit_current_text(
+            {
+                "what": "[u'Tutorial prompt']",
+                "choices": ["[u'Yes.']", "[u'No.']"],
+                "menu_active": True,
+            }
+        )
+
+        self.assertEqual(
+            received,
+            [("", "Tutorial prompt", False, ["Yes.", "No."], True)],
+        )
 
 
 if __name__ == "__main__":
