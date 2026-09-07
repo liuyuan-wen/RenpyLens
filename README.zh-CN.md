@@ -122,12 +122,6 @@ pip install -r requirements.txt
 python src/main.py
 ```
 
-### 运行测试
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
 ## 📦 打包 Windows 可执行文件
 
 ```powershell

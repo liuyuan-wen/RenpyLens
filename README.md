@@ -126,12 +126,6 @@ pip install -r requirements.txt
 python src/main.py
 ```
 
-### Run tests
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
 ## 📦 Build a Windows executable
 
 ```powershell
