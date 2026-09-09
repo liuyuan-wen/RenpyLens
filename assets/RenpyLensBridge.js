@@ -36,6 +36,7 @@
         battleVictory: true,
         messageOpacity: true,
         autoAdvance: true,
+        dialogueRollback: false,
         saveAnywhere: false
     };
     try {
@@ -53,111 +54,52 @@
     var lastMessageSegment = null;
     var lastInterpreter = null;
     var lastSignature = "";
-    var saveAnywhereDialogueCheckpoint = null;
-    var saveAnywhereChoiceCheckpoints = [];
-    var saveAnywherePendingCheckpoint = null;
-    var saveAnywhereOriginalMakeSaveContents = null;
+    var dialogueRollbackCheckpoint = null;
+    var dialogueRollbackRestoring = false;
 
-    function saveAnywhereEnabled() {
-        return qolEnabled && qolFeatures.saveAnywhere === true;
+    function dialogueRollbackEnabled() {
+        return qolEnabled && qolFeatures.dialogueRollback === true;
     }
 
-    function saveAnywhereMessageBusy() {
-        try {
-            return typeof $gameMessage !== "undefined" && $gameMessage &&
-                typeof $gameMessage.isBusy === "function" && $gameMessage.isBusy();
-        } catch (error) {
-            return false;
-        }
-    }
-
-    function captureSaveAnywhereCheckpoint(interpreter) {
-        if (!saveAnywhereEnabled() || saveAnywhereMessageBusy() ||
-                typeof DataManager === "undefined" || !DataManager ||
-                typeof JsonEx === "undefined" || !JsonEx ||
-                typeof JsonEx.stringify !== "function") {
-            return null;
-        }
-        var makeContents = saveAnywhereOriginalMakeSaveContents || DataManager.makeSaveContents;
-        if (typeof makeContents !== "function") return null;
-        try {
-            var snapshot = JsonEx.stringify(makeContents.call(DataManager));
-            saveAnywhereDialogueCheckpoint = {
-                interpreter: interpreter,
-                snapshot: snapshot
-            };
-            return snapshot;
-        } catch (error) {
-            return null;
-        }
-    }
-
-    function beginSaveAnywhereChoice(interpreter) {
-        if (!saveAnywhereEnabled() || !interpreter) return;
-        var checkpoint = saveAnywhereDialogueCheckpoint;
-        var snapshot = checkpoint && checkpoint.interpreter === interpreter
-            ? checkpoint.snapshot : captureSaveAnywhereCheckpoint(interpreter);
-        if (!snapshot) return;
-        var command = typeof interpreter.currentCommand === "function"
-            ? interpreter.currentCommand() :
-            (interpreter._list && interpreter._list[interpreter._index]);
-        saveAnywhereChoiceCheckpoints.push({
-            interpreter: interpreter,
-            indent: Number(command && command.indent || interpreter._indent || 0),
-            snapshot: snapshot
-        });
-    }
-
-    function endSaveAnywhereChoice(interpreter) {
-        if (!interpreter) return;
-        var command = typeof interpreter.currentCommand === "function"
-            ? interpreter.currentCommand() :
-            (interpreter._list && interpreter._list[interpreter._index]);
-        var indent = Number(command && command.indent || interpreter._indent || 0);
-        for (var index = saveAnywhereChoiceCheckpoints.length - 1; index >= 0; index -= 1) {
-            var checkpoint = saveAnywhereChoiceCheckpoints[index];
-            if (checkpoint.interpreter === interpreter && checkpoint.indent === indent) {
-                saveAnywhereChoiceCheckpoints.splice(index, 1);
-                return;
-            }
-        }
-    }
-
-    function clearSaveAnywhereChoices(interpreter) {
-        saveAnywhereChoiceCheckpoints = saveAnywhereChoiceCheckpoints.filter(function(checkpoint) {
-            return checkpoint.interpreter !== interpreter;
-        });
-    }
-
-    function prepareSaveAnywhereCheckpoint() {
-        var choice = saveAnywhereChoiceCheckpoints.length
-            ? saveAnywhereChoiceCheckpoints[saveAnywhereChoiceCheckpoints.length - 1] : null;
-        if (choice) {
-            saveAnywherePendingCheckpoint = choice.snapshot;
-        } else if (saveAnywhereMessageBusy() && saveAnywhereDialogueCheckpoint) {
-            saveAnywherePendingCheckpoint = saveAnywhereDialogueCheckpoint.snapshot;
-        } else {
-            saveAnywherePendingCheckpoint = null;
-        }
-    }
-
-    function installSaveAnywhereCheckpointHook() {
-        if (!saveAnywhereEnabled() || saveAnywhereOriginalMakeSaveContents ||
+    function captureDialogueRollbackCheckpoint(event) {
+        if (!dialogueRollbackEnabled() || dialogueRollbackRestoring ||
+                dialogueRollbackCheckpoint || !event ||
+                Number(event._trigger) !== 0 || event._starting ||
                 typeof DataManager === "undefined" || !DataManager ||
                 typeof DataManager.makeSaveContents !== "function" ||
                 typeof JsonEx === "undefined" || !JsonEx ||
-                typeof JsonEx.parse !== "function") {
+                typeof JsonEx.stringify !== "function") {
             return;
         }
-        saveAnywhereOriginalMakeSaveContents = DataManager.makeSaveContents;
-        DataManager.makeSaveContents = function() {
-            if (saveAnywherePendingCheckpoint) {
-                try {
-                    return JsonEx.parse(saveAnywherePendingCheckpoint);
-                } catch (error) {}
-            }
-            return saveAnywhereOriginalMakeSaveContents.apply(this, arguments);
-        };
+        var list = typeof event.list === "function" ? event.list() : null;
+        if (!list || list.length <= 1) return;
+        try {
+            var mapId = typeof $gameMap !== "undefined" && $gameMap &&
+                typeof $gameMap.mapId === "function" ? Number($gameMap.mapId()) : 0;
+            dialogueRollbackCheckpoint = {
+                snapshot: JsonEx.stringify(DataManager.makeSaveContents()),
+                mapId: mapId,
+                eventId: Number(event._eventId || 0),
+                bgm: typeof AudioManager !== "undefined" && AudioManager &&
+                    typeof AudioManager.saveBgm === "function" ? AudioManager.saveBgm() : null,
+                bgs: typeof AudioManager !== "undefined" && AudioManager &&
+                    typeof AudioManager.saveBgs === "function" ? AudioManager.saveBgs() : null
+            };
+        } catch (error) {
+            dialogueRollbackCheckpoint = null;
+        }
+    }
+
+    function clearDialogueRollbackCheckpoint(interpreter) {
+        var checkpoint = dialogueRollbackCheckpoint;
+        if (!checkpoint || !interpreter || typeof $gameMap === "undefined" || !$gameMap ||
+                interpreter !== $gameMap._interpreter) {
+            return;
+        }
+        if (Number(interpreter._mapId || 0) === checkpoint.mapId &&
+                Number(interpreter._eventId || 0) === checkpoint.eventId) {
+            dialogueRollbackCheckpoint = null;
+        }
     }
 
     function send(payload) {
@@ -487,42 +429,42 @@
         var dictionaries = {
             zh_CN: {
                 textSpeed: "文字速度", moveSpeed: "高速", normal: "1×", fast: "2×", instant: "即时",
-                opacity: "对话框", auto: "自动", save: "保存",
+                opacity: "对话框", auto: "自动", rollback: "回退", save: "强制保存",
                 speed: "高速", through: "穿墙", encounters: "随机遇敌", victory: "战胜", defeat: "战败",
                 on: "开", off: "关", noBattle: "当前不在战斗中",
                 winning: "敌人已全部击倒，正在结算胜利", losing: "队伍已被击倒，正在结算战败"
             },
             zh_TW: {
                 textSpeed: "文字速度", moveSpeed: "高速移動", normal: "1×", fast: "2×", instant: "即時",
-                opacity: "對話框", auto: "自動", save: "儲存",
+                opacity: "對話框", auto: "自動", rollback: "回退", save: "強制儲存",
                 speed: "高速", through: "穿牆", encounters: "隨機遇敵", victory: "戰勝", defeat: "戰敗",
                 on: "開", off: "關", noBattle: "目前不在戰鬥中",
                 winning: "敵人已全部擊倒，正在結算勝利", losing: "隊伍已被擊倒，正在結算戰敗"
             },
             en_US: {
                 textSpeed: "Text speed", moveSpeed: "High speed", normal: "1×", fast: "2×", instant: "Instant",
-                opacity: "Dialogue", auto: "Auto", save: "Save",
+                opacity: "Dialogue", auto: "Auto", rollback: "Rollback", save: "Force save",
                 speed: "Speed", through: "No clip", encounters: "Encounters", victory: "Win", defeat: "Lose",
                 on: "On", off: "Off", noBattle: "Not currently in battle",
                 winning: "Enemies defeated; resolving victory", losing: "Party defeated; resolving defeat"
             },
             ja_JP: {
                 textSpeed: "文字速度", moveSpeed: "高速移動", normal: "1×", fast: "2×", instant: "即時",
-                opacity: "会話枠", auto: "自動", save: "セーブ",
+                opacity: "会話枠", auto: "自動", rollback: "戻す", save: "強制セーブ",
                 speed: "高速", through: "壁抜け", encounters: "ランダム遭遇", victory: "勝利", defeat: "敗北",
                 on: "オン", off: "オフ", noBattle: "戦闘中ではありません",
                 winning: "敵を倒しました。勝利処理中です", losing: "味方が倒れました。敗北処理中です"
             },
             ko_KR: {
                 textSpeed: "텍스트 속도", moveSpeed: "고속 이동", normal: "1×", fast: "2×", instant: "즉시",
-                opacity: "대화창", auto: "자동", save: "저장",
+                opacity: "대화창", auto: "자동", rollback: "되돌리기", save: "강제 저장",
                 speed: "고속", through: "벽 통과", encounters: "랜덤 전투", victory: "승리", defeat: "패배",
                 on: "켜짐", off: "꺼짐", noBattle: "현재 전투 중이 아닙니다",
                 winning: "적을 모두 쓰러뜨렸습니다. 승리를 처리합니다", losing: "파티가 쓰러졌습니다. 패배를 처리합니다"
             },
             ru_RU: {
                 textSpeed: "Скорость текста", moveSpeed: "Быстрое движение", normal: "1×", fast: "2×", instant: "Мгновенно",
-                opacity: "Диалог", auto: "Авто", save: "Сохранить",
+                opacity: "Диалог", auto: "Авто", rollback: "Откат", save: "Сохранить принудительно",
                 speed: "Скорость", through: "Сквозь стены", encounters: "Случайные бои", victory: "Победа", defeat: "Поражение",
                 on: "Вкл", off: "Выкл", noBattle: "Сейчас нет боя",
                 winning: "Враги побеждены; завершается бой", losing: "Отряд побеждён; завершается поражение"
@@ -530,22 +472,14 @@
         };
         var text = dictionaries[qolLocale] || dictionaries.en_US;
         var controls = null;
+        var toolbar = null;
+        var menuButton = null;
+        var menuOpen = false;
+        var drag = null;
         var buttons = {};
         var toastTimer = 0;
         var autoPanelOpen = false;
         var saveSceneOpening = false;
-
-        installSaveAnywhereCheckpointHook();
-
-        if (typeof Scene_Save !== "undefined" && Scene_Save &&
-                typeof Scene_Save.prototype.terminate === "function") {
-            var originalSaveSceneTerminate = Scene_Save.prototype.terminate;
-            Scene_Save.prototype.terminate = function() {
-                var result = originalSaveSceneTerminate.apply(this, arguments);
-                saveAnywherePendingCheckpoint = null;
-                return result;
-            };
-        }
 
         function featureEnabled(key) {
             return qolFeatures[key] === true;
@@ -584,12 +518,13 @@
                 element = document.createElement("div");
                 element.id = "renpylens-qol-toast";
                 element.style.cssText = [
-                    "position:fixed", "top:56px", "right:10px", "z-index:2147483647",
+                    "position:absolute", "top:0", "right:calc(100% + 6px)", "z-index:2147483647",
+                    "white-space:nowrap",
                     "padding:8px 12px", "border-radius:5px", "background:rgba(0,0,0,.8)",
                     "color:#fff", "font:16px sans-serif", "pointer-events:none", "opacity:0",
                     "transition:opacity .15s ease"
                 ].join(";");
-                document.body.appendChild(element);
+                toolbar.appendChild(element);
             }
             return element;
         }
@@ -612,10 +547,24 @@
             var title = typeof Scene_Title !== "undefined" && scene instanceof Scene_Title;
             var boot = typeof Scene_Boot !== "undefined" && scene instanceof Scene_Boot;
             var visible = !!data && !!scene && !title && !boot;
-            controls.style.display = visible ? "flex" : "none";
+            if (mapScene && dialogueRollbackCheckpoint &&
+                    typeof $gameMap !== "undefined" && $gameMap &&
+                    typeof $gameMap.mapId === "function" &&
+                    Number($gameMap.mapId()) !== dialogueRollbackCheckpoint.mapId) {
+                dialogueRollbackCheckpoint = null;
+            }
+            toolbar.style.display = visible ? "flex" : "none";
+            if (!visible) setMenuOpen(false);
             if (buttons.saveAnywhere) {
                 buttons.saveAnywhere.textContent = text.save;
                 buttons.saveAnywhere.style.display = mapScene ? "block" : "none";
+            }
+            if (buttons.dialogueRollback) {
+                buttons.dialogueRollback.textContent = text.rollback;
+                buttons.dialogueRollback.style.display = "block";
+                buttons.dialogueRollback.disabled = !mapScene ||
+                    !dialogueRollbackCheckpoint || dialogueRollbackRestoring;
+                buttons.dialogueRollback.style.opacity = buttons.dialogueRollback.disabled ? ".45" : "1";
             }
             if (!mapScene) saveSceneOpening = false;
             if (!visible) {
@@ -653,6 +602,7 @@
                 buttons.battleOutcome.victory.textContent = text.victory;
                 buttons.battleOutcome.defeat.textContent = text.defeat;
             }
+            positionToolbar();
         }
 
         function cycleTextSpeed() {
@@ -732,10 +682,64 @@
                 return false;
             }
             saveSceneOpening = true;
-            prepareSaveAnywhereCheckpoint();
             closeAutoPanel();
             SceneManager.push(Scene_Save);
             return true;
+        }
+
+        function rollbackDialogueInteraction() {
+            var checkpoint = dialogueRollbackCheckpoint;
+            var currentMapId = typeof $gameMap !== "undefined" && $gameMap &&
+                typeof $gameMap.mapId === "function" ? Number($gameMap.mapId()) : 0;
+            if (!featureEnabled("dialogueRollback") || !checkpoint ||
+                    dialogueRollbackRestoring || checkpoint.mapId !== currentMapId ||
+                    typeof DataManager === "undefined" || !DataManager ||
+                    typeof DataManager.extractSaveContents !== "function" ||
+                    typeof JsonEx === "undefined" || !JsonEx ||
+                    typeof JsonEx.parse !== "function" ||
+                    typeof SceneManager === "undefined" || !SceneManager ||
+                    typeof Scene_Map === "undefined" ||
+                    !(SceneManager._scene instanceof Scene_Map) ||
+                    typeof SceneManager.goto !== "function") {
+                return false;
+            }
+            dialogueRollbackRestoring = true;
+            dialogueRollbackCheckpoint = null;
+            closeAutoPanel();
+            try {
+                DataManager.extractSaveContents(JsonEx.parse(checkpoint.snapshot));
+                // Message state is not part of save contents. Stale choices can
+                // measure text before the new choice window has its contents sprite.
+                $gameMessage.clear();
+                if (typeof Input !== "undefined" && Input && typeof Input.clear === "function") {
+                    Input.clear();
+                }
+                if (typeof TouchInput !== "undefined" && TouchInput &&
+                        typeof TouchInput.clear === "function") {
+                    TouchInput.clear();
+                }
+                if (typeof AudioManager !== "undefined" && AudioManager) {
+                    if (typeof AudioManager.stopMe === "function") AudioManager.stopMe();
+                    if (typeof AudioManager.stopSe === "function") AudioManager.stopSe();
+                    if (checkpoint.bgm && typeof AudioManager.replayBgm === "function") {
+                        AudioManager.replayBgm(checkpoint.bgm);
+                    } else if (!checkpoint.bgm && typeof AudioManager.stopBgm === "function") {
+                        AudioManager.stopBgm();
+                    }
+                    if (checkpoint.bgs && typeof AudioManager.replayBgs === "function") {
+                        AudioManager.replayBgs(checkpoint.bgs);
+                    } else if (!checkpoint.bgs && typeof AudioManager.stopBgs === "function") {
+                        AudioManager.stopBgs();
+                    }
+                }
+                SceneManager.goto(Scene_Map);
+                dialogueRollbackRestoring = false;
+                return true;
+            } catch (error) {
+                dialogueRollbackCheckpoint = checkpoint;
+                dialogueRollbackRestoring = false;
+                return false;
+            }
         }
 
         function toggleSpeed() {
@@ -823,6 +827,7 @@
             button.style.cssText = [
                 "min-width:0", "width:auto", "height:32px", "padding:0 9px",
                 "border:1px solid rgba(255,255,255,.4)", "border-radius:5px",
+                "background:rgba(55,55,60,.86)", "appearance:none", "-webkit-appearance:none",
                 "color:#fff", "font:14px sans-serif", "font-weight:bold",
                 "text-shadow:0 1px 1px #000", "cursor:pointer",
                 "box-shadow:0 1px 4px rgba(0,0,0,.4)", "white-space:nowrap",
@@ -840,14 +845,14 @@
         function makeAutoControl() {
             var container = document.createElement("div");
             container.style.cssText = [
-                "position:relative", "height:32px", "display:block", "overflow:visible"
+                "position:relative", "display:block", "min-width:166px", "flex:0 0 auto"
             ].join(";");
 
             var button = document.createElement("button");
             button.type = "button";
             button.textContent = text.auto;
             button.style.cssText = [
-                "min-width:0", "width:auto", "height:32px", "padding:0 9px", "margin:0",
+                "min-width:0", "width:100%", "height:32px", "padding:0 9px", "margin:0",
                 "border:1px solid rgba(255,255,255,.4)", "border-radius:5px",
                 "background:rgba(55,55,60,.86)", "appearance:none", "-webkit-appearance:none",
                 "color:#fff", "font:14px sans-serif", "font-weight:bold",
@@ -863,8 +868,7 @@
 
             var panel = document.createElement("div");
             panel.style.cssText = [
-                "position:absolute", "display:none", "top:38px", "left:50%",
-                "transform:translateX(-50%)", "width:166px", "height:34px",
+                "position:relative", "margin-top:4px", "display:none", "width:100%", "height:34px",
                 "padding:6px 9px", "border:1px solid rgba(255,255,255,.35)",
                 "border-radius:5px", "background:rgba(38,38,44,.96)",
                 "box-shadow:0 2px 7px rgba(0,0,0,.45)", "box-sizing:border-box",
@@ -878,7 +882,7 @@
             range.value = "50";
             range.setAttribute("aria-label", text.auto);
             range.style.cssText = [
-                "display:block", "width:146px", "height:20px", "margin:0",
+                "display:block", "width:100%", "height:20px", "margin:0",
                 "padding:0", "cursor:pointer", "accent-color:#2aad70"
             ].join(";");
             range.addEventListener("input", function(event) {
@@ -915,7 +919,7 @@
                     "border:0", "border-radius:0", "background:transparent",
                     "appearance:none", "-webkit-appearance:none", "box-shadow:none",
                     "outline:none", "box-sizing:border-box", "display:block",
-                    "white-space:nowrap", "flex:0 0 auto",
+                    "white-space:nowrap", "flex:1 1 0",
                     "color:#fff", "font:14px sans-serif", "font-weight:bold",
                     "text-shadow:0 1px 1px #000", "cursor:pointer"
                 ].join(";");
@@ -959,7 +963,7 @@
                     "border:0", "border-radius:0", "background:transparent",
                     "appearance:none", "-webkit-appearance:none", "box-shadow:none",
                     "outline:none", "box-sizing:border-box", "display:block",
-                    "white-space:nowrap", "flex:0 0 auto",
+                    "white-space:nowrap", "flex:1 1 0",
                     "color:#fff", "font:14px sans-serif", "font-weight:bold",
                     "text-shadow:0 1px 1px #000", "cursor:pointer"
                 ].join(";");
@@ -994,7 +998,7 @@
         function eventBelongsToControls(event) {
             var target = event && event.target;
             while (target) {
-                if (target === controls) return true;
+                if (target === controls || target === toolbar) return true;
                 target = target.parentNode;
             }
             return false;
@@ -1006,7 +1010,7 @@
             // A parent preventDefault() cancels the browser's native range
             // drag/click behavior. Let range inputs perform their default
             // action while still stopping the event before RPG Maker sees it.
-            if (!isRange && event && typeof event.preventDefault === "function") {
+            if (!isRange && event && event.type !== "wheel" && typeof event.preventDefault === "function") {
                 event.preventDefault();
             }
             if (event && typeof event.stopPropagation === "function") event.stopPropagation();
@@ -1024,42 +1028,149 @@
                 var original = TouchInput[name];
                 if (typeof original !== "function") return;
                 TouchInput[name] = function(event) {
-                    if (eventBelongsToControls(event)) return;
+                    if (drag || eventBelongsToControls(event)) return;
                     return original.apply(this, arguments);
                 };
             });
         }
 
+        function positionToolbar() {
+            if (!toolbar || !window.innerWidth || toolbar.style.display === "none") return;
+            var width = toolbar.offsetWidth;
+            var height = toolbar.offsetHeight;
+            var left = parseFloat(toolbar.style.left);
+            var top = parseFloat(toolbar.style.top);
+            if (isNaN(top)) top = 10;
+            if (isNaN(left)) left = window.innerWidth - width - 10;
+            left = Math.max(0, Math.min(left, window.innerWidth - width));
+            top = Math.max(0, Math.min(top, window.innerHeight - height));
+            toolbar.style.left = left + "px";
+            toolbar.style.top = top + "px";
+            if (menuOpen) {
+                // Keep the dropdown below its button, moving the toolbar up as needed.
+                controls.style.maxHeight = Math.max(0, window.innerHeight - height - 6) + "px";
+                top = Math.max(0, Math.min(top, window.innerHeight - height - 6 - controls.offsetHeight));
+                toolbar.style.top = top + "px";
+                controls.style.left = Math.min(0, window.innerWidth - left - controls.offsetWidth) + "px";
+            }
+        }
+
+        function setMenuOpen(open) {
+            menuOpen = open;
+            controls.style.display = open ? "flex" : "none";
+            // Fix the measured row width before the slider enters the layout.
+            if (open && !controls.style.width && controls.offsetWidth) {
+                controls.style.width = controls.offsetWidth + "px";
+            }
+            menuButton.textContent = menuButton.title + (open ? " ▲" : " ▼");
+            menuButton.setAttribute("aria-expanded", String(open));
+            if (!open) closeAutoPanel();
+            positionToolbar();
+        }
+
         function ensureControls() {
             if (typeof document === "undefined" || !document.body) return;
             if (controls && controls.parentNode) return;
+            toolbar = document.createElement("div");
+            toolbar.id = "renpylens-qol-toolbar";
+            toolbar.style.cssText = [
+                "position:fixed", "top:10px", "right:10px", "z-index:2147483646",
+                "display:none", "width:max-content", "max-width:100vw", "gap:4px", "align-items:center",
+                "pointer-events:auto", "user-select:none", "touch-action:none",
+                "opacity:.35", "transition:opacity .15s ease"
+            ].join(";");
+            menuButton = document.createElement("button");
+            menuButton.type = "button";
+            menuButton.title = ({zh_CN:"RPGM 工具",zh_TW:"RPGM 工具",ja_JP:"RPGM ツール",ko_KR:"RPGM 도구",ru_RU:"Инструменты RPGM"})[qolLocale] || "RPGM Tools";
+            menuButton.style.cssText = "height:32px;padding:0 9px;border:1px solid #aaa;border-radius:5px;background:#37373c;color:#fff;font:bold 14px sans-serif;cursor:pointer;white-space:nowrap";
+            menuButton.setAttribute("aria-controls", "renpylens-qol-controls");
+            var suppressMenuClick = false;
+            menuButton.addEventListener("click", function() {
+                if (suppressMenuClick) {
+                    suppressMenuClick = false;
+                    return;
+                }
+                setMenuOpen(!menuOpen);
+            });
+            toolbar.appendChild(menuButton);
             controls = document.createElement("div");
             controls.id = "renpylens-qol-controls";
             controls.style.cssText = [
-                "position:fixed", "top:10px", "right:10px", "z-index:2147483646",
-                "display:none", "gap:6px", "align-items:center", "pointer-events:auto",
-                "user-select:none", "touch-action:none"
+                "position:absolute", "top:38px", "left:0", "display:none", "flex-direction:column",
+                "gap:6px", "align-items:stretch", "padding:8px", "box-sizing:border-box",
+                "max-width:100vw", "overflow:auto", "border-radius:6px", "background:rgba(30,30,36,.96)"
             ].join(";");
+            toolbar.appendChild(controls);
             ["pointerdown", "pointermove", "pointerup", "mousedown", "mousemove",
              "mouseup", "touchstart", "touchmove", "touchend", "click",
              "dblclick", "contextmenu", "wheel"]
                 .forEach(function(name) {
                     controls.addEventListener(name, blockControlPointerEvent, false);
+                    toolbar.addEventListener(name, blockControlPointerEvent, false);
                 });
-            document.body.appendChild(controls);
+            function setToolbarActive(active) {
+                toolbar.style.opacity = active ? "1" : ".35";
+            }
+            toolbar.addEventListener("mouseenter", function() { toolbar.style.opacity = "1"; });
+            menuButton.addEventListener("mouseenter", function() { setToolbarActive(true); });
+            toolbar.addEventListener("mouseleave", function() { if (!drag) setToolbarActive(false); });
+            var pointerDrag = !!window.PointerEvent;
+            menuButton.addEventListener(pointerDrag ? "pointerdown" : "mousedown", function(event) {
+                if (event.button !== 0) return;
+                suppressMenuClick = false;
+                drag = {
+                    x:event.clientX - toolbar.offsetLeft, y:event.clientY - toolbar.offsetTop,
+                    startX:event.clientX, startY:event.clientY, id:event.pointerId, moved:false
+                };
+                if (pointerDrag) menuButton.setPointerCapture(event.pointerId);
+                setToolbarActive(true);
+            });
+            document.addEventListener(pointerDrag ? "pointermove" : "mousemove", function(event) {
+                if (!drag || (pointerDrag && event.pointerId !== drag.id)) return;
+                var dx = event.clientX - drag.startX;
+                var dy = event.clientY - drag.startY;
+                if (!drag.moved && dx * dx + dy * dy < 25) return;
+                drag.moved = true;
+                menuButton.style.cursor = "grabbing";
+                toolbar.style.left = (event.clientX - drag.x) + "px";
+                toolbar.style.top = (event.clientY - drag.y) + "px";
+                positionToolbar();
+                blockControlPointerEvent(event);
+            }, true);
+            function endDrag(event) {
+                if (!drag || (pointerDrag && event.pointerId !== drag.id)) return;
+                var pointerId = drag.id;
+                suppressMenuClick = drag.moved || event.type === "pointercancel" || event.type === "lostpointercapture";
+                drag = null;
+                menuButton.style.cursor = "pointer";
+                if (pointerDrag && menuButton.hasPointerCapture(pointerId)) menuButton.releasePointerCapture(pointerId);
+                setToolbarActive(eventBelongsToControls(event));
+                blockControlPointerEvent(event);
+            }
+            document.addEventListener(pointerDrag ? "pointerup" : "mouseup", endDrag, true);
+            if (pointerDrag) {
+                menuButton.addEventListener("pointercancel", endDrag);
+                menuButton.addEventListener("lostpointercapture", endDrag);
+            }
+            document.body.appendChild(toolbar);
+            setMenuOpen(false);
             guardRpgMakerTouchInput();
             if (document.addEventListener) {
                 document.addEventListener("pointerdown", function(event) {
-                    if (!autoPanelOpen || eventBelongsToControls(event)) return;
-                    closeAutoPanel();
+                    if (eventBelongsToControls(event)) return;
+                    setMenuOpen(false);
                 }, true);
             }
             if (typeof window !== "undefined" && window.addEventListener) {
-                window.addEventListener("blur", closeAutoPanel, false);
+                window.addEventListener("blur", function() { drag = null; menuButton.style.cursor = "pointer"; setMenuOpen(false); setToolbarActive(false); }, false);
+                window.addEventListener("resize", positionToolbar, false);
             }
             if (featureEnabled("textSpeed")) makeButton("textSpeed", cycleTextSpeed);
             if (featureEnabled("messageOpacity")) makeButton("opacity", cycleMessageOpacity);
             if (featureEnabled("autoAdvance")) makeAutoControl();
+            if (featureEnabled("dialogueRollback")) {
+                makeButton("dialogueRollback", rollbackDialogueInteraction);
+            }
             if (featureEnabled("saveAnywhere")) makeButton("saveAnywhere", openSaveAnywhere);
             if (featureEnabled("moveSpeed") || featureEnabled("through")) {
                 makeExplorationControl();
@@ -1200,6 +1311,25 @@
             };
         }
 
+        if (featureEnabled("dialogueRollback") && typeof Game_Event !== "undefined" &&
+                Game_Event && typeof Game_Event.prototype.start === "function") {
+            var originalGameEventStart = Game_Event.prototype.start;
+            Game_Event.prototype.start = function() {
+                captureDialogueRollbackCheckpoint(this);
+                return originalGameEventStart.apply(this, arguments);
+            };
+        }
+
+        if (featureEnabled("dialogueRollback") &&
+                typeof Game_Interpreter.prototype.terminate === "function") {
+            var originalInterpreterTerminate = Game_Interpreter.prototype.terminate;
+            Game_Interpreter.prototype.terminate = function() {
+                var result = originalInterpreterTerminate.apply(this, arguments);
+                clearDialogueRollbackCheckpoint(this);
+                return result;
+            };
+        }
+
         var originalSceneUpdate = Scene_Base.prototype.update;
         Scene_Base.prototype.update = function() {
             originalSceneUpdate.call(this);
@@ -1211,6 +1341,11 @@
             if (event.ctrlKey && event.keyCode === 83 && featureEnabled("saveAnywhere")) {
                 event.preventDefault();
                 openSaveAnywhere();
+                return;
+            }
+            if (event.ctrlKey && event.keyCode === 90 && featureEnabled("dialogueRollback")) {
+                event.preventDefault();
+                rollbackDialogueInteraction();
                 return;
             }
             if (event.ctrlKey) return;
@@ -1360,43 +1495,9 @@
 
     var originalCommand101 = Game_Interpreter.prototype.command101;
     Game_Interpreter.prototype.command101 = function() {
-        captureSaveAnywhereCheckpoint(this);
         lastInterpreter = this;
         return originalCommand101.apply(this, arguments);
     };
-
-    var originalCommand102 = Game_Interpreter.prototype.command102;
-    if (typeof originalCommand102 === "function") {
-        Game_Interpreter.prototype.command102 = function() {
-            captureSaveAnywhereCheckpoint(this);
-            return originalCommand102.apply(this, arguments);
-        };
-    }
-
-    var originalSetupChoices = Game_Interpreter.prototype.setupChoices;
-    if (typeof originalSetupChoices === "function") {
-        Game_Interpreter.prototype.setupChoices = function() {
-            beginSaveAnywhereChoice(this);
-            return originalSetupChoices.apply(this, arguments);
-        };
-    }
-
-    var originalCommand404 = Game_Interpreter.prototype.command404;
-    if (typeof originalCommand404 === "function") {
-        Game_Interpreter.prototype.command404 = function() {
-            var result = originalCommand404.apply(this, arguments);
-            endSaveAnywhereChoice(this);
-            return result;
-        };
-    }
-
-    var originalInterpreterClear = Game_Interpreter.prototype.clear;
-    if (typeof originalInterpreterClear === "function") {
-        Game_Interpreter.prototype.clear = function() {
-            clearSaveAnywhereChoices(this);
-            return originalInterpreterClear.apply(this, arguments);
-        };
-    }
 
     var originalStartMessage = Window_Message.prototype.startMessage;
     Window_Message.prototype.startMessage = function() {

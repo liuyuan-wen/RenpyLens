@@ -28,7 +28,7 @@ from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QColor, QPalette, QT
 from config import load_config, save_config
 from hwid_utils import NO_EXPIRY, get_hwid, register_trial_key, fetch_trial_key_expiry
 from hook_server import HookServer
-from translator import create_translator, KeyExpiredError, RateLimitError
+from translator import BaseTranslator, create_translator, KeyExpiredError, RateLimitError
 from provider_registry import (
     iter_provider_options,
     provider_connection_signature,
@@ -70,6 +70,18 @@ from i18n import (
     set_language,
     tr,
 )
+
+
+def _console_print(message: str):
+    """Keep rich console logs without letting a legacy code page abort work."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        fallback = message.replace("✅", "[OK]").replace("❌", "[INVALID]")
+        print(fallback.encode(encoding, errors="replace").decode(encoding))
+
+
 # 尝试从 ../assets 或 bundling 路径查找 hook script
 if getattr(sys, 'frozen', False):
     HOOK_SCRIPT = os.path.join(sys._MEIPASS, "_translator_hook.rpy")
@@ -82,6 +94,7 @@ RPGMAKER_TOOL_FEATURES = (
     "textSpeed",
     "messageOpacity",
     "autoAdvance",
+    "dialogueRollback",
     "saveAnywhere",
     "moveSpeed",
     "through",
@@ -90,7 +103,7 @@ RPGMAKER_TOOL_FEATURES = (
 )
 RPGMAKER_TOOL_DEFAULT_FEATURES = {key: key == "textSpeed" for key in RPGMAKER_TOOL_FEATURES}
 RPGMAKER_TOOL_LEGACY_FEATURES = {
-    key: key not in {"messageOpacity", "autoAdvance", "saveAnywhere"}
+    key: key not in {"messageOpacity", "autoAdvance", "dialogueRollback", "saveAnywhere"}
     for key in RPGMAKER_TOOL_FEATURES
 }
 
@@ -151,15 +164,15 @@ class MainWindow(QWidget):
     _cache_state_signal = pyqtSignal(bool)
     _latency_test_signal = pyqtSignal(object)
     SUPPORT_QQ_GROUP = "1058127921"
-    TRANSLATION_REPEAT_CHAR_LIMIT = 12
-    TRANSLATION_LENGTH_RATIO_LIMIT = 3.0
+    TRANSLATION_REPEAT_CHAR_LIMIT = BaseTranslator.TRANSLATION_REPEAT_CHAR_LIMIT
+    TRANSLATION_LENGTH_RATIO_LIMIT = BaseTranslator.TRANSLATION_LENGTH_RATIO_LIMIT
 
     def __init__(self):
         super().__init__()
         self.config = load_config()
         set_language(self.config.get("ui_language", "auto"), QApplication.instance())
 
-        version = self.config.get("version", "v1.5.3")
+        version = self.config.get("version", "v1.5.4")
         self.setWindowTitle(tr("app.title", version=version))
         self.resize(800, 10)
         self.setAcceptDrops(True)
@@ -174,6 +187,23 @@ class MainWindow(QWidget):
         self._inflight_meta = {}
         self._inflight_lock = threading.Lock()
         self._text_generation = 0
+        self._foreground_translation_pending = threading.Event()
+        self._foreground_translation_count = 0
+        self._branch_prefetch_condition = threading.Condition()
+        self._branch_prefetch_queue = []
+        self._branch_prefetch_queued_texts = set()
+        self._branch_prefetch_session = ""
+        self._branch_prefetch_menu = ""
+        self._branch_prefetch_version = -1
+        self._branch_prefetch_selected = None
+        self._branch_selection_tombstones = {}
+        self._latest_hook_state_session = ""
+        self._latest_hook_state_version = -1
+        self._branch_prefetch_epoch = 0
+        self._branch_cache_epoch = 0
+        self._branch_translator = None
+        self._branch_translator_generation = 0
+        self._branch_worker_stop = False
         self._current_game_exe = None
         self._current_game: GameTarget | None = None
         self._hook_session_id = ""
@@ -207,6 +237,12 @@ class MainWindow(QWidget):
 
         # 3. 核心服务启动
         self._setup_services()
+        self._branch_prefetch_worker_thread = threading.Thread(
+            target=self._branch_prefetch_worker,
+            name="RenpyLensBranchPrefetch",
+            daemon=True,
+        )
+        self._branch_prefetch_worker_thread.start()
         i18n_manager().language_changed.connect(self.retranslate_ui)
 
         self.translation_ready.connect(self._on_translation_ready)
@@ -256,6 +292,8 @@ class MainWindow(QWidget):
         }
 
     def _reset_hook_session_state(self):
+        if hasattr(self, "_branch_prefetch_condition"):
+            self._reset_branch_prefetch(discard_results=True)
         self._hook_session_ready = False
         self._hook_ready_event.clear()
         self._hook_runtime_ready = False
@@ -265,7 +303,313 @@ class MainWindow(QWidget):
         self._hook_runtime_ready = True
         self._hook_runtime_ready_event.set()
 
+    def _reset_branch_prefetch(self, discard_results: bool = False, rebuild_translator: bool = False):
+        with self._branch_prefetch_condition:
+            self._branch_prefetch_queue.clear()
+            self._branch_prefetch_queued_texts.clear()
+            self._branch_prefetch_session = ""
+            self._branch_prefetch_menu = ""
+            self._branch_prefetch_version = -1
+            self._branch_prefetch_selected = None
+            self._branch_selection_tombstones.clear()
+            self._latest_hook_state_session = ""
+            self._latest_hook_state_version = -1
+            self._branch_prefetch_epoch += 1
+            if discard_results:
+                self._branch_cache_epoch += 1
+            if rebuild_translator:
+                self._branch_translator_generation += 1
+            self._branch_prefetch_condition.notify_all()
+
+    def _branch_job_relevant(self, job: dict) -> bool:
+        if job.get("epoch") != self._branch_prefetch_epoch:
+            return False
+        if job.get("session_id") != self._branch_prefetch_session:
+            return False
+        if job.get("menu_id") != self._branch_prefetch_menu:
+            return False
+        selected = self._branch_prefetch_selected
+        return selected is None or int(job.get("choice_index", -1)) == selected
+
+    def _get_branch_translator(self):
+        generation = self._branch_translator_generation
+        translator = self._branch_translator
+        if translator is not None and getattr(translator, "_branch_generation", generation) == generation:
+            return translator
+        if translator is not None:
+            try:
+                translator.close()
+            except Exception:
+                pass
+        branch_config = dict(self.config)
+        with self._translator_lock:
+            primary = self.translator
+            shared_state = getattr(primary, "_rate_limit_state", None) if primary else None
+        if shared_state is not None:
+            branch_config["_shared_rate_limit_state"] = shared_state
+        branch_config["_rate_limit_priority"] = "background"
+        translator = create_translator(
+            branch_config.get("translation_engine", "builtin"),
+            branch_config,
+        )
+        translator._branch_generation = generation
+        self._branch_translator = translator
+        return translator
+
+    def _on_branch_prefetch_received(self, message: dict):
+        session_id = str(message.get("session_id") or "")
+        menu_id = str(message.get("menu_id") or "")
+        try:
+            version = int(message.get("state_version", -1))
+        except (TypeError, ValueError):
+            return
+        if not session_id or not menu_id or version < 0:
+            return
+
+        limit = max(1, int(self.config.get("prefetch_count", 5)))
+        linear = []
+        for item in (message.get("linear", []) or [])[:limit]:
+            text = str((item or {}).get("what", "") if isinstance(item, dict) else item).strip()
+            if text:
+                linear.append(text)
+
+        with self._branch_prefetch_condition:
+            if self._latest_hook_state_session and session_id != self._latest_hook_state_session:
+                return
+            if session_id == self._latest_hook_state_session and version < self._latest_hook_state_version:
+                return
+            if session_id == self._branch_prefetch_session and version < self._branch_prefetch_version:
+                return
+            same_menu = session_id == self._branch_prefetch_session and menu_id == self._branch_prefetch_menu
+            if not same_menu:
+                self._branch_prefetch_queue.clear()
+                self._branch_prefetch_queued_texts.clear()
+                self._branch_prefetch_epoch += 1
+                self._branch_prefetch_selected = None
+            self._branch_prefetch_session = session_id
+            self._branch_prefetch_menu = menu_id
+            self._branch_prefetch_version = version
+            tombstone = self._branch_selection_tombstones.get((session_id, menu_id))
+            if tombstone is not None and tombstone[0] >= version:
+                self._branch_prefetch_selected = tombstone[1]
+            epoch = self._branch_prefetch_epoch
+
+            for branch in message.get("branches", []) or []:
+                if not isinstance(branch, dict):
+                    continue
+                try:
+                    choice_index = int(branch.get("choice_index"))
+                except (TypeError, ValueError):
+                    continue
+                if self._branch_prefetch_selected is not None and choice_index != self._branch_prefetch_selected:
+                    continue
+                print(
+                    f"[BranchPrefetch] Prediction menu={menu_id} choice={choice_index} "
+                    f"dialogues={len(branch.get('items', []) or [])} "
+                    f"complete={branch.get('complete')} stop={branch.get('stop_reason')} "
+                    f"node={branch.get('stop_node')} error={branch.get('error', '')}"
+                )
+                items = []
+                choice = str(branch.get("choice") or "").strip()
+                if choice:
+                    items.append({"what": choice, "who": "", "entry_type": ENTRY_TYPE_CHOICE})
+                for raw_item in (branch.get("items", []) or [])[:limit]:
+                    if not isinstance(raw_item, dict):
+                        raw_item = {"what": raw_item}
+                    text = str(raw_item.get("what") or "").strip()
+                    if text:
+                        items.append({
+                            "what": text,
+                            "who": self._normalize_speaker(raw_item.get("who", "")),
+                            "entry_type": ENTRY_TYPE_DIALOGUE,
+                        })
+                queued_items = []
+                for item in items:
+                    key = (menu_id, choice_index, item["what"])
+                    if self.cache.get(item["what"]) is not None or key in self._branch_prefetch_queued_texts:
+                        continue
+                    self._branch_prefetch_queued_texts.add(key)
+                    queued_items.append(item)
+                if queued_items:
+                    self._branch_prefetch_queue.append({
+                        "session_id": session_id,
+                        "state_version": version,
+                        "menu_id": menu_id,
+                        "choice_index": choice_index,
+                        "items": queued_items,
+                        "keys": [(menu_id, choice_index, item["what"]) for item in queued_items],
+                        "linear": linear,
+                        "linear_deadline": time.monotonic() + 10.0,
+                        "epoch": epoch,
+                        "cache_epoch": self._branch_cache_epoch,
+                    })
+            self._branch_prefetch_condition.notify_all()
+        print(
+            f"[BranchPrefetch] menu={menu_id} version={version} "
+            f"branches={len(message.get('branches', []) or [])}"
+        )
+
+    def _on_menu_selected(self, message: dict):
+        session_id = str(message.get("session_id") or "")
+        menu_id = str(message.get("menu_id") or "")
+        try:
+            choice_index = int(message.get("choice_index"))
+            version = int(message.get("state_version", -1))
+        except (TypeError, ValueError):
+            return
+        if not session_id or not menu_id or version < 0:
+            return
+        with self._branch_prefetch_condition:
+            if self._latest_hook_state_session and session_id != self._latest_hook_state_session:
+                return
+            matches_active_menu = (
+                session_id == self._branch_prefetch_session
+                and menu_id == self._branch_prefetch_menu
+                and version == self._branch_prefetch_version
+            )
+            if (
+                not matches_active_menu
+                and session_id == self._latest_hook_state_session
+                and version < self._latest_hook_state_version
+            ):
+                return
+            self._latest_hook_state_session = session_id
+            self._latest_hook_state_version = max(self._latest_hook_state_version, version)
+            self._branch_selection_tombstones[(session_id, menu_id)] = (version, choice_index)
+            if len(self._branch_selection_tombstones) > 16:
+                oldest = next(iter(self._branch_selection_tombstones))
+                self._branch_selection_tombstones.pop(oldest, None)
+            if session_id != self._branch_prefetch_session or menu_id != self._branch_prefetch_menu:
+                return
+            self._branch_prefetch_selected = choice_index
+            kept = []
+            self._branch_prefetch_queued_texts.clear()
+            for job in self._branch_prefetch_queue:
+                if int(job.get("choice_index", -1)) == choice_index:
+                    kept.append(job)
+                    self._branch_prefetch_queued_texts.update(job.get("keys", []))
+            self._branch_prefetch_queue[:] = kept
+            self._branch_prefetch_condition.notify_all()
+        print(f"[BranchPrefetch] Converged menu={menu_id} choice={choice_index}")
+
+    def _observe_hook_state(self, message: dict):
+        """Track Ren'Py message order so late branch packets cannot revive an old route."""
+        session_id = str(message.get("session_id") or "")
+        if not session_id:
+            return
+        try:
+            version = int(message.get("state_version", -1))
+        except (TypeError, ValueError):
+            return
+        if version < 0:
+            return
+        with self._branch_prefetch_condition:
+            if self._latest_hook_state_session and session_id != self._latest_hook_state_session:
+                return
+            self._latest_hook_state_session = session_id
+            self._latest_hook_state_version = max(self._latest_hook_state_version, version)
+
+    def _branch_prefetch_worker(self):
+        while True:
+            with self._branch_prefetch_condition:
+                while not self._branch_prefetch_queue and not self._branch_worker_stop:
+                    self._branch_prefetch_condition.wait()
+                if self._branch_worker_stop:
+                    return
+                job = self._branch_prefetch_queue.pop(0)
+                for key in job.get("keys", []):
+                    self._branch_prefetch_queued_texts.discard(key)
+                relevant = self._branch_job_relevant(job)
+            if not relevant:
+                continue
+
+            while self._foreground_translation_pending.is_set():
+                with self._branch_prefetch_condition:
+                    if self._branch_worker_stop or not self._branch_job_relevant(job):
+                        break
+                time.sleep(0.02)
+            with self._branch_prefetch_condition:
+                if self._branch_worker_stop or not self._branch_job_relevant(job):
+                    continue
+
+            missing_linear = [text for text in job.get("linear", []) if self.cache.get(text) is None]
+            if missing_linear and time.monotonic() < job.get("linear_deadline", 0):
+                with self._branch_prefetch_condition:
+                    self._branch_prefetch_queue.insert(0, job)
+                    self._branch_prefetch_queued_texts.update(job.get("keys", []))
+                    self._branch_prefetch_condition.wait(timeout=0.05)
+                continue
+
+            owner = (
+                f"branch-prefetch:{job['session_id']}:{job['menu_id']}:"
+                f"{job['choice_index']}:{job['state_version']}"
+            )
+            claimed = []
+            claimed_items = []
+            with self._inflight_lock:
+                for item in job.get("items", []):
+                    text = item["what"]
+                    if self.cache.get(text) is None and text not in self._inflight_texts:
+                        claimed.append(text)
+                        claimed_items.append(item)
+                self._mark_inflight(claimed, owner=owner, gen=job["state_version"])
+            if not claimed:
+                continue
+
+            try:
+                t_started = time.perf_counter()
+                translator = self._get_branch_translator()
+                t_api_start = time.perf_counter()
+                results = translator.translate_batch(
+                    claimed,
+                    source_lang=self.config["source_lang"],
+                    target_lang=self.config["target_lang"],
+                    game_title=self.game_title,
+                )
+                t_api_end = time.perf_counter()
+                guard = self._guard_batch_translation_results(claimed, results, "BranchPrefetchGuard")
+                if job.get("cache_epoch") == self._branch_cache_epoch:
+                    item_map = {item["what"]: item for item in claimed_items}
+                    for record in guard["accepted_results"]:
+                        source = record["source"]
+                        translation = record["translation"]
+                        if translation and not translation.startswith("[翻译失败"):
+                            item = item_map[source]
+                            self.cache.save_machine_translation_if_absent(
+                                source,
+                                translation,
+                                entry_type=item["entry_type"],
+                                speaker=item.get("who", ""),
+                            )
+                            self._sync_clear_cache_button()
+                            _console_print(
+                                f"[Prefetch] ✅ {source[:30]} -> {translation[:30]} "
+                                f"(branch choice={job['choice_index']})"
+                            )
+                print(
+                    f"[BranchPrefetch] Finished menu={job['menu_id']} "
+                    f"choice={job['choice_index']} items={len(claimed)}"
+                )
+                if self.config.get("enable_timing_log", False):
+                    print(
+                        f"[Timing][Prefetch] Branch menu={job['menu_id']} "
+                        f"choice={job['choice_index']} items={len(claimed)} | "
+                        f"API call: {(t_api_end - t_api_start) * 1000:.0f}ms | "
+                        f"Total: {(time.perf_counter() - t_started) * 1000:.0f}ms"
+                    )
+            except RateLimitError as error:
+                self._status_signal.emit(tr("status.prefetch_paused", detail=error))
+            except KeyExpiredError:
+                self._key_expired_signal.emit()
+            except Exception as error:
+                print(f"[BranchPrefetch] Translation failed: {error}")
+            finally:
+                with self._inflight_lock:
+                    self._clear_inflight(claimed, owner=owner)
+
     def _rebuild_translator(self, clear_cache: bool = False):
+        if hasattr(self, "_branch_prefetch_condition"):
+            self._reset_branch_prefetch(discard_results=True, rebuild_translator=True)
         engine = self.config.get("translation_engine", "builtin")
         with self._translator_lock:
             old_translator = self.translator
@@ -560,7 +904,7 @@ class MainWindow(QWidget):
         selection_fields_layout.addLayout(model_layout)
         translation_selection_layout.addLayout(selection_fields_layout, 1)
 
-        self.rpgmaker_qol_container = QWidget()
+        self.rpgmaker_qol_container = QWidget(self)
         qol_layout = QHBoxLayout(self.rpgmaker_qol_container)
         qol_layout.setContentsMargins(0, 0, 0, 0)
         qol_layout.setSpacing(6)
@@ -1132,6 +1476,10 @@ class MainWindow(QWidget):
     def _display_overlay_text(self, text: str):
         self.overlay.set_text(text)
         self._refresh_overlay_edit_context()
+        sources = [self._last_displayed_data.get("what", "")]
+        sources.extend(self._last_displayed_data.get("choices", []))
+        translation_ready = all(self.cache.get(source) for source in sources if source)
+        self.overlay.auto_copy_display(text, translation_ready)
 
     def _build_overlay_edit_context(self):
         dialogue_target = None
@@ -1152,7 +1500,7 @@ class MainWindow(QWidget):
                     else self._last_displayed_data.get("translation", "")
                 ),
                 "entry_type": ENTRY_TYPE_DIALOGUE,
-                "speaker": self._normalize_speaker(who or entry.get("speaker", "")),
+                "speaker": who,
             }
 
         for index, choice in enumerate(choices):
@@ -1185,9 +1533,7 @@ class MainWindow(QWidget):
         italic = self._last_displayed_data.get("italic", False)
         choices = list(self._last_displayed_data.get("choices", []))
         dialogue_entry = self.cache.get_entry(what) if what else None
-        render_who = self._normalize_speaker(
-            who or (dialogue_entry.get("speaker", "") if dialogue_entry is not None else "")
-        )
+        render_who = who
         current_translation = (
             dialogue_entry.get("translation", "")
             if dialogue_entry is not None
@@ -1501,7 +1847,7 @@ class MainWindow(QWidget):
             self.engine_combo.blockSignals(False)
 
     def retranslate_ui(self, *_):
-        version = self.config.get("version", "v1.5.3")
+        version = self.config.get("version", "v1.5.4")
         self.setWindowTitle(tr("app.title", version=version))
         self.btn_settings.setText(tr("main.settings"))
         self.btn_pin.setText(tr("common.pin"))
@@ -1614,6 +1960,14 @@ class MainWindow(QWidget):
 
         if translator_needs_rebuild:
             self._rebuild_translator(clear_cache=clear_cache)
+        elif previous_config.get("prefetch_count") != self.config.get("prefetch_count"):
+            self._reset_branch_prefetch(discard_results=False)
+
+        if previous_config.get("prefetch_count") != self.config.get("prefetch_count"):
+            self._send_hook_control_command(
+                "set_prefetch_count",
+                {"count": max(1, int(self.config.get("prefetch_count", 5)))},
+            )
 
         self.node_combo.blockSignals(True)
         self.node_combo.clear()
@@ -1749,8 +2103,7 @@ class MainWindow(QWidget):
             # 同步更新 UI 文本框
             self.key_input.setText(key)
             # 重建翻译器以使用新 Key
-            engine = self.config.get("translation_engine", "builtin")
-            self.translator = create_translator(engine, self.config)
+            self._rebuild_translator(clear_cache=False)
             self._set_status("status.trial_ready")
             self._update_api_expiry_label()
             self.btn_refresh_expiry.setEnabled(True)
@@ -2268,6 +2621,7 @@ class MainWindow(QWidget):
         server.message_received.connect(self._on_hook_message_received)
 
     def _start_hook_server(self):
+        kill_port_process(self.config["socket_port"])
         self.server = HookServer(port=self.config["socket_port"])
         if self._current_game and self._current_game.engine != ENGINE_RENPY:
             self.server.set_expected_session(self._hook_session_id)
@@ -2388,7 +2742,10 @@ class MainWindow(QWidget):
             truncated = True
             cutoff_index = min(index for _, index in candidates)
             reason = "+".join(rule for rule, index in candidates if index == cutoff_index)
-            clean_translation = clean_translation[:cutoff_index].rstrip()
+            # Never turn a degenerate response into an apparently successful
+            # partial translation. The shared translator normally retries it;
+            # this final boundary only prevents a bad result from being cached.
+            clean_translation = ""
 
         return {
             "source": str(source_text or ""),
@@ -2431,7 +2788,7 @@ class MainWindow(QWidget):
                 ]
                 preview = record["source_clean"] or record["source"]
                 print(
-                    f"[{log_prefix}] Truncated item {index + 1}/{len(source_texts)} "
+                    f"[{log_prefix}] Rejected item {index + 1}/{len(source_texts)} "
                     f"({record['reason']}) src='{preview[:30]}' "
                     f"src_len={record['source_length']} out_len={record['translation_length']} "
                     f"cut={record['cutoff_index']} deferred={len(deferred_sources)}"
@@ -2889,10 +3246,23 @@ class MainWindow(QWidget):
             self._screen_text_active = bool((message or {}).get("screen_text", False))
             self.overlay.set_screen_text_mode(self._screen_text_active)
 
+        if msg_type == "current":
+            self._observe_hook_state(message)
+
         if msg_type == "hook_ready":
+            hook_session = str(message.get("session_id") or "")
+            if hook_session and hook_session != self._latest_hook_state_session:
+                self._reset_branch_prefetch(discard_results=False)
+                with self._branch_prefetch_condition:
+                    self._latest_hook_state_session = hook_session
             self._hook_session_ready = True
             self._hook_ready_event.set()
             print(f"[Hook] Hook ready on control port {message.get('control_port', '')}")
+            if message.get("branch_prefetch"):
+                self._send_hook_control_command(
+                    "set_prefetch_count",
+                    {"count": max(1, int(self.config.get("prefetch_count", 5)))},
+                )
             return
 
         if msg_type in {"runtime_ready", "current"}:
@@ -2904,6 +3274,31 @@ class MainWindow(QWidget):
                 print("[Hook] Runtime ready for bulk scan")
             if msg_type == "runtime_ready":
                 return
+
+        if msg_type == "branch_prefetch":
+            self._on_branch_prefetch_received(message)
+            return
+
+        if msg_type == "menu_selected":
+            self._on_menu_selected(message)
+            return
+
+        if msg_type == "route_invalidated":
+            session_id = str(message.get("session_id") or "")
+            try:
+                version = int(message.get("state_version", -1))
+            except (TypeError, ValueError):
+                return
+            with self._branch_prefetch_condition:
+                if self._latest_hook_state_session and session_id != self._latest_hook_state_session:
+                    return
+                if version < self._latest_hook_state_version:
+                    return
+            self._reset_branch_prefetch(discard_results=False)
+            with self._branch_prefetch_condition:
+                self._latest_hook_state_session = session_id
+                self._latest_hook_state_version = version
+            return
 
         job_id = str((message or {}).get("job_id") or "").strip()
         with self._bulk_job_lock:
@@ -3247,6 +3642,7 @@ class MainWindow(QWidget):
 
     def _on_clear_cache(self):
         """清除当前游戏的翻译缓存"""
+        self._reset_branch_prefetch(discard_results=True)
         self.cache.clear()
         self.btn_clear_cache.setEnabled(False)
         self._refresh_workbench_entries()
@@ -3444,6 +3840,8 @@ class MainWindow(QWidget):
         self._update_model_combo()
 
         # 异步切换翻译器，避免阻塞 UI
+        if hasattr(self, "_branch_prefetch_condition"):
+            self._reset_branch_prefetch(discard_results=True, rebuild_translator=True)
         old_translator = self.translator
         engine_name = self.engine_combo.currentText()
         model_name = self.model_combo.currentText()
@@ -3712,8 +4110,11 @@ class MainWindow(QWidget):
                     choice_translations=display_choices,
                 )
             )
+            with self._branch_prefetch_condition:
+                self._foreground_translation_count += 1
+                self._foreground_translation_pending.set()
             threading.Thread(
-                target=self._translate_batch_with_current,
+                target=self._run_current_translation,
                 args=(who, what, choices, menu_active, gen, italic), daemon=True
             ).start()
 
@@ -3725,6 +4126,16 @@ class MainWindow(QWidget):
     def _preview_text(self, text: str, limit: int = 60) -> str:
         text = str(text or "").replace("\n", " ").strip()
         return text[:limit]
+
+    def _run_current_translation(self, *args):
+        try:
+            self._translate_batch_with_current(*args)
+        finally:
+            with self._branch_prefetch_condition:
+                self._foreground_translation_count = max(0, self._foreground_translation_count - 1)
+                if not self._foreground_translation_count:
+                    self._foreground_translation_pending.clear()
+                self._branch_prefetch_condition.notify_all()
 
     def _mark_inflight(self, texts: list[str], owner: str, gen: int):
         now = time.perf_counter()
@@ -3789,7 +4200,28 @@ class MainWindow(QWidget):
         finishes. Stealing it here lets both workers translate the same source.
         The bounded waits below already take over if the owner exits or stalls.
         """
-        return 0
+        released = 0
+        selected = self._branch_prefetch_selected
+        menu_id = self._branch_prefetch_menu
+        for text in texts:
+            meta = self._inflight_meta.get(text, {})
+            owner = str(meta.get("owner") or "")
+            if not owner.startswith("branch-prefetch:"):
+                continue
+            selected_owner = bool(
+                selected is not None
+                and f":{menu_id}:{selected}:" in owner
+            )
+            if selected_owner:
+                continue
+            self._inflight_texts.discard(text)
+            self._inflight_meta.pop(text, None)
+            released += 1
+            print(
+                f"[Inflight] Foreground took over unrelated branch text "
+                f"gen={gen} text={self._preview_text(text)}"
+            )
+        return released
 
     def _translate_batch_with_current(
         self,
@@ -3822,7 +4254,8 @@ class MainWindow(QWidget):
         # 当前页面必须先保证当前句与菜单选项（required）可得
         required_texts = []
         seen_required = set()
-        if what and self.cache.get(what) is None:
+        current_missing = bool(what and self.cache.get(what) is None)
+        if current_missing:
             required_texts.append(what)
             seen_required.add(what)
         for choice in choices:
@@ -3893,8 +4326,8 @@ class MainWindow(QWidget):
             # 超时仍未就绪 → 继续走翻译流程
 
         t_build_start = _time.perf_counter()
-        # 构建实时批次：当前句/选项优先，并把可用的连续后文放进同一请求。
-        # 这样当前翻译能利用紧邻语境，且无需先做一个独立的单句请求。
+        # 当前句缺失时只翻译当前页面所需内容，尽快把结果交给用户。
+        # 当前句已缓存但仍需处理选项时，可以顺带补充一小批后文。
         seen = set()
         with self._inflight_lock:
             for text in required_texts:
@@ -3904,14 +4337,13 @@ class MainWindow(QWidget):
                     batch_texts.append(text)
                     seen.add(text)
 
-            prefetch_count = max(0, int(self.config.get("prefetch_count", 5)))
-            for item in self._latest_prefetch_items[:prefetch_count]:
-                text = str(item.get("what", "") or "").strip()
-                if text and text not in seen \
-                        and self.cache.get(text) is None \
-                        and text not in self._inflight_texts:
-                    batch_texts.append(text)
-                    seen.add(text)
+            if not current_missing:
+                _, adaptive_items = self._adaptive_prefetch_items_locked()
+                for item in adaptive_items:
+                    text = str(item.get("what", "") or "").strip()
+                    if text and text not in seen:
+                        batch_texts.append(text)
+                        seen.add(text)
 
             # 标记 inflight（在锁内完成，防止其他线程同时标记）
             self._mark_inflight(batch_texts, owner="batch-current", gen=gen)
@@ -4035,9 +4467,9 @@ class MainWindow(QWidget):
                             speaker=speaker_for_text,
                         )
                         self._sync_clear_cache_button()
-                    print(f"[Batch] ✅ {text[:30]} -> {clean_translation[:30]}")
+                    _console_print(f"[Batch] ✅ {text[:30]} -> {clean_translation[:30]}")
                 else:
-                    print(f"[Batch] ❌ {text[:30]} -> {clean_translation[:30]}")
+                    _console_print(f"[Batch] ❌ {text[:30]} -> {clean_translation[:30]}")
             t_parse_end = _time.perf_counter()
 
             # 只有仍是最新文本时才显示到弹窗
@@ -4142,45 +4574,58 @@ class MainWindow(QWidget):
                 self._clear_inflight(batch_texts, owner="batch-current")
                 self._clear_inflight(batch_texts, owner="batch-current-retry")
 
+    def _adaptive_prefetch_items_locked(self) -> tuple[int, list[dict]]:
+        """根据前方连续可用缓存量决定下一批预取内容；调用方需持有 inflight 锁。"""
+        prefetch_count = max(1, int(self.config.get("prefetch_count", 5)))
+        check_range = self._latest_prefetch_items[:prefetch_count]
+        cached_ahead = 0
+
+        for item in check_range:
+            text = str(item.get("what", "") or "").strip()
+            if text and self.cache.get(text) is not None:
+                cached_ahead += 1
+                continue
+            break
+
+        if cached_ahead >= len(check_range):
+            return cached_ahead, []
+
+        frontier_text = str(check_range[cached_ahead].get("what", "") or "").strip()
+        if frontier_text in self._inflight_texts:
+            return cached_ahead, []
+
+        remaining = prefetch_count - cached_ahead
+        # One small first batch makes the nearest lines available quickly.
+        # Once any consecutive cache exists, fill the rest in one request so
+        # network round trips do not dominate prefetch latency.
+        batch_size = min(3, remaining) if cached_ahead == 0 else remaining
+        batch = []
+        for item in self._latest_prefetch_items[cached_ahead:]:
+            text = str(item.get("what", "") or "").strip()
+            if not text or self.cache.get(text) is not None or text in self._inflight_texts:
+                continue
+            batch.append(item)
+            if len(batch) >= batch_size:
+                break
+        return cached_ahead, batch
+
     def _ensure_prefetch_buffer(self, gen: int):
-        """检查后续缓存是否满 prefetch_count 条，不满则从未翻译处开始翻译"""
+        """按连续可用缓存量自适应补充后续翻译，prefetch_count 作为缓存和批量上限。"""
         if self._is_bulk_job_active():
             return
-        items = self._latest_prefetch_items
-        if not items:
+        if not self._latest_prefetch_items:
             return
-
-        prefetch_count = self.config.get("prefetch_count", 5)
-
-        check_range = items[:prefetch_count]
-        first_uncached_idx = -1
 
         with self._inflight_lock:
-            for i, item in enumerate(check_range):
-                text = item.get("what", "")
-                if text:
-                    is_cached = self.cache.get(text) is not None
-                    is_inflight = text in self._inflight_texts
-                    if not is_cached and not is_inflight:
-                        first_uncached_idx = i
-                        break
-
-        if first_uncached_idx == -1:
-            return
-
-        batch_to_translate = items[first_uncached_idx : first_uncached_idx + prefetch_count]
-        texts_to_translate = [item.get("what", "") for item in batch_to_translate]
-
-        if not texts_to_translate:
-            return
-
-        # 标记整个 batch 为 inflight
-        with self._inflight_lock:
+            cached_ahead, batch_to_translate = self._adaptive_prefetch_items_locked()
+            if not batch_to_translate:
+                return
+            texts_to_translate = [item.get("what", "") for item in batch_to_translate]
             self._mark_inflight(texts_to_translate, owner="prefetch", gen=gen)
 
         print(
-            f"[Prefetch] Cache insufficient (item {first_uncached_idx+1} not ready), "
-            f"triggering batch translation of {len(texts_to_translate)} items "
+            f"[Prefetch] {cached_ahead} consecutive cached, "
+            f"translating adaptive batch of {len(texts_to_translate)} items "
             f"(gen={gen}, first={self._preview_text(texts_to_translate[0])})"
         )
         threading.Thread(
@@ -4233,6 +4678,7 @@ class MainWindow(QWidget):
             return
 
         self._prefetch_running = True
+        made_progress = False
         try:
             t_api_start = _time.perf_counter()
             with self._translator_lock:
@@ -4268,10 +4714,11 @@ class MainWindow(QWidget):
                             entry_type=ENTRY_TYPE_DIALOGUE,
                             speaker=prefetch_item_map.get(text, {}).get("who", ""),
                         )
+                        made_progress = self.cache.get(text) is not None or made_progress
                         self._sync_clear_cache_button()
-                    print(f"[Prefetch] ✅ {text[:30]} -> {clean_translation[:30]}")
+                    _console_print(f"[Prefetch] ✅ {text[:30]} -> {clean_translation[:30]}")
                 else:
-                    print(f"[Prefetch] ❌ {text[:30]} -> {clean_translation[:30]}")
+                    _console_print(f"[Prefetch] ❌ {text[:30]} -> {clean_translation[:30]}")
 
             if timing_enabled:
                 t_end = _time.perf_counter()
@@ -4302,6 +4749,8 @@ class MainWindow(QWidget):
             self._prefetch_running = False
             with self._inflight_lock:
                 self._clear_inflight(texts, owner="prefetch")
+            if made_progress and self._text_generation == gen and not self._is_bulk_job_active():
+                self._ensure_prefetch_buffer(gen)
 
     def _on_prefetch_received(self, items: list):
         """存储预取列表（hook每次发来最新的后续对话）"""
@@ -4461,6 +4910,19 @@ class MainWindow(QWidget):
                 return
         # 保存配置
         save_config(self.config)
+        with self._branch_prefetch_condition:
+            self._branch_worker_stop = True
+            self._branch_prefetch_queue.clear()
+            self._branch_prefetch_condition.notify_all()
+        branch_worker = getattr(self, "_branch_prefetch_worker_thread", None)
+        if branch_worker:
+            branch_worker.join(timeout=1.0)
+        branch_translator = self._branch_translator
+        if branch_translator and (not branch_worker or not branch_worker.is_alive()):
+            try:
+                branch_translator.close()
+            except Exception:
+                pass
         # 清理 hook
         if self._current_game:
             uninstall_hook(self._current_game)
@@ -4476,32 +4938,44 @@ class MainWindow(QWidget):
 
 def kill_port_process(port: int):
     """杀死占用指定端口的旧进程"""
+    # 正常启动时端口空闲，无需启动 netstat 扫描整台机器的连接。
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            if os.name == "nt":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            pass
+        else:
+            return
+
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
         result = subprocess.run(
             ["netstat", "-ano"],
             capture_output=True, text=True, timeout=5,
+            creationflags=creationflags,
         )
         my_pid = os.getpid()
         pids_to_kill = set()
         for line in result.stdout.splitlines():
-            if f":{port}" in line and "LISTENING" in line:
-                parts = line.split()
-                if len(parts) >= 5:
-                    pid = int(parts[-1])
-                    if pid != my_pid and pid != 0:
-                        pids_to_kill.add(pid)
+            parts = line.split()
+            if (len(parts) >= 5 and parts[0] == "TCP"
+                    and parts[1].rsplit(":", 1)[-1] == str(port)
+                    and parts[3] == "LISTENING"):
+                pid = int(parts[-1])
+                if pid != my_pid and pid != 0:
+                    pids_to_kill.add(pid)
         for pid in pids_to_kill:
             print(f"[Cleanup] Killing old process occupying port {port}, PID={pid}")
             subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                           capture_output=True, timeout=5)
+                           capture_output=True, timeout=5,
+                           creationflags=creationflags)
     except Exception as e:
         print(f"[Cleanup] Port cleanup failed (can be ignored): {e}")
 
 
 def main():
-    # 先清理可能残留的旧进程
-    kill_port_process(19876)
-
     # 设置任务栏和窗口图标
     try:
         import ctypes

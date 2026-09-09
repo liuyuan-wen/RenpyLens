@@ -16,7 +16,7 @@ else:
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "v1.5.3",
+    "version": "v1.5.4",
     "ui_language": "auto",
     "rpgmaker_qol_games": {},
     "rpgmaker_qol_features": {},
@@ -99,6 +99,8 @@ DEFAULT_CONFIG = {
     "socket_port": 19876,
     "font_size": 22,
     "overlay_opacity": 1.0,
+    "auto_copy_original": False,
+    "auto_copy_translation": False,
     "overlay_x": 100,
     "overlay_y": 100,
     "overlay_width": 800,

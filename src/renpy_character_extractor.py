@@ -37,7 +37,7 @@ _ASSIGNMENT_PREFIX_RE = re.compile(
     r"(?:(?:define|default)\s+)?([A-Za-z_]\w*)\s*=\s*(?:[A-Za-z_]\w*\s*\.\s*)*$"
 )
 _INTERPOLATION_RE = re.compile(
-    r"\[([A-Za-z_]\w*)(?:![^\]:]+)?(?::[^\]]*)?\]"
+    r"(?<!\[)\[([A-Za-z_]\w*)(?:![^\]:]+)?(?::[^\]]*)?\]"
 )
 
 
@@ -400,14 +400,33 @@ def _definitions_from_source(
 
         expression = ast.get_source_segment(f"_character({arguments})", name_node) or ""
         value = _static_string(name_node, constants)
-        dynamic = token.string == "DynamicCharacter"
-        if dynamic and isinstance(name_node, ast.Constant) and isinstance(name_node.value, str):
-            value = constants.get(name_node.value)
+        dynamic = token.string == "DynamicCharacter" or any(
+            keyword.arg == "dynamic" and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True for keyword in call.keywords
+        )
+        if dynamic and value is not None:
+            try:
+                value = _static_string(ast.parse(value, mode="eval").body, constants)
+            except SyntaxError:
+                value = None
+        # Character applies name affixes before displaying the label.
+        for keyword in call.keywords:
+            if keyword.arg in {"who_prefix", "who_suffix"} and value is not None:
+                affix = _static_string(keyword.value, constants)
+                if affix is None:
+                    value = None
+                elif keyword.arg == "who_prefix":
+                    value = affix + value
+                else:
+                    value += affix
         if value is not None:
             value, interpolated = _resolve_interpolation(value, constants)
             dynamic = dynamic or interpolated
-            value = value.strip()
-            if not value:
+            # Attribute/index expressions also require runtime state.
+            unresolved = re.search(r"(?<!\[)\[(?!\[)[^\]]+\]", value)
+            dynamic = dynamic or bool(unresolved)
+            value = re.sub(r"\{[^{}]*\}", "", value).replace("[[", "[").strip()
+            if unresolved or not value:
                 value = None
 
         absolute_call = _absolute_offset(offsets, token.start)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import re
 
 from PyQt5.QtWidgets import (
     QWidget,
@@ -12,16 +13,38 @@ from PyQt5.QtWidgets import (
     QApplication,
     QMenu,
     QAction,
+    QWidgetAction,
+    QCheckBox,
+    QStyle,
+    QStyleOptionButton,
     QTextEdit,
     QPushButton,
     QHBoxLayout,
     QScrollBar,
 )
-from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QPainter, QPixmap, QColor, QFontMetrics, QTextCursor
+from PyQt5.QtCore import QEvent, QPointF, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QFont, QPainter, QPen, QPixmap, QColor, QFontMetrics, QTextCursor
 import win32con
 import win32gui
 from i18n import manager as i18n_manager, tr
+
+
+class AutoCopyCheckBox(QCheckBox):
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        rect = self.style().subElementRect(QStyle.SE_CheckBoxIndicator, option, self)
+        painter = QPainter(self)
+        painter.fillRect(rect, QColor("#f5f5f5"))
+        painter.setPen(QColor("#888888"))
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        if self.isChecked():
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QPen(QColor("#202020"), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            points = [QPointF(rect.x() + rect.width() * x, rect.y() + rect.height() * y)
+                      for x, y in ((0.22, 0.50), (0.43, 0.72), (0.79, 0.27))]
+            painter.drawPolyline(*points)
 
 
 class OutlinedLabel(QLabel):
@@ -103,8 +126,6 @@ class OutlinedLabel(QLabel):
 
         text = text.replace("<b>", "").replace("</b>", "")
         text = text.replace("<div style='font-weight: 900;'>", "").replace("</div>", "")
-
-        import re
 
         tokens = re.split(r"(</i>|<i>)", text)
         char_list = []
@@ -278,6 +299,8 @@ class TranslationOverlay(QWidget):
     def __init__(self, config: dict):
         super().__init__()
         self.config = config
+        self._auto_copy_original = None
+        self._auto_copy_translation = None
         self._drag_pos = None
         self._is_resizing = False
         self._resize_edges = set()
@@ -541,9 +564,11 @@ class TranslationOverlay(QWidget):
         self.config_updated.emit(self.config)
 
     def _screen_limits(self) -> tuple[int, int]:
-        primary_screen = QApplication.primaryScreen()
-        if primary_screen:
-            geometry = primary_screen.availableGeometry()
+        screen = QApplication.screenAt(self.frameGeometry().center())
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen:
+            geometry = screen.availableGeometry()
             return geometry.width(), geometry.height()
         return 1920, 1080
 
@@ -962,6 +987,8 @@ class TranslationOverlay(QWidget):
         self._exit_edit_mode()
 
     def set_text(self, text: str):
+        text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"\n(?:[ \t]*\n)+", "\n", text)
         if self._editing_target:
             self._pending_text = text
             return
@@ -1003,6 +1030,59 @@ class TranslationOverlay(QWidget):
 
         return "\n".join(lines)
 
+    def auto_copy_display(self, text: str, translation_ready: bool):
+        original = self._original_text_for_clipboard()
+        if original != self._auto_copy_original:
+            self._auto_copy_original = original
+            self._auto_copy_translation = None
+            if original and self.config.get("auto_copy_original", False):
+                QApplication.clipboard().setText(original)
+        if not translation_ready or not original or not text:
+            return
+        if text != self._auto_copy_translation:
+            self._auto_copy_translation = text
+            if self.config.get("auto_copy_translation", False):
+                QApplication.clipboard().setText(text)
+
+    def _set_auto_copy(self, key: str, checked: bool):
+        self.config[key] = checked
+        self._save_config()
+
+    def _add_copy_menu_row(self, menu, title, key, copy_text, button_width):
+        # Resolve inherited menu attributes explicitly so Qt's class-specific
+        # button/checkbox defaults cannot replace them during style polishing.
+        menu_font = menu.font()
+        row_font = QFont(menu_font.family(), 10, menu_font.weight(), menu_font.italic())
+        if menu_font.pixelSize() > 0:
+            row_font.setPixelSize(menu_font.pixelSize())
+        else:
+            row_font.setPointSizeF(menu_font.pointSizeF())
+        action = QWidgetAction(menu)
+        action.setText(title)
+        row = QWidget(menu)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 12, 0)
+        button = QPushButton(title, row)
+        button.setFont(row_font)
+        button.setFixedWidth(button_width)
+        button.setStyleSheet(
+            "QPushButton { color: white; background: transparent; border: none; "
+            "text-align: left; padding: 5px 20px; }"
+            "QPushButton:hover, QPushButton:focus { background: #4a9eff; }"
+        )
+        checkbox = AutoCopyCheckBox(tr("overlay.auto_copy"), row)
+        checkbox.setFont(row_font)
+        checkbox.setStyleSheet("QCheckBox { color: white; spacing: 6px; }")
+        checkbox.setChecked(self.config.get(key, False))
+        checkbox.toggled.connect(lambda checked: self._set_auto_copy(key, checked))
+        action.triggered.connect(lambda: QApplication.clipboard().setText(copy_text()))
+        button.clicked.connect(action.trigger)
+        button.clicked.connect(menu.close)
+        layout.addWidget(button)
+        layout.addWidget(checkbox)
+        action.setDefaultWidget(row)
+        menu.addAction(action)
+
     def start_edit(self, target: dict | None):
         if not target:
             return
@@ -1031,7 +1111,7 @@ class TranslationOverlay(QWidget):
             screen_h = screen.height()
             width = self.config.get("overlay_width", 800)
             x = (screen_w - width) // 2
-            y = int(screen_h * 0.75)
+            y = int(screen_h * 0.70)
         else:
             x, y = 560, 800
 
@@ -1052,7 +1132,13 @@ class TranslationOverlay(QWidget):
         self.label.resize(max(1, width - outer_margins), self.label.height())
         _, content_height = self.label._get_text_layout()
         _, screen_height = self._screen_limits()
-        long_text = content_height > int(screen_height * self.LONG_TEXT_THRESHOLD_RATIO)
+        # Once this content needs a panel, resizing must not remove it.
+        text = self.label.text()
+        same_text = text == getattr(self, "_panel_text", None)
+        long_text = (same_text and self._long_text_mode) or (
+            content_height > int(screen_height * self.LONG_TEXT_THRESHOLD_RATIO)
+        )
+        self._panel_text = text
 
         self._long_text_mode = long_text
         self.label.set_long_text_mode(long_text)
@@ -1301,14 +1387,16 @@ class TranslationOverlay(QWidget):
             self._exec_context_menu(menu, pos)
             return
 
-        copy_translation_action = menu.addAction(tr("overlay.copy_translation"))
-        copy_translation_action.triggered.connect(
-            lambda: QApplication.clipboard().setText(self.label.text())
+        # Windows resolves the system menu font during polishing, which may
+        # differ from the application font returned by a newly created QMenu.
+        menu.ensurePolished()
+        copy_rows = (
+            (tr("overlay.copy_translation"), "auto_copy_translation", self.label.text),
+            (tr("overlay.copy_original"), "auto_copy_original", self._original_text_for_clipboard),
         )
-        copy_original_action = menu.addAction(tr("overlay.copy_original"))
-        copy_original_action.triggered.connect(
-            lambda: QApplication.clipboard().setText(self._original_text_for_clipboard())
-        )
+        button_width = max(menu.fontMetrics().horizontalAdvance(title) for title, _, _ in copy_rows) + 40
+        for title, key, copy_text in copy_rows:
+            self._add_copy_menu_row(menu, title, key, copy_text, button_width)
 
         if self._edit_context.get("dialogue"):
             menu.addSeparator()

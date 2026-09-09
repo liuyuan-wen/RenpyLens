@@ -68,8 +68,25 @@ class RateLimitError(Exception):
         return tr("rate.generic", retry=retry_hint)
 
 
+class TranslationRateLimitState:
+    """Coordinates request start times across foreground/background clients."""
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.condition = threading.Condition(self.lock)
+        self.last_call_time = 0.0
+        self.foreground_waiting = 0
+
+
 class BaseTranslator:
     """翻译器基类"""
+
+    TRANSLATION_REPEAT_CHAR_LIMIT = 12
+    TRANSLATION_LENGTH_RATIO_LIMIT = 3.0
+    _RETRY_QUALITY_INSTRUCTION = (
+        "\nRule:\nThe previous response was invalid. Translate the source once, "
+        "without repeating characters or padding the answer. Output only the translation."
+    )
 
     def __init__(self, config: dict):
         self.config = config
@@ -79,7 +96,8 @@ class BaseTranslator:
         self.batch_prompt = config.get("batch_prompt", "You are a game localization expert specializing in visual novels. You are currently localizing the game \"{game_title}\". LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text.")
         self.temperature = float(config.get("temperature", 0.3))
         self.api_timeout_seconds = max(10.0, float(config.get("api_timeout_seconds", 120)))
-        self._last_call_time = 0
+        self._rate_limit_state = config.get("_shared_rate_limit_state") or TranslationRateLimitState()
+        self._rate_limit_priority = config.get("_rate_limit_priority", "foreground")
         self._timing_enabled = config.get("enable_timing_log", False)
         self._keep_names = config.get("keep_original_names", True)
         self._name_instruction = "\nRule:\nKeep all character names EXACTLY as they appear in the source text. Do not translate or transliterate them. (Examples: Eileen -> Eileen, 桜 -> 桜, Артём -> Артём)."
@@ -95,11 +113,25 @@ class BaseTranslator:
 
     def _rate_limit(self, min_interval=0.5):
         """简单速率限制"""
-        now = time.time()
-        elapsed = now - self._last_call_time
-        if elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
-        self._last_call_time = time.time()
+        state = self._rate_limit_state
+        foreground = self._rate_limit_priority != "background"
+        with state.condition:
+            if foreground:
+                state.foreground_waiting += 1
+            try:
+                while True:
+                    if not foreground and state.foreground_waiting:
+                        state.condition.wait(timeout=0.05)
+                        continue
+                    remaining = min_interval - (time.time() - state.last_call_time)
+                    if remaining <= 0:
+                        state.last_call_time = time.time()
+                        return
+                    state.condition.wait(timeout=remaining)
+            finally:
+                if foreground:
+                    state.foreground_waiting -= 1
+                    state.condition.notify_all()
 
     def _clean_result(self, text: str) -> str:
         """清理 LLM 输出中的编号前缀及常见的思考/推理标签 (CoT)"""
@@ -113,6 +145,82 @@ class BaseTranslator:
         # 清理编号前缀 (e.g., "1. ", "1)")
         text = re.sub(r'^\d+[.)\-]\s*', '', text.strip())
         return text.strip('"\' ')
+
+    @staticmethod
+    def _quality_text(text: str) -> str:
+        """Remove engine markup before comparing source and output lengths."""
+        clean_text = str(text or "")
+        for _ in range(3):
+            new_text = re.sub(r"\{[^{}]*\}", "", clean_text)
+            if new_text == clean_text:
+                break
+            clean_text = new_text
+        return re.sub(
+            r"\{/?(?:color|alpha|font|size|b|i|u|s|a|cps|w|p|nw|fast|k|rt|rb|space|vspace)\b[^}\n]*\}?",
+            "",
+            clean_text,
+            flags=re.IGNORECASE,
+        ).strip()
+
+    def _translation_quality(self, source_text: str, translation: str) -> dict:
+        source_clean = self._quality_text(source_text)
+        translation_clean = self._quality_text(translation)
+        repeat_char = ""
+        run_length = 0
+        last_char = ""
+        for char in translation_clean:
+            if char == last_char:
+                run_length += 1
+            else:
+                last_char = char
+                run_length = 1
+            if run_length > self.TRANSLATION_REPEAT_CHAR_LIMIT:
+                repeat_char = char
+                break
+
+        reasons = []
+        if repeat_char:
+            reasons.append("repeat_char")
+        if source_clean and len(translation_clean) > int(
+            len(source_clean) * self.TRANSLATION_LENGTH_RATIO_LIMIT
+        ):
+            reasons.append("length_ratio")
+        return {
+            "valid": not reasons,
+            "reason": "+".join(reasons),
+            "source_length": len(source_clean),
+            "translation_length": len(translation_clean),
+            "repeat_char": repeat_char,
+        }
+
+    def _log_quality_failure(self, quality: dict, context: str, final: bool = False):
+        outcome = "discarding" if final else "retrying once"
+        print(
+            f"[Translator] Invalid {context} output ({quality['reason']}), {outcome}: "
+            f"src_len={quality['source_length']} out_len={quality['translation_length']}"
+        )
+
+    def _single_system_prompt(self, target_lang: str, source_lang: str, game_title: str, text: str) -> str:
+        system_prompt = self.system_prompt.format(target_lang=target_lang, game_title=game_title)
+        if self._keep_names:
+            system_prompt += self._name_instruction.format(
+                target_lang=target_lang,
+                source_lang=source_lang,
+            )
+        if "⟦RL_" in str(text):
+            system_prompt += self._placeholder_instruction
+        return system_prompt
+
+    def _translate_once(self, text: str, system_prompt: str) -> str:
+        return self._clean_result(self._call_api(system_prompt, text))
+
+    def _recover_translation_once(self, text: str, system_prompt: str, context: str) -> str:
+        result = self._translate_once(text, system_prompt + self._RETRY_QUALITY_INSTRUCTION)
+        quality = self._translation_quality(text, result)
+        if quality["valid"]:
+            return result
+        self._log_quality_failure(quality, context, final=True)
+        return ""
 
     def _get_client(self) -> httpx.Client:
         """延迟获取/创建客户端"""
@@ -132,13 +240,13 @@ class BaseTranslator:
     def translate(self, text: str, source_lang=None, target_lang=None, game_title="Unknown Game") -> str:
         tl = target_lang or self.target_lang
         sl = source_lang or self.source_lang
-        system_prompt = self.system_prompt.format(target_lang=tl, game_title=game_title)
-        if self._keep_names:
-            system_prompt += self._name_instruction.format(target_lang=tl, source_lang=sl)
-        if "⟦RL_" in str(text):
-            system_prompt += self._placeholder_instruction
-        result = self._call_api(system_prompt, text)
-        return self._clean_result(result)
+        system_prompt = self._single_system_prompt(tl, sl, game_title, text)
+        result = self._translate_once(text, system_prompt)
+        quality = self._translation_quality(text, result)
+        if quality["valid"]:
+            return result
+        self._log_quality_failure(quality, "single translation")
+        return self._recover_translation_once(text, system_prompt, "single translation retry")
 
     def translate_batch(self, texts: list, source_lang=None, target_lang=None, game_title="Unknown Game") -> list:
         if len(texts) == 1:
@@ -155,6 +263,41 @@ class BaseTranslator:
         max_retries = 3
         for attempt in range(max_retries):
             result_text = self._call_api(system_prompt, numbered)
+            parsed_results = self._parse_batch_items(result_text)
+            invalid_indices = []
+            for index, translation in parsed_results.items():
+                if 1 <= index <= len(texts):
+                    quality = self._translation_quality(texts[index - 1], translation)
+                    if not quality["valid"]:
+                        invalid_indices.append(index - 1)
+
+            # A degenerate batch often consumes the rest of the response after
+            # one item. Preserve the valid prefix and recover that item and the
+            # missing tail individually instead of retrying the whole batch.
+            if invalid_indices:
+                first_invalid = min(invalid_indices)
+                bad_quality = self._translation_quality(
+                    texts[first_invalid], parsed_results[first_invalid + 1]
+                )
+                self._log_quality_failure(
+                    bad_quality,
+                    f"batch item {first_invalid + 1}/{len(texts)}",
+                )
+                return self._recover_batch_items(
+                    texts,
+                    parsed_results,
+                    sl,
+                    tl,
+                    game_title,
+                )
+
+            if not parsed_results:
+                raw_quality = self._translation_quality(numbered, self._clean_result(result_text))
+                if not raw_quality["valid"]:
+                    self._log_quality_failure(raw_quality, "unnumbered batch")
+                    return self._recover_batch_items(
+                        texts, {}, sl, tl, game_title
+                    )
             try:
                 # 尝试严格解析
                 return self._parse_batch(result_text, len(texts), strict=True)
@@ -180,17 +323,48 @@ class BaseTranslator:
                 ]
         return []
 
+    def _recover_batch_items(
+        self,
+        texts: list,
+        parsed_results: dict[int, str],
+        source_lang: str,
+        target_lang: str,
+        game_title: str,
+    ) -> list:
+        results = [""] * len(texts)
+        for index, text in enumerate(texts):
+            translation = parsed_results.get(index + 1, "")
+            if translation and self._translation_quality(texts[index], translation)["valid"]:
+                results[index] = translation
+                continue
+            system_prompt = self._single_system_prompt(
+                target_lang,
+                source_lang,
+                game_title,
+                text,
+            )
+            results[index] = self._recover_translation_once(
+                text,
+                system_prompt,
+                f"batch recovery item {index + 1}/{len(texts)}",
+            )
+        return results
+
+    def _parse_batch_items(self, result_text: str) -> dict[int, str]:
+        matches = re.findall(r'\[(\d+)\]\s*(.+?)(?=\[\d+\]|$)', result_text, re.DOTALL)
+        results = {}
+        for num, text in matches:
+            results[int(num)] = self._clean_result(text)
+        return results
+
     def _parse_batch(self, result_text: str, expected_count: int, strict: bool = False) -> list:
         """解析编号格式的批量翻译结果"""
-        matches = re.findall(r'\[(\d+)\]\s*(.+?)(?=\[\d+\]|$)', result_text, re.DOTALL)
-        if len(matches) >= expected_count:
-            results = {}
-            for num, text in matches:
-                results[int(num)] = self._clean_result(text)
+        results = self._parse_batch_items(result_text)
+        if all(index in results for index in range(1, expected_count + 1)):
             return [results.get(i+1, "") for i in range(expected_count)]
-        
+
         if strict:
-            raise ValueError(f"Expected {expected_count} items, parsed {len(matches)}")
+            raise ValueError(f"Expected {expected_count} items, parsed {len(results)}")
 
         # 降级：按行分割
         lines = [l.strip() for l in result_text.strip().split('\n') if l.strip()]

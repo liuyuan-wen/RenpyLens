@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import ast
 import os
 import re
 import sqlite3
@@ -23,11 +22,6 @@ def normalize_speaker_name(value: Any) -> str:
     if value is None:
         return ""
 
-    # Some Ren'Py games pass a displayable class as the `who` value. Its
-    # default representation is implementation detail, not a character name.
-    if isinstance(value, type):
-        return value.__name__
-
     if isinstance(value, (list, tuple, set)):
         parts = []
         seen = set()
@@ -42,24 +36,17 @@ def normalize_speaker_name(value: Any) -> str:
             return parts[0]
         return " / ".join(parts)
 
-    text = str(value or "").strip()
-    if not text or text in {"[]", "()", "{}", "None"}:
+    if not isinstance(value, str):
         return ""
 
-    if len(text) >= 2 and text[0] in "[(" and text[-1] in "])":
-        try:
-            parsed = ast.literal_eval(text)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, (list, tuple, set)):
-            return normalize_speaker_name(parsed)
+    text = value.strip()
+    if not text or text in {"[]", "()", "{}", "None"}:
+        return ""
 
     class_match = re.fullmatch(r"<(?:class|type) ['\"](?:[^'\"]*\.)?([^.'\"]+)['\"]>", text)
     if class_match:
         return ""
 
-    if re.search(r"\[[^\]]+\]", text):
-        return ""
     if re.search(r"\bobject at 0x[0-9a-f]+\b", text, re.IGNORECASE):
         return ""
     if re.match(r"^<(?:function|bound method|renpy\.)", text, re.IGNORECASE):
@@ -68,11 +55,6 @@ def normalize_speaker_name(value: Any) -> str:
         return ""
 
     text = re.sub(r"\s+", " ", text).strip()
-    if text.lower() == "extend":
-        return ""
-    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", text):
-        text = re.sub(r"_t$", "", text, flags=re.IGNORECASE)
-        text = text.replace("_", " ")
     return text
 
 

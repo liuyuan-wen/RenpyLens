@@ -694,7 +694,7 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout(tab)
         vbox.setSpacing(16)
         
-        version = self.config.get("version", "v1.5.3")
+        version = self.config.get("version", "v1.5.4")
         
         community_section = (
             f'<b>{tr("settings.community")}</b>1058127921<br>'

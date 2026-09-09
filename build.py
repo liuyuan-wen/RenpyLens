@@ -3,6 +3,57 @@ import subprocess
 import sys
 import shutil
 import argparse
+import tempfile
+
+
+def prepare_upx(project_dir, env, disabled=False):
+    """Use the bundled UPX explicitly; never silently build without it."""
+    if disabled:
+        return ["--noupx"]
+    upx_dir = os.path.abspath(project_dir)
+    upx_exe = os.path.join(upx_dir, "upx.exe")
+    # UPX reads default options from this variable. Builds should use only the
+    # compression options chosen by PyInstaller, regardless of the caller.
+    env.pop("UPX", None)
+    output = subprocess.check_output(
+        [upx_exe, "-V"], env=env, stderr=subprocess.STDOUT, text=True,
+    )
+    print(f"[UPX] {upx_exe}: {output.splitlines()[0]}")
+    return ["--upx-dir", upx_dir]
+
+
+def run_pyinstaller(command, env, require_upx):
+    """Keep a build log and reject real UPX failures.
+
+    PyInstaller reports binaries that UPX cannot compress as a warning
+    (``NotCompressibleException``); those individual files remain valid in
+    the executable and must not invalidate an otherwise successful build.
+    """
+    upx_failed = False
+    upx_noncompressible = False
+    upx_available = False
+    with open("build.log", "w", encoding="utf-8") as log:
+        with subprocess.Popen(
+            command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+        ) as process:
+            for line in process.stdout:
+                print(line, end="")
+                log.write(line)
+                if "UPX is available and will be used" in line:
+                    upx_available = True
+                if "Failed to run upx" in line or "Failed to upx strip" in line:
+                    upx_failed = True
+                if "NotCompressibleException" in line:
+                    upx_noncompressible = True
+            returncode = process.wait()
+    if require_upx and (
+        (upx_failed and not upx_noncompressible)
+        or (returncode == 0 and not upx_available)
+    ):
+        print("[ERROR] UPX 压缩失败，本次产物不视为成功打包。详情见 build.log。")
+        return returncode or 1
+    return returncode
 
 
 def find_python_runtime_dirs(python_exe):
@@ -59,9 +110,9 @@ def build_exe():
     sys.path.append(os.path.join(os.getcwd(), "src"))
     try:
         from config import DEFAULT_CONFIG
-        version = DEFAULT_CONFIG.get("version", "v1.5.3")
+        version = DEFAULT_CONFIG.get("version", "v1.5.4")
     except ImportError:
-        version = "v1.5.3"
+        version = "v1.5.4"
 
     print(f"开始打包 RenpyLens {version}...")
     
@@ -113,8 +164,12 @@ def build_exe():
         print(f"[WARN] 无法定位 Qt 翻译资源，将依赖 PyInstaller 默认收集: {exc}")
 
     # 构建 PyInstaller 命令
-    # UPX is enabled by default when upx.exe is available. Use --noupx to disable it.
-    upx_options = ["--noupx"] if args.noupx else ["--upx-dir", "."]
+    # Require the bundled compressor instead of silently falling back to no UPX.
+    try:
+        upx_options = prepare_upx(os.getcwd(), build_env, args.noupx)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"[ERROR] 无法运行项目目录中的 upx.exe: {exc}")
+        return 1
 
     command = [
         python_exe, "-m", "PyInstaller",
@@ -200,9 +255,14 @@ def build_exe():
                     ]
     
     print(f"运行命令: {' '.join(command)}")
-    result = subprocess.run(command, env=build_env)
+    build_env["PYTHONIOENCODING"] = "utf-8"
+    # Avoid sharing partially processed binaries or --clean operations with
+    # other builds. Each invocation starts with an empty compression cache.
+    with tempfile.TemporaryDirectory(prefix="renpylens-pyi-") as cache_dir:
+        build_env["PYINSTALLER_CONFIG_DIR"] = cache_dir
+        returncode = run_pyinstaller(command, build_env, require_upx=not args.noupx)
     
-    if result.returncode == 0:
+    if returncode == 0:
         print("\n[OK] 打包成功！")
         print(f"打包生成的文件 '{output_name}.exe' 已经直接放在当前代码目录下。")
         print(f"您可以直接双击 '{output_name}.exe' 运行，或者将其发给用户（无需安装 Python）。")
@@ -230,5 +290,7 @@ def build_exe():
         except Exception as e:
             print(f"[WARN] 删除 spec 文件失败: {e}")
 
+    return returncode
+
 if __name__ == "__main__":
-    build_exe()
+    sys.exit(build_exe())

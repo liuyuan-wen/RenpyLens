@@ -21,7 +21,7 @@ Use these communities for support, feedback, release news, and early feature pre
 
 - **Drag-and-drop setup:** Drop the game's `.exe` into RenpyLens and launch it with the translation bridge.
 - **Multiple game engines:** Supports Ren'Py and RPG Maker MV/MZ dialogue, speaker names, and visible choices.
-- **RPGM tools:** Useful tools like text speed, dialogue opacity, automatic advance, save anywhere, faster movement, no-clip, random encounters, and battle outcomes.
+- **RPGM tools:** Useful tools like text speed, dialogue opacity, dialogue rollback, faster movement, no-clip, battle outcomes and so on.
 - **Flexible AI providers:**
   - **Built-in channel:** A streamlined, ready-to-use service with China mainland and global routes.
   - **Cloud providers:** OpenAI, Gemini, Anthropic Claude, DeepSeek, OpenRouter, Groq, MiniMax, SiliconFlow, Moonshot, xAI, Alibaba Qwen, Volcengine, Zhipu AI, and more.
@@ -39,7 +39,13 @@ Use these communities for support, feedback, release news, and early feature pre
 
 ## 🆕 Release Notes
 
-### v1.5.3 `Latest`
+### v1.5.4 `Latest`
+
+- **Smarter translation:** Added branch-aware Ren'Py prediction and adaptive prefetching that prioritizes the selected route; repetitive or excessively long model output is now retried and rejected.
+- **Overlay and RPGM tools:** Added one-click and automatic copying for original text and translations, improved multi-display long-text layout, added dialogue rollback, and refined forced saving and tool persistence.
+- **Compatibility and packaging:** Improved dynamic Ren'Py character extraction, hook prediction coverage, stale-port cleanup, and UPX build validation.
+
+### v1.5.3
 
 - **RPGM save anywhere:** Added an optional save-anywhere tool with an in-game toolbar button and `Ctrl+S`. Saves made during dialogue or choices restore from the current dialogue checkpoint.
 - **Long translation overlay:** Long screen text now uses a scrollable, resizable panel, with a menu action for resetting the overlay position and smoother drag and resize interactions.
@@ -82,21 +88,20 @@ Use these communities for support, feedback, release news, and early feature pre
 ## 🎮 Getting Started
 
 1. **Download RenpyLens**
-   - Download the latest `RenpyLens_v1.5.3.exe` from the repository's **Releases** page.
+   - Download the latest `RenpyLens_v1.5.4.exe` from the repository's **Releases** page.
    - Alternatively, follow the development instructions below to run it from source.
 2. **Choose a translation provider**
    - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**. If you are not in mainland China, select **Global node** in **Route**.
    - To use your own service, open **Settings → API Settings** and configure a provider, Ollama, or a custom OpenAI-compatible channel.
 1. **Select a game**
-   - Drop the main `.exe` of a Ren'Py, RPG Maker MV, or RPG Maker MZ game into the RenpyLens window.
+   - Drop the main `.exe` of a Ren'Py, RPG Maker MV/MZ game into the RenpyLens window.
+   - If selected an RPG Maker MV/MZ game, you can choose to enable **RPGM tools** and choose the tools you want from the adjacent menu.
 2. **Load the Hook and start**
    - Select **Load Hook and Start Game**. RenpyLens installs the appropriate bridge and launches the game.
    - Ren'Py uses a bridge inside `game/`; RPG Maker uses a plugin inside `js/plugins/`.
-   - After selecting an RPG Maker MV/MZ game, you can choose to enable **RPGM tools** and choose the tools you want from the adjacent menu.
-   - With **Save anywhere** enabled, click **Save** in the in-game toolbar or press `Ctrl+S` to open the native save screen during map events or dialogue. Saves made during dialogue or choices reload from the current dialogue with the choice unselected.
 3. **Use the overlay**
    - Drag the overlay to reposition it.
-   - Right-click the overlay for display controls, editing, and workbench access.
+   - Right-click the overlay for display controls, editing, workbench, and so on.
 4. **Remove the Hook when needed**
    - Select **Uninstall Hook** to remove RenpyLens bridge files safely.
 
@@ -136,7 +141,7 @@ python build.py
 python build.py --python "C:\path\to\venv\python.exe"
 ```
 
-The build output is an `exe` file. If `upx.exe` is present in the project root, the build script uses it for compression by default. If the resulting executable is blocked by antivirus software or fails to start, build it without UPX:
+The build output is `RenpyLens_v1.5.4.exe`. If `upx.exe` is present in the project root, the build script uses it for compression by default. If the resulting executable is blocked by antivirus software or fails to start, build it without UPX:
 
 ```powershell
 python build.py --noupx
