@@ -23,7 +23,17 @@ from PyQt5.QtWidgets import (
     QScrollBar,
 )
 from PyQt5.QtCore import QEvent, QPointF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QPainter, QPen, QPixmap, QColor, QFontMetrics, QTextCursor
+from PyQt5.QtGui import (
+    QFont,
+    QPainter,
+    QPen,
+    QPixmap,
+    QColor,
+    QFontMetrics,
+    QTextCursor,
+    QTextLayout,
+    QTextOption,
+)
 import win32con
 import win32gui
 from i18n import manager as i18n_manager, tr
@@ -141,29 +151,37 @@ class OutlinedLabel(QLabel):
 
         fm_normal = QFontMetrics(font_normal)
         lines = []
-        current_line = []
-        current_line_width = 0
-        char_widths = {}
+        paragraph = []
+
+        def append_wrapped_paragraph(styled_chars):
+            if not styled_chars:
+                lines.append([])
+                return
+
+            plain_text = "".join(char for char, _ in styled_chars)
+            layout = QTextLayout(plain_text, font_normal)
+            option = QTextOption()
+            option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            layout.setTextOption(option)
+            layout.beginLayout()
+            while True:
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(max(1, available_width))
+                start = line.textStart()
+                lines.append(styled_chars[start:start + line.textLength()])
+            layout.endLayout()
+
         for char, italic in char_list:
             if char == "\n":
-                lines.append(current_line)
-                current_line = []
-                current_line_width = 0
-                continue
-
-            if char not in char_widths:
-                char_widths[char] = fm_normal.horizontalAdvance(char)
-            char_w = char_widths[char]
-            if current_line_width + char_w > available_width and current_line:
-                lines.append(current_line)
-                current_line = [(char, italic)]
-                current_line_width = char_w
+                append_wrapped_paragraph(paragraph)
+                paragraph = []
             else:
-                current_line.append((char, italic))
-                current_line_width += char_w
+                paragraph.append((char, italic))
 
-        if current_line:
-            lines.append(current_line)
+        if paragraph:
+            append_wrapped_paragraph(paragraph)
 
         # Measuring height must not construct outlines for the whole document.
         # Rasterize only the lines intersecting the viewport.

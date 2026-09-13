@@ -62,6 +62,39 @@ class _ProcessEntry:
     name: str
 
 
+@dataclass(frozen=True)
+class GameLaunchSpec:
+    executable: str
+    arguments: str = ""
+    working_directory: str = ""
+    shortcut_path: str = ""
+
+
+def resolve_game_launch(path: str) -> GameLaunchSpec | None:
+    """Resolve an EXE or Windows shortcut into detection and launch details."""
+    path = os.path.abspath(path)
+    if path.lower().endswith(".exe"):
+        return GameLaunchSpec(executable=path)
+    if not path.lower().endswith(".lnk") or os.name != "nt":
+        return None
+
+    try:
+        from win32com.client import Dispatch
+
+        shortcut = Dispatch("WScript.Shell").CreateShortcut(path)
+        target = os.path.abspath(str(shortcut.TargetPath or "").strip())
+        if not target.lower().endswith(".exe"):
+            return None
+        return GameLaunchSpec(
+            executable=target,
+            arguments=str(shortcut.Arguments or ""),
+            working_directory=str(shortcut.WorkingDirectory or "").strip(),
+            shortcut_path=path,
+        )
+    except Exception:
+        return None
+
+
 def _normalize_path(path: str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(path)))
 
@@ -371,12 +404,19 @@ def remove_hook(exe_path: str) -> tuple[bool, str]:
     return True, "No Hook files to remove"
 
 
-def launch_game(exe_path: str) -> GameLaunchHandle | None:
+def launch_game(
+    exe_path: str,
+    arguments: str = "",
+    working_directory: str = "",
+) -> GameLaunchHandle | None:
     """Launch the selected game executable."""
     try:
+        command = [exe_path]
+        if arguments:
+            command = f"{subprocess.list2cmdline([exe_path])} {arguments}"
         process = subprocess.Popen(
-            [exe_path],
-            cwd=os.path.dirname(exe_path),
+            command,
+            cwd=working_directory or os.path.dirname(exe_path),
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )
         return GameLaunchHandle(process, exe_path)

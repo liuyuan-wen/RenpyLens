@@ -39,7 +39,14 @@ Use these communities for support, feedback, release news, and early feature pre
 
 ## 🆕 Release Notes
 
-### v1.5.4 `Latest`
+### v1.5.5 `Latest`
+
+- **Character-aware translation:** Added a character panel that discovers Ren'Py characters and records display names, gender, and notes, then supplies that context to translation requests for more accurate dialogue.
+- **Custom shortcuts:** Added configurable global and RPG Maker shortcuts, including a system-wide overlay toggle and automatic synchronization of in-game controls.
+- **Translation workflow:** Unified single and batch requests under a stricter numbered protocol, improved speaker-label preservation and branch prefetching, and increased default prefetch and batch sizes.
+- **Compatibility and interface:** Added Windows shortcut (`.lnk`) launching with arguments and working directories, improved overlay word wrapping, and refined settings controls, scrolling, sizing, and menu behavior.
+
+### v1.5.4
 
 - **Smarter translation:** Added branch-aware Ren'Py prediction and adaptive prefetching that prioritizes the selected route; repetitive or excessively long model output is now retried and rejected.
 - **Overlay and RPGM tools:** Added one-click and automatic copying for original text and translations, improved multi-display long-text layout, added dialogue rollback, and refined forced saving and tool persistence.
@@ -88,7 +95,7 @@ Use these communities for support, feedback, release news, and early feature pre
 ## 🎮 Getting Started
 
 1. **Download RenpyLens**
-   - Download the latest `RenpyLens_v1.5.4.exe` from the repository's **Releases** page.
+   - Download the latest `RenpyLens_v1.5.5.exe` from the repository's **Releases** page.
    - Alternatively, follow the development instructions below to run it from source.
 2. **Choose a translation provider**
    - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**. If you are not in mainland China, select **Global node** in **Route**.
@@ -141,7 +148,7 @@ python build.py
 python build.py --python "C:\path\to\venv\python.exe"
 ```
 
-The build output is `RenpyLens_v1.5.4.exe`. If `upx.exe` is present in the project root, the build script uses it for compression by default. If the resulting executable is blocked by antivirus software or fails to start, build it without UPX:
+The build output is `RenpyLens_v1.5.5.exe`. If `upx.exe` is present in the project root, the build script uses it for compression by default. If the resulting executable is blocked by antivirus software or fails to start, build it without UPX:
 
 ```powershell
 python build.py --noupx

@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from config import CONFIG_DIR
+from characters import CharacterRepository
 
 DB_PATH = os.path.join(CONFIG_DIR, "translation_cache.db")
 
@@ -65,6 +66,7 @@ class TranslationCache:
         self._game_id = ""
         os.makedirs(CONFIG_DIR, exist_ok=True)
         self._init_db()
+        self.characters = CharacterRepository(self._connect)
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(DB_PATH)
@@ -85,6 +87,7 @@ class TranslationCache:
                 "translation TEXT NOT NULL DEFAULT '', "
                 "entry_type TEXT NOT NULL DEFAULT 'dialogue', "
                 "speaker TEXT NOT NULL DEFAULT '', "
+                "character_id TEXT NOT NULL DEFAULT '', "
                 "is_manual INTEGER NOT NULL DEFAULT 0, "
                 "created_at INTEGER NOT NULL DEFAULT 0, "
                 "updated_at INTEGER NOT NULL DEFAULT 0, "
@@ -97,6 +100,7 @@ class TranslationCache:
             add_columns = {
                 "entry_type": "TEXT NOT NULL DEFAULT 'dialogue'",
                 "speaker": "TEXT NOT NULL DEFAULT ''",
+                "character_id": "TEXT NOT NULL DEFAULT ''",
                 "is_manual": "INTEGER NOT NULL DEFAULT 0",
                 "created_at": "INTEGER NOT NULL DEFAULT 0",
                 "updated_at": "INTEGER NOT NULL DEFAULT 0",
@@ -149,6 +153,7 @@ class TranslationCache:
             "updated_at": int(row[7] or 0),
             "last_seen_at": int(row[8] or 0),
             "seen_count": int(row[9] or 0),
+            "character_id": str(row[10] or ""),
         }
 
     def _clone_entry(self, entry: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -162,8 +167,8 @@ class TranslationCache:
             conn.execute(
                 "INSERT OR REPLACE INTO cache ("
                 "game_id, source, translation, entry_type, speaker, is_manual, "
-                "created_at, updated_at, last_seen_at, seen_count"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "created_at, updated_at, last_seen_at, seen_count, character_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry["game_id"],
                     entry["source"],
@@ -175,6 +180,7 @@ class TranslationCache:
                     entry["updated_at"],
                     entry["last_seen_at"],
                     entry["seen_count"],
+                    entry.get("character_id", ""),
                 ),
             )
             conn.commit()
@@ -191,8 +197,8 @@ class TranslationCache:
             conn.executemany(
                 "INSERT OR REPLACE INTO cache ("
                 "game_id, source, translation, entry_type, speaker, is_manual, "
-                "created_at, updated_at, last_seen_at, seen_count"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "created_at, updated_at, last_seen_at, seen_count, character_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         entry["game_id"],
@@ -205,6 +211,7 @@ class TranslationCache:
                         entry["updated_at"],
                         entry["last_seen_at"],
                         entry["seen_count"],
+                        entry.get("character_id", ""),
                     )
                     for entry in snapshots
                 ],
@@ -228,6 +235,7 @@ class TranslationCache:
         speaker: str = "",
         is_manual: bool = False,
         now: int | None = None,
+        character_id: str = "",
     ) -> dict[str, Any]:
         timestamp = self._now() if now is None else now
         return {
@@ -236,6 +244,7 @@ class TranslationCache:
             "translation": translation,
             "entry_type": entry_type or ENTRY_TYPE_DIALOGUE,
             "speaker": normalize_speaker_name(speaker),
+            "character_id": character_id,
             "is_manual": bool(is_manual),
             "created_at": timestamp,
             "updated_at": timestamp,
@@ -317,16 +326,16 @@ class TranslationCache:
                     conn.execute(
                         "INSERT OR IGNORE INTO cache ("
                         "game_id, source, translation, entry_type, speaker, is_manual, "
-                        "created_at, updated_at, last_seen_at, seen_count"
+                        "created_at, updated_at, last_seen_at, seen_count, character_id"
                         ") SELECT ?, source, translation, entry_type, speaker, is_manual, "
-                        "created_at, updated_at, last_seen_at, seen_count "
+                        "created_at, updated_at, last_seen_at, seen_count, character_id "
                         "FROM cache WHERE game_id = ?",
                         (game_id, legacy_id),
                     )
                     conn.commit()
             rows = conn.execute(
                 "SELECT game_id, source, translation, entry_type, speaker, is_manual, "
-                "created_at, updated_at, last_seen_at, seen_count "
+                "created_at, updated_at, last_seen_at, seen_count, character_id "
                 "FROM cache WHERE game_id = ?",
                 (game_id,),
             ).fetchall()
@@ -337,6 +346,11 @@ class TranslationCache:
             print(f"[Cache] Loaded {len(rows)} entries for {game_id or '(no game)'}")
         except Exception:
             pass
+
+    @property
+    def game_id(self):
+        with self._lock:
+            return self._game_id
 
     def get(self, text: str) -> str | None:
         with self._lock:
@@ -371,7 +385,7 @@ class TranslationCache:
             entry = self._mem_entries.get(key) if key else None
             return bool(entry and entry.get("is_manual"))
 
-    def mark_seen(self, text: str, entry_type: str = ENTRY_TYPE_DIALOGUE, speaker: str = ""):
+    def mark_seen(self, text: str, entry_type: str = ENTRY_TYPE_DIALOGUE, speaker: str = "", character_id: str = ""):
         text = str(text or "").strip()
         speaker = normalize_speaker_name(speaker)
         if not text:
@@ -387,16 +401,17 @@ class TranslationCache:
                     translation="",
                     entry_type=entry_type,
                     speaker=speaker,
+                    character_id=character_id,
                     is_manual=False,
                     now=now,
                 )
                 self._mem_entries[text] = entry
             else:
                 entry["entry_type"] = entry_type or entry.get("entry_type") or ENTRY_TYPE_DIALOGUE
-                if speaker and speaker != entry.get("speaker"):
-                    entry["speaker"] = speaker
+                entry["speaker"] = speaker
                 entry["last_seen_at"] = now
                 entry["seen_count"] = int(entry.get("seen_count") or 0) + 1
+            entry["character_id"] = character_id
             snapshot = self._clone_entry(entry)
         self._persist_async(snapshot)
 
@@ -406,6 +421,7 @@ class TranslationCache:
         translation: str,
         entry_type: str = ENTRY_TYPE_DIALOGUE,
         speaker: str = "",
+        character_id: str = "",
     ) -> bool:
         text = str(text or "").strip()
         translation = str(translation or "").strip()
@@ -424,6 +440,7 @@ class TranslationCache:
                     translation=translation,
                     entry_type=entry_type,
                     speaker=speaker,
+                    character_id=character_id,
                     is_manual=False,
                     now=now,
                 )
@@ -444,11 +461,105 @@ class TranslationCache:
                 entry["entry_type"] = entry_type or entry.get("entry_type") or ENTRY_TYPE_DIALOGUE
                 if speaker and not entry.get("speaker"):
                     entry["speaker"] = speaker
+            if character_id and not entry.get("is_manual"):
+                entry["character_id"] = character_id
             snapshot = self._clone_entry(entry) if entry and not entry.get("is_manual") else None
 
         if snapshot:
             self._persist_async(snapshot)
         return stored
+
+    def save_machine_translation(
+        self,
+        text: str,
+        translation: str,
+        entry_type: str = ENTRY_TYPE_DIALOGUE,
+        speaker: str = "",
+        character_id: str = "",
+    ) -> bool:
+        """Store a fresh machine result, without replacing a manual edit."""
+        text = str(text or "").strip()
+        translation = str(translation or "").strip()
+        speaker = normalize_speaker_name(speaker)
+        if not text or not translation:
+            return False
+
+        now = self._now()
+        with self._lock:
+            key = self._resolve_entry_key(text) or text
+            entry = self._mem_entries.get(key)
+            if entry is not None and entry.get("is_manual"):
+                return False
+            if entry is None:
+                entry = self._build_entry(
+                    source=text,
+                    translation=translation,
+                    entry_type=entry_type,
+                    speaker=speaker,
+                    character_id=character_id,
+                    is_manual=False,
+                    now=now,
+                )
+                self._mem_entries[text] = entry
+            else:
+                entry["translation"] = translation
+                entry["entry_type"] = entry_type or entry.get("entry_type") or ENTRY_TYPE_DIALOGUE
+                if speaker:
+                    entry["speaker"] = speaker
+                if character_id:
+                    entry["character_id"] = character_id
+                entry["updated_at"] = now
+                entry["last_seen_at"] = max(int(entry.get("last_seen_at") or 0), now)
+                entry["seen_count"] = max(int(entry.get("seen_count") or 0), 1)
+            snapshot = self._clone_entry(entry)
+
+        self._persist_async(snapshot)
+        return True
+
+    def save_machine_translations(self, items: list[dict[str, Any]]) -> set[str]:
+        """Apply ordered machine results and persist the final value for each source."""
+        now = self._now()
+        changed_sources: set[str] = set()
+        final_entries: dict[str, dict[str, Any]] = {}
+        with self._lock:
+            for item in items or []:
+                text = str((item or {}).get("source") or (item or {}).get("text") or "").strip()
+                translation = str((item or {}).get("translation") or "").strip()
+                if not text or not translation:
+                    continue
+                key = self._resolve_entry_key(text) or text
+                entry = self._mem_entries.get(key)
+                if entry is not None and entry.get("is_manual"):
+                    continue
+                entry_type = str((item or {}).get("entry_type") or ENTRY_TYPE_DIALOGUE)
+                speaker = normalize_speaker_name((item or {}).get("speaker", ""))
+                character_id = str((item or {}).get("character_id") or "")
+                if entry is None:
+                    entry = self._build_entry(
+                        source=text,
+                        translation=translation,
+                        entry_type=entry_type,
+                        speaker=speaker,
+                        character_id=character_id,
+                        is_manual=False,
+                        now=now,
+                    )
+                    self._mem_entries[text] = entry
+                else:
+                    entry["translation"] = translation
+                    entry["entry_type"] = entry_type
+                    if speaker:
+                        entry["speaker"] = speaker
+                    if character_id:
+                        entry["character_id"] = character_id
+                    entry["updated_at"] = now
+                    entry["last_seen_at"] = max(int(entry.get("last_seen_at") or 0), now)
+                    entry["seen_count"] = max(int(entry.get("seen_count") or 0), 1)
+                changed_sources.add(text)
+                final_entries[key] = self._clone_entry(entry)
+
+        self._persist_entries(list(final_entries.values()))
+        return changed_sources
 
     def save_machine_translations_if_absent(
         self,
@@ -464,6 +575,7 @@ class TranslationCache:
                 translation = str((item or {}).get("translation") or "").strip()
                 entry_type = str((item or {}).get("entry_type") or ENTRY_TYPE_DIALOGUE)
                 speaker = normalize_speaker_name((item or {}).get("speaker", ""))
+                character_id = str((item or {}).get("character_id") or "")
                 if not text or not translation:
                     continue
 
@@ -477,6 +589,7 @@ class TranslationCache:
                         translation=translation,
                         entry_type=entry_type,
                         speaker=speaker,
+                        character_id=character_id,
                         is_manual=False,
                         now=now,
                     )
@@ -501,6 +614,10 @@ class TranslationCache:
                         entry["speaker"] = speaker
                         changed = True
 
+                if character_id and not entry.get("is_manual") and entry.get("character_id") != character_id:
+                    entry["character_id"] = character_id
+                    changed = True
+
                 if entry and (str(entry.get("translation") or "").strip() or entry.get("is_manual")):
                     covered_sources.add(text)
 
@@ -516,6 +633,7 @@ class TranslationCache:
         translation: str,
         entry_type: str = ENTRY_TYPE_DIALOGUE,
         speaker: str = "",
+        character_id: str = "",
     ) -> dict[str, Any] | None:
         text = str(text or "").strip()
         translation = str(translation or "").strip()
@@ -533,6 +651,7 @@ class TranslationCache:
                     translation=translation,
                     entry_type=entry_type,
                     speaker=speaker,
+                    character_id=character_id,
                     is_manual=True,
                     now=now,
                 )
@@ -546,6 +665,8 @@ class TranslationCache:
                 entry["updated_at"] = now
                 entry["last_seen_at"] = now
                 entry["seen_count"] = max(int(entry.get("seen_count") or 0), 1)
+            if character_id:
+                entry["character_id"] = character_id
             snapshot = self._clone_entry(entry)
         self._persist_async(snapshot)
         return snapshot

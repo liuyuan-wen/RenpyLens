@@ -11,9 +11,12 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QLineEdit, QComboBox, QSpinBox, QCheckBox,
     QPushButton, QFormLayout, QGroupBox, QTextEdit, QDoubleSpinBox,
-    QScrollArea, QMessageBox
+    QScrollArea, QMessageBox, QKeySequenceEdit, QAbstractScrollArea, QApplication,
+    QStyle, QStyleOptionComboBox, QStyleOptionSpinBox, QAbstractSpinBox,
+    QStyledItemDelegate
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QPointF
+from PyQt5.QtGui import QKeySequence, QPainter, QPolygonF, QColor
 from i18n import LANGUAGE_OPTIONS, localized_node_name, manager as i18n_manager, tr
 from provider_registry import (
     get_provider_spec,
@@ -22,6 +25,7 @@ from provider_registry import (
     resolve_provider,
     update_provider,
 )
+from shortcuts import DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS, find_shortcut_conflicts, resolve_shortcuts
 
 # 通用暗色样式
 _DARK_STYLE = """
@@ -74,19 +78,96 @@ _DARK_STYLE = """
         padding: 8px 12px; font-size: 18px;
     }
     QLineEdit:focus { border-color: #4a9eff; }
-    QComboBox {
+    QKeySequenceEdit {
         background-color: #16213e; color: #eee;
         border: 1px solid #444; border-radius: 4px;
-        padding: 8px 12px; font-size: 18px; min-width: 180px;
+        padding: 8px 12px; font-size: 18px;
+    }
+    QKeySequenceEdit:focus { border-color: #4a9eff; }
+    QComboBox {
+        combobox-popup: 0;
+        background-color: #16213e; color: #eee;
+        border: 1px solid #444; border-radius: 4px;
+        padding: 8px 44px 8px 12px; font-size: 18px; min-width: 180px;
+        min-height: 28px;
+    }
+    QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover { border-color: #666; }
+    QComboBox:focus { border-color: #4a9eff; }
+    QComboBox QLineEdit {
+        background: transparent; border: none; padding: 0px;
+    }
+    QComboBox::drop-down {
+        subcontrol-origin: padding; subcontrol-position: top right;
+        width: 36px; border-left: 1px solid #3d3e50;
+        border-top-right-radius: 4px; border-bottom-right-radius: 4px;
+    }
+    QComboBox::drop-down:hover { background-color: #243454; }
+    QComboBox::drop-down:on { background-color: #111a30; }
+    QComboBox::down-arrow { image: none; }
+    QSpinBox::up-arrow, QSpinBox::down-arrow,
+    QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow { image: none; }
+    QSpinBox::up-button, QDoubleSpinBox::up-button {
+        subcontrol-origin: padding; subcontrol-position: top right;
+        width: 36px; border-left: 1px solid #3d3e50;
+        border-bottom: 1px solid #3d3e50; border-top-right-radius: 4px;
+    }
+    QSpinBox::down-button, QDoubleSpinBox::down-button {
+        subcontrol-origin: padding; subcontrol-position: bottom right;
+        width: 36px; border-left: 1px solid #3d3e50;
+        border-bottom-right-radius: 4px;
+    }
+    QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+    QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+        background-color: #243454;
+    }
+    QSpinBox::up-button:pressed, QSpinBox::down-button:pressed,
+    QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed {
+        background-color: #111a30;
     }
     QComboBox QAbstractItemView {
         background-color: #1a1a2e; color: #eee;
-        selection-background-color: #4a9eff;
+        border: 1px solid #444; outline: 0px;
+        font-size: 18px;
+        selection-background-color: #293d60;
+        selection-color: #eee;
     }
+    QComboBox QAbstractItemView::item {
+        min-height: 26px; padding: 3px 12px;
+    }
+    QScrollArea { background: #1a1a2e; border: none; }
+    QWidget#api_content, QWidget#advanced_content { background: #1a1a2e; }
+    QScrollBar:vertical {
+        background: #1a1a2e; width: 10px; margin: 2px;
+    }
+    QScrollBar::handle:vertical {
+        background: #454b61; border-radius: 3px; min-height: 28px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background: #626d88;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0px;
+    }
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+        background: transparent;
+    }
+    QScrollBar:horizontal {
+        background: #1a1a2e; height: 10px; margin: 2px;
+    }
+    QScrollBar::handle:horizontal {
+        background: #454b61; border-radius: 3px; min-width: 28px;
+    }
+    QScrollBar::handle:horizontal:hover { background: #626d88; }
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+        background: transparent;
+    }
+    QAbstractScrollArea::corner { background: #1a1a2e; }
     QSpinBox, QDoubleSpinBox {
         background-color: #16213e; color: #eee;
         border: 1px solid #444; border-radius: 4px;
-        padding: 8px 12px; font-size: 18px; min-width: 120px;
+        padding: 8px 44px 8px 12px; font-size: 18px; min-width: 120px;
+        min-height: 28px;
     }
     QSpinBox:focus, QDoubleSpinBox:focus { border-color: #4a9eff; }
     QCheckBox { color: #ccc; font-size: 18px; spacing: 8px; }
@@ -116,24 +197,6 @@ _DARK_STYLE = """
         border: 1px solid #444; border-radius: 4px;
         padding: 4px; font-size: 16px;
     }
-    QTextEdit QScrollBar:vertical {
-        background: #1a1a2e;
-        width: 10px;
-        border-radius: 5px;
-        margin: 2px;
-    }
-    QTextEdit QScrollBar::handle:vertical {
-        background: #444;
-        border-radius: 4px;
-        min-height: 30px;
-    }
-    QTextEdit QScrollBar::handle:vertical:hover {
-        background: #666;
-    }
-    QTextEdit QScrollBar::add-line:vertical,
-    QTextEdit QScrollBar::sub-line:vertical {
-        height: 0px;
-    }
 """
 
 # 常用语言列表
@@ -149,6 +212,88 @@ _LANGUAGES = [
     # "Indonesian", "Arabic", "Turkish",
 
 
+class _NoWheelMixin:
+    """Let a wheel gesture scroll the containing page instead of editing a value."""
+
+    def wheelEvent(self, event):
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, QAbstractScrollArea):
+            parent = parent.parentWidget()
+        if parent is not None:
+            QApplication.sendEvent(parent.viewport(), event)
+        else:
+            event.ignore()
+
+
+class _ControlArrowMixin:
+    """Paint crisp, DPI-independent arrows inside Qt's native hit targets."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        is_combo = isinstance(self, QComboBox)
+        option = QStyleOptionComboBox() if is_combo else QStyleOptionSpinBox()
+        self.initStyleOption(option)
+        control = QStyle.CC_ComboBox if is_combo else QStyle.CC_SpinBox
+        arrows = [(QStyle.SC_ComboBoxArrow, False, self.isEnabled())] if is_combo else [
+            (QStyle.SC_SpinBoxUp, True,
+             self.isEnabled() and bool(option.stepEnabled & QAbstractSpinBox.StepUpEnabled)),
+            (QStyle.SC_SpinBoxDown, False,
+             self.isEnabled() and bool(option.stepEnabled & QAbstractSpinBox.StepDownEnabled)),
+        ]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        for subcontrol, upward, enabled in arrows:
+            rect = self.style().subControlRect(control, option, subcontrol, self)
+            if rect.isEmpty():
+                continue
+            active = bool(option.activeSubControls & subcontrol)
+            color = "#999aaa" if enabled else "#50546a"
+            if enabled and active:
+                if option.state & QStyle.State_Sunken or (is_combo and self.view().isVisible()):
+                    color = "#4a9eff"
+                elif option.state & QStyle.State_MouseOver:
+                    color = "#eee"
+            painter.setBrush(QColor(color))
+            center = rect.center()
+            x, y = center.x() + 0.5, center.y() + 0.5
+            half_width, half_height = (6, 3.5) if is_combo else (5, 3)
+            direction = -1 if upward else 1
+            painter.drawPolygon(QPolygonF([
+                QPointF(x - half_width, y - direction * half_height),
+                QPointF(x + half_width, y - direction * half_height),
+                QPointF(x, y + direction * half_height),
+            ]))
+
+
+class NoWheelComboBox(_ControlArrowMixin, _NoWheelMixin, QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setItemDelegate(QStyledItemDelegate(self))
+        self.setMaxVisibleItems(8)
+        self.view().setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+    def showPopup(self):
+        view = self.view()
+        # Reserve the scrollbar before Qt captures the opening animation.
+        # Otherwise a long list can first paint at full width, then narrow.
+        view.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOn if self.count() > self.maxVisibleItems()
+            else Qt.ScrollBarAsNeeded
+        )
+        view.ensurePolished()
+        view.doItemsLayout()
+        super().showPopup()
+
+
+class NoWheelSpinBox(_ControlArrowMixin, _NoWheelMixin, QSpinBox):
+    pass
+
+
+class NoWheelDoubleSpinBox(_ControlArrowMixin, _NoWheelMixin, QDoubleSpinBox):
+    pass
+
+
 class SettingsDialog(QDialog):
     """配置对话框 - 3 标签页"""
 
@@ -162,10 +307,7 @@ class SettingsDialog(QDialog):
         self._changed = False  # 标记是否有修改
 
         self.setWindowTitle(tr("settings.title"))
-        # Keep a stable, compact initial size across locales.  Individual pages
-        # are responsible for wrapping long labels instead of making the whole
-        # dialog follow their translated size hint.
-        self.setMinimumSize(720, 560)
+        # Keep pages compact; only the tab bar may widen the initial window.
         self.resize(840, 680)
         self.setStyleSheet(_DARK_STYLE)
 
@@ -200,6 +342,17 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(self.btn_save)
         layout.addLayout(btn_layout)
 
+        self.ensurePolished()
+        margins = layout.contentsMargins()
+        tab_width = self.tabs.tabBar().sizeHint().width()
+        self.setMinimumSize(max(840, tab_width + margins.left() + margins.right()), 680)
+        saved_size = config.get("settings_window_size")
+        if (isinstance(saved_size, (list, tuple)) and len(saved_size) == 2
+                and all(isinstance(value, int) and value > 0 for value in saved_size)):
+            self.resize(*saved_size)
+        else:
+            self.resize(self.minimumSize())
+
     # ── 标签页 1: 翻译设置 ──────────────────────────
 
     def _create_translation_tab(self) -> QWidget:
@@ -220,7 +373,7 @@ class SettingsDialog(QDialog):
         form.setLabelAlignment(Qt.AlignRight)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
-        self.ui_language_combo = QComboBox()
+        self.ui_language_combo = NoWheelComboBox()
         for label, locale in LANGUAGE_OPTIONS:
             self.ui_language_combo.addItem(tr(label) if locale == "auto" else label, locale)
         language_index = self.ui_language_combo.findData(self.config.get("ui_language", "auto"))
@@ -228,25 +381,18 @@ class SettingsDialog(QDialog):
         form.addRow(tr("settings.ui_language"), self.ui_language_combo)
 
         # 源语言
-        self.source_lang_combo = QComboBox()
+        self.source_lang_combo = NoWheelComboBox()
         self.source_lang_combo.addItems(_LANGUAGES)
         self.source_lang_combo.setCurrentText(self.config.get("source_lang", "English"))
         self.source_lang_combo.setEditable(True)
         form.addRow(tr("settings.source_language"), self.source_lang_combo)
 
         # 目标语言
-        self.target_lang_combo = QComboBox()
+        self.target_lang_combo = NoWheelComboBox()
         self.target_lang_combo.addItems(_LANGUAGES)
         self.target_lang_combo.setCurrentText(self.config.get("target_lang", "Chinese"))
         self.target_lang_combo.setEditable(True)
         form.addRow(tr("settings.target_language"), self.target_lang_combo)
-
-        self.sys_prompt_input = QTextEdit()
-        self.sys_prompt_input.setAcceptRichText(False)
-        self.sys_prompt_input.setMaximumHeight(100)
-        self.sys_prompt_input.setPlainText(self.config.get("system_prompt", "You are a game localization expert specializing in visual novels. LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text."))
-        self.sys_prompt_input.setToolTip(tr("settings.prompt_tip", target_lang="{target_lang}"))
-        form.addRow(tr("settings.single_prompt"), self.sys_prompt_input)
 
         self.batch_prompt_input = QTextEdit()
         self.batch_prompt_input.setAcceptRichText(False)
@@ -255,7 +401,7 @@ class SettingsDialog(QDialog):
         self.batch_prompt_input.setToolTip(tr("settings.prompt_tip", target_lang="{target_lang}"))
         form.addRow(tr("settings.batch_prompt"), self.batch_prompt_input)
 
-        self.temp_spin = QDoubleSpinBox()
+        self.temp_spin = NoWheelDoubleSpinBox()
         self.temp_spin.setRange(0.0, 2.0)
         self.temp_spin.setSingleStep(0.1)
         self.temp_spin.setValue(self.config.get("temperature", 0.3))
@@ -283,9 +429,9 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background-color: transparent; }")
         
         content = QWidget()
+        content.setObjectName("api_content")
         layout = QVBoxLayout(content)
         layout.setSpacing(8)
         layout.setContentsMargins(20, 12, 20, 20)
@@ -366,7 +512,7 @@ class SettingsDialog(QDialog):
         form.setSpacing(10)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
-        self.channel_combo = QComboBox()
+        self.channel_combo = NoWheelComboBox()
         form.addRow(tr("settings.channel"), self.channel_combo)
 
         self.channel_name_input = QLineEdit()
@@ -595,7 +741,14 @@ class SettingsDialog(QDialog):
 
     def _create_advanced_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        content.setObjectName("advanced_content")
+        layout = QVBoxLayout(content)
         layout.setSpacing(8)
         layout.setContentsMargins(20, 12, 20, 20)
 
@@ -604,7 +757,7 @@ class SettingsDialog(QDialog):
         api_form = QFormLayout(api_group)
         api_form.setSpacing(10)
 
-        self.api_timeout_spin = QSpinBox()
+        self.api_timeout_spin = NoWheelSpinBox()
         self.api_timeout_spin.setRange(10, 3600)
         self.api_timeout_spin.setSingleStep(30)
         self.api_timeout_spin.setValue(self.config.get("api_timeout_seconds", 120))
@@ -621,13 +774,13 @@ class SettingsDialog(QDialog):
         perf_form = QFormLayout(perf_group)
         perf_form.setSpacing(10)
 
-        self.prefetch_spin = QSpinBox()
-        self.prefetch_spin.setRange(1, 20)
-        self.prefetch_spin.setValue(self.config.get("prefetch_count", 5))
+        self.prefetch_spin = NoWheelSpinBox()
+        self.prefetch_spin.setRange(3, 20)
+        self.prefetch_spin.setValue(self.config.get("prefetch_count", 10))
         self.prefetch_spin.setToolTip(tr("settings.prefetch_tip"))
         perf_form.addRow(tr("settings.prefetch"), self.prefetch_spin)
 
-        self.debounce_spin = QSpinBox()
+        self.debounce_spin = NoWheelSpinBox()
         self.debounce_spin.setRange(0, 5000)
         self.debounce_spin.setSingleStep(50)
         self.debounce_spin.setValue(self.config.get("debounce_ms", 200))
@@ -642,10 +795,10 @@ class SettingsDialog(QDialog):
         bulk_form = QFormLayout(bulk_group)
         bulk_form.setSpacing(10)
 
-        self.bulk_translate_batch_size_spin = QSpinBox()
+        self.bulk_translate_batch_size_spin = NoWheelSpinBox()
         self.bulk_translate_batch_size_spin.setRange(1, 1000)
         self.bulk_translate_batch_size_spin.setValue(
-            self.config.get("bulk_translate_batch_size", 5)
+            self.config.get("bulk_translate_batch_size", 10)
         )
         self.bulk_translate_batch_size_spin.setSuffix(tr("settings.items_per_request"))
         self.bulk_translate_batch_size_spin.setToolTip(
@@ -653,7 +806,7 @@ class SettingsDialog(QDialog):
         )
         bulk_form.addRow(tr("settings.batch_size"), self.bulk_translate_batch_size_spin)
 
-        self.bulk_translate_rpm_spin = QSpinBox()
+        self.bulk_translate_rpm_spin = NoWheelSpinBox()
         self.bulk_translate_rpm_spin.setRange(1, 600)
         self.bulk_translate_rpm_spin.setValue(self.config.get("bulk_translate_rpm", 60))
         self.bulk_translate_rpm_spin.setSuffix(tr("settings.requests_per_minute"))
@@ -668,7 +821,7 @@ class SettingsDialog(QDialog):
         runtime_form.setSpacing(10)
         runtime_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
-        self.socket_port_spin = QSpinBox()
+        self.socket_port_spin = NoWheelSpinBox()
         self.socket_port_spin.setRange(1024, 65535)
         self.socket_port_spin.setValue(self.config.get("socket_port", 19876))
         self.socket_port_spin.setToolTip(tr("settings.port_tip"))
@@ -685,8 +838,44 @@ class SettingsDialog(QDialog):
         runtime_form.addRow(self.force_topmost_check)
 
         layout.addWidget(runtime_group)
+
+        shortcut_group = QGroupBox(tr("settings.group.shortcuts"))
+        shortcut_form = QFormLayout(shortcut_group)
+        shortcut_form.setSpacing(10)
+        shortcut_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        self.shortcut_inputs = {}
+        current_shortcuts = resolve_shortcuts(self.config)
+        for action in SHORTCUT_ACTIONS:
+            editor = QKeySequenceEdit()
+            if hasattr(editor, "setMaximumSequenceLength"):
+                editor.setMaximumSequenceLength(1)
+            editor.setKeySequence(QKeySequence(current_shortcuts[action]))
+            clear_button = QPushButton(tr("settings.shortcut_clear"))
+            clear_button.setObjectName("cancel_btn")
+            clear_button.setMinimumWidth(clear_button.sizeHint().width())
+            clear_button.clicked.connect(editor.clear)
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            row_layout.addWidget(editor, 1)
+            row_layout.addWidget(clear_button)
+            shortcut_form.addRow(tr(f"settings.shortcut.{action}"), row)
+            self.shortcut_inputs[action] = editor
+
+        restore_button = QPushButton(tr("settings.shortcut_restore_defaults"))
+        restore_button.setObjectName("cancel_btn")
+        restore_button.clicked.connect(self._restore_default_shortcuts)
+        shortcut_form.addRow("", restore_button)
+        layout.addWidget(shortcut_group)
         layout.addStretch()
+        scroll.setWidget(content)
+        tab_layout.addWidget(scroll)
         return tab
+
+    def _restore_default_shortcuts(self):
+        for action, editor in self.shortcut_inputs.items():
+            editor.setKeySequence(QKeySequence(DEFAULT_SHORTCUTS[action]))
 
     # ── 标签页 4: 关于 ──────────────────────────
     def _create_about_tab(self):
@@ -694,7 +883,7 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout(tab)
         vbox.setSpacing(16)
         
-        version = self.config.get("version", "v1.5.4")
+        version = self.config.get("version", "v1.5.5")
         
         community_section = (
             f'<b>{tr("settings.community")}</b>1058127921<br>'
@@ -728,6 +917,23 @@ class SettingsDialog(QDialog):
     def _on_save(self):
         """将所有 GUI 值写回 config dict"""
         if not self._validate_openai_channels():
+            return
+        shortcuts = {
+            action: editor.keySequence().toString(QKeySequence.PortableText).split(",", 1)[0]
+            for action, editor in self.shortcut_inputs.items()
+        }
+        conflicts = find_shortcut_conflicts(shortcuts)
+        if conflicts:
+            first, second = conflicts[0]
+            QMessageBox.warning(
+                self,
+                tr("settings.shortcut_conflict_title"),
+                tr(
+                    "settings.shortcut_conflict",
+                    first=tr(f"settings.shortcut.{first}"),
+                    second=tr(f"settings.shortcut.{second}"),
+                ),
+            )
             return
         self.config["ui_language"] = self.ui_language_combo.currentData() or "auto"
         self.config["source_lang"] = self.source_lang_combo.currentText().strip()
@@ -785,8 +991,8 @@ class SettingsDialog(QDialog):
         self.config["socket_port"] = self.socket_port_spin.value()
         self.config["force_topmost"] = self.force_topmost_check.isChecked()
         self.config["show_character_name"] = self.show_character_name_check.isChecked()
+        self.config["shortcuts"] = shortcuts
 
-        self.config["system_prompt"] = self.sys_prompt_input.toPlainText().strip()
         self.config["batch_prompt"] = self.batch_prompt_input.toPlainText().strip()
         self.config["temperature"] = self.temp_spin.value()
         self.config["keep_original_names"] = self.keep_names_check.isChecked()

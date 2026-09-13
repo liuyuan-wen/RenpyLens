@@ -110,9 +110,9 @@ def build_exe():
     sys.path.append(os.path.join(os.getcwd(), "src"))
     try:
         from config import DEFAULT_CONFIG
-        version = DEFAULT_CONFIG.get("version", "v1.5.4")
+        version = DEFAULT_CONFIG.get("version", "v1.5.5")
     except ImportError:
-        version = "v1.5.4"
+        version = "v1.5.5"
 
     print(f"开始打包 RenpyLens {version}...")
     

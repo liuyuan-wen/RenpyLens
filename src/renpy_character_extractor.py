@@ -465,6 +465,26 @@ def extract_character_definitions(
     return definitions
 
 
+def scan_character_profiles(path: str | Path) -> list[dict[str, str]]:
+    """Prepare game-local profiles without choosing between conflicting definitions."""
+    candidates: dict[str, set[str]] = {}
+    for definition in extract_character_definitions(path):
+        name = definition.name or ""
+        if not name and not definition.dynamic:
+            try:
+                if ast.literal_eval(definition.expression) in (None, ""):
+                    continue
+            except (ValueError, SyntaxError):
+                pass
+        key = definition.variable or ("name:" + name if name else "")
+        if key:
+            candidates.setdefault(key, set()).add(name)
+    return [
+        {"character_id": key, "who": next(iter(names)) if len(names) == 1 else ""}
+        for key, names in candidates.items()
+    ]
+
+
 def extract_character_names(
     path: str | Path,
     *,

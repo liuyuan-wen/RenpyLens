@@ -8,6 +8,8 @@ import os
 import sys
 import copy
 
+from shortcuts import DEFAULT_SHORTCUTS, resolve_shortcuts
+
 if sys.platform == "win32":
     CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "RenpyLens")
 else:
@@ -16,10 +18,12 @@ else:
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "v1.5.4",
+    "version": "v1.5.5",
     "ui_language": "auto",
+    "settings_window_size": None,
     "rpgmaker_qol_games": {},
     "rpgmaker_qol_features": {},
+    "shortcuts": copy.deepcopy(DEFAULT_SHORTCUTS),
     "translation_engine": "builtin",
     "gemini_api_key": "",
     "gemini_url": "https://generativelanguage.googleapis.com",
@@ -75,22 +79,12 @@ DEFAULT_CONFIG = {
     "custom_url": "http://localhost:8000",
     "custom_model": "custom-model",
     "custom_openai_channels": [],
-    "system_prompt": (
-        'You are a game localization expert specializing in visual novels. '
-        'You are currently localizing the game "{game_title}". '
-        "LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. "
-        "Key principles: - Dialogue should sound like real people talking. "
-        "- Narration should flow like polished prose. "
-        "- Dramatic or poetic lines should carry weight and beauty. "
-        "- Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. "
-        "- Output ONLY the localized text."
-    ),
     "batch_prompt": (
         'You are a game localization expert specializing in visual novels. '
         'You are currently localizing the game "{game_title}". '
         "LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. "
         "Dialogue should sound natural, narration should flow like polished prose. "
-        "Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text."
+        "Never translate word-for-word."
     ),
     "temperature": 0.3,
     "keep_original_names": True,
@@ -108,9 +102,9 @@ DEFAULT_CONFIG = {
     "overlay_edit_width": 800,
     "overlay_edit_height": 300,
     "overlay_edit_ui_version": 6,
-    "prefetch_count": 5,
+    "prefetch_count": 10,
     "debounce_ms": 100,
-    "bulk_translate_batch_size": 5,
+    "bulk_translate_batch_size": 10,
     "bulk_translate_rpm": 60,
     "api_timeout_seconds": 120,
     "enable_timing_log": True,
@@ -134,17 +128,11 @@ def load_config() -> dict:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
 
-            old_system_prompts = [
-                "You are a professional game dialogue translator. Translate the user's message into {target_lang}. Keep it natural and concise for a visual novel. Output ONLY the translated text. No numbering, no quotes, no explanations.",
-                "You are a game localization expert specializing in visual novels. LOCALIZE the following text into {target_lang} so it reads as if it were originally written in {target_lang}. Key principles: - Dialogue should sound like real people talking. - Narration should flow like polished prose. - Dramatic or poetic lines should carry weight and beauty. - Never translate word-for-word. Adapt idioms, sentence structure, and phrasing to what feels natural in {target_lang}. - Output ONLY the localized text.",
-            ]
             old_batch_prompts = [
                 "You are a professional game dialogue translator. Translate ALL numbered dialogues into {target_lang}. Keep translations natural and concise. Output ONLY translations in the same numbered format [1]...[2]... No extra text.",
                 "You are a game localization expert specializing in visual novels. LOCALIZE ALL numbered lines into {target_lang} so they read as if originally written in {target_lang}. Dialogue should sound natural, narration should flow like polished prose. Never translate word-for-word. Output ONLY translations in the same numbered format [1]...[2]... No extra text.",
             ]
 
-            if saved.get("system_prompt") in old_system_prompts:
-                saved["system_prompt"] = DEFAULT_CONFIG["system_prompt"]
             if saved.get("batch_prompt") in old_batch_prompts:
                 saved["batch_prompt"] = DEFAULT_CONFIG["batch_prompt"]
             if saved.get("overlay_edit_ui_version", 0) < DEFAULT_CONFIG["overlay_edit_ui_version"]:
@@ -183,6 +171,7 @@ def load_config() -> dict:
 
             merged = copy.deepcopy(DEFAULT_CONFIG)
             merged.update(saved)
+            merged["shortcuts"] = resolve_shortcuts(saved)
             merged["version"] = DEFAULT_CONFIG["version"]
             if PRIORITY_CONFIG_PY:
                 merged.update(DEFAULT_CONFIG)

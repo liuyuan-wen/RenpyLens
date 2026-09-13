@@ -116,6 +116,7 @@ class HookServer(QObject):
                         "display_text": str(item.get("display_text") or item.get("source") or ""),
                         "token_values": dict(item.get("token_values") or {}),
                         "who": str(item.get("who") or ""),
+                        "character_id": str(item.get("character_id") or ""),
                         "italic": bool(item.get("italic", False)),
                     }
                 )
@@ -127,11 +128,13 @@ class HookServer(QObject):
                     "display_text": str(current_segment.get("display_text") or current_segment.get("source") or ""),
                     "token_values": dict(current_segment.get("token_values") or {}),
                     "who": str(current_segment.get("who") or msg.get("who") or ""),
+                    "character_id": str(current_segment.get("character_id") or msg.get("character_id") or ""),
                     "italic": bool(current_segment.get("italic", msg.get("italic", False))),
                 },
                 "choices": normalized_choices,
                 "menu_active": bool(msg.get("menu_active", False)),
                 "prefetch": normalized_prefetch,
+                "prefetch_menu_id": str(msg.get("prefetch_menu_id") or ""),
             }
             self.prefetch_received.emit(normalized_prefetch)
             self.text_event_received.emit(event)
@@ -166,7 +169,16 @@ class HookServer(QObject):
                 f"[HookServer] Current text: who={who}, what={what[:50]}, "
                 f"italic={italic}, choices={len(choices)}, menu_active={menu_active}"
             )
-            self.text_received.emit(who, what, italic, choices, menu_active)
+            if "character_id" in msg:
+                self.text_event_received.emit({
+                    "current": {"source": what, "who": who, "italic": italic,
+                                "character_id": str(msg.get("character_id") or "")},
+                    "choices": [{"source": choice} for choice in choices],
+                    "menu_active": menu_active,
+                    "prefetch_menu_id": str(msg.get("prefetch_menu_id") or ""),
+                })
+            else:
+                self.text_received.emit(who, what, italic, choices, menu_active)
 
     def _on_disconnected(self, socket):
         data = self._buffers.pop(socket, b"")

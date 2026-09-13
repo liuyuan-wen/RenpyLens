@@ -9,6 +9,7 @@ from PyQt5.QtCore import QTimer, Qt, QSize, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt5.QtWidgets import (
     QDialog,
+    QTabWidget,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -24,6 +25,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from i18n import manager as i18n_manager, tr
+from character_panel import CharacterPanel
 
 
 class EntrySummaryDelegate(QStyledItemDelegate):
@@ -105,6 +107,7 @@ class TranslationWorkbench(QWidget):
     visibility_changed = pyqtSignal(bool)
     save_requested = pyqtSignal(dict)
     autosave_requested = pyqtSignal(dict)
+    character_save_requested = pyqtSignal(dict)
     bulk_translate_requested = pyqtSignal()
     bulk_cancel_requested = pyqtSignal()
 
@@ -416,13 +419,23 @@ class TranslationWorkbench(QWidget):
         toolbar.addWidget(self.btn_pin)
         root.addLayout(toolbar)
 
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        translation_page = QWidget()
+        translation_layout = QVBoxLayout(translation_page)
+        translation_layout.setContentsMargins(0, 8, 0, 0)
+        self.tabs.addTab(translation_page, tr("characters.translation_tab"))
+        self.character_panel = CharacterPanel()
+        self.character_panel.save_requested.connect(self.character_save_requested.emit)
+        self.tabs.addTab(self.character_panel, tr("characters.title"))
+
         self.recent_title = QLabel(tr("workbench.recent"))
         self.recent_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #7aa2ff;")
-        root.addWidget(self.recent_title)
+        translation_layout.addWidget(self.recent_title)
 
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
-        root.addWidget(self.main_splitter, 1)
+        translation_layout.addWidget(self.main_splitter, 1)
 
         self.list_widget = QListWidget()
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
@@ -529,7 +542,13 @@ class TranslationWorkbench(QWidget):
         self.set_bulk_idle()
         i18n_manager().language_changed.connect(self.retranslate_ui)
 
+    def set_characters(self, game_id, profiles):
+        self.character_panel.set_characters(game_id, profiles)
+
     def retranslate_ui(self, *_):
+        self.tabs.setTabText(0, tr("characters.translation_tab"))
+        self.tabs.setTabText(1, tr("characters.title"))
+        self.character_panel.retranslate_ui()
         self._base_window_title = tr("workbench.title")
         self.setWindowTitle(self._base_window_title)
         self.set_game_title(self._game_title)
@@ -999,6 +1018,7 @@ class TranslationWorkbench(QWidget):
             self._apply_entry(entry)
 
     def focus_entry(self, source: str):
+        self.tabs.setCurrentIndex(0)
         source = str(source or "").strip()
         if not source:
             return

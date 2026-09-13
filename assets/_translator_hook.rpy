@@ -25,7 +25,7 @@ init python:
         _translator_runtime, "_renpylens_state_version", 0
     ) or 0)
     _translator_runtime._renpylens_state_version = _translator_state_version
-    _translator_prefetch_count = 5
+    _translator_prefetch_count = 10
     _translator_menu_versions = {}
     _translator_original_menu = None
     _translator_was_rollback = False
@@ -377,6 +377,19 @@ init python:
         text = " ".join(text.split())
         return text
 
+    def _translator_character_id(expression, previous=""):
+        """Preserve expressions, but keep literal speakers in the name namespace."""
+        if not expression or expression == "narrator":
+            return ""
+        if expression == "extend":
+            return previous
+        import ast
+        try:
+            ast.literal_eval(expression)
+        except (ValueError, SyntaxError):
+            return expression
+        return ""
+
     def _translator_apply_speaker_state(value, continuation=False):
         global _translator_last_resolved_who
 
@@ -507,6 +520,11 @@ init python:
         return None
 
     def _translator_get_visible_what(renpy):
+        # Input interactions may leave the previous say screen visible.
+        # Let screen capture report the input prompt instead of stale dialogue.
+        get_mode = getattr(renpy, "get_mode", None)
+        if get_mode is not None and get_mode() == "input":
+            return ""
         for screen_name in ("say", "multiple_say", "nvl"):
             try:
                 screen_obj = renpy.get_screen(screen_name)
@@ -671,8 +689,11 @@ init python:
     def _translator_get_custom_screen_payload(renpy):
         try:
             scene_lists = renpy.game.context().scene_lists
+            # Ren'Py stores (layer, tag) in older engines and
+            # (layer, tag, displayable) in newer ones.
             transient_screens = set(
-                getattr(scene_lists, "additional_transient", None) or []
+                tuple(entry[:2]) for entry in
+                (getattr(scene_lists, "additional_transient", None) or [])
             )
             layers = getattr(scene_lists, "layers", None) or {}
         except Exception:
@@ -682,11 +703,24 @@ init python:
         for layer, entries in layers.items():
             for entry in (entries or []):
                 screen = getattr(entry, "displayable", None)
-                if screen is None or screen.__class__.__name__ != "ScreenDisplayable":
+                if screen is None:
                     continue
 
                 tag = getattr(entry, "tag", None)
                 if "$" in str(tag or ""):
+                    continue
+
+                # `show text` puts Text (often wrapped in a Transform) on
+                # a scene layer, without creating a ScreenDisplayable.
+                if screen.__class__.__name__ != "ScreenDisplayable":
+                    body, _choices = _translator_collect_displayable_text(renpy, screen)
+                    if body:
+                        candidates.append({
+                            "screen": "scene:%s:%s" % (layer, tag),
+                            "what": "\n".join(body),
+                            "choices": [],
+                            "zorder": getattr(entry, "zorder", 0),
+                        })
                     continue
 
                 screen_name = getattr(screen, "screen_name", ()) or ()
@@ -756,6 +790,10 @@ init python:
                 "menu_active": bool(choices),
                 "screen_text": True,
             }
+            if payload.get("screen", "").startswith("scene:") and cur is not None:
+                upcoming, _branches, debug, _continuations = _translator_predict(renpy, cur)
+                msg["prefetch"] = upcoming
+                msg["prefetch_debug"] = debug
             _translator_last_current_msg = dict(msg)
             _translator_start_thread(_translator_send, (msg,))
         except Exception:
@@ -768,6 +806,12 @@ init python:
             return
 
         def display_say(who, what, *args, **kwargs):
+            # A game can replace config.all_character_callbacks after this
+            # hook initializes. Restore our callback at the last possible
+            # point before Ren'Py snapshots that list for this dialogue.
+            callbacks = renpy.config.all_character_callbacks
+            if _translator_callback not in callbacks:
+                callbacks.append(_translator_callback)
             previous = getattr(renpy, "_renpylens_display_context", None)
             show = args[0] if args else kwargs.get("show_function")
             character = getattr(show, "__self__", getattr(show, "im_self", None))
@@ -790,7 +834,10 @@ init python:
             if not isinstance(value, string_types):
                 return ""
             # Failure is not a display name. Do not return the source expression.
-            return renpy.substitute(value)
+            formatter = getattr(renpy, "substitute", None)
+            if formatter is None:
+                formatter = renpy.exports.substitute
+            return formatter(value)
 
         def display_name(value):
             try:
@@ -856,7 +903,7 @@ init python:
         except Exception:
             return True
 
-    def _translator_predict(renpy, current, limit=60, branch_limit=None, max_steps=1500, time_budget=0.05, choice_selector=None, input_provider=None, screen_selector=None, random_provider=None):
+    def _translator_predict(renpy, current, limit=60, branch_limit=None, max_steps=1500, time_budget=0.05, choice_selector=None, input_provider=None, screen_selector=None, random_provider=None, stop_selector=None, state_names=None, label_observer=None):
         """Interpret a bounded script prefix without executing game Python.
 
         Only plain data and explicitly supported syntax enter the shadow store.
@@ -884,6 +931,8 @@ init python:
         steps = [0]
         memo = {}
         shadow = {}
+        last_message = globals().get("_translator_last_current_msg") or {}
+        speaker_state = [last_message.get("character_id", ""), last_message.get("who", "")]
         audio_scope = [False]
         missing = object()
         upcoming = []
@@ -900,7 +949,9 @@ init python:
             "route_random": [],
         }
         if branch_limit is None:
-            branch_limit = _translator_prefetch_count
+            # A final fixed-size batch may deliberately overfill the last
+            # first-level branch by N-1 items.
+            branch_limit = max(1, _translator_prefetch_count * 2 - 1)
         branch_limit = max(0, int(branch_limit))
         try:
             string_types = (str, unicode)
@@ -996,6 +1047,8 @@ init python:
             if shadow[name] is missing:
                 raise Stop("missing-variable")
             return shadow[name]
+
+        assignment_target = [None]
 
         binary = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
                   ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
@@ -1155,7 +1208,11 @@ init python:
                         raise Stop("unsupported-input-arguments")
                     prompt = args[0] if args else kwargs.get("prompt", "")
                     default = args[1] if len(args) > 1 else kwargs.get("default", "")
-                    value = input_provider({"prompt": str(prompt), "default": str(default or "")})
+                    value = input_provider({
+                        "prompt": str(prompt),
+                        "default": str(default or ""),
+                        "target": assignment_target[0],
+                    })
                     if not isinstance(value, string_types):
                         raise Stop("unsupported-input-value")
                     debug["route_inputs"].append({
@@ -1211,7 +1268,16 @@ init python:
             for statement in body:
                 tick()
                 if isinstance(statement, ast.Assign):
-                    value = expression(statement.value)
+                    assignment_target[0] = (
+                        statement.targets[0].id
+                        if len(statement.targets) == 1
+                        and isinstance(statement.targets[0], ast.Name)
+                        else None
+                    )
+                    try:
+                        value = expression(statement.value)
+                    finally:
+                        assignment_target[0] = None
                     for target in statement.targets:
                         assign(target, value)
                 elif isinstance(statement, ast.AugAssign):
@@ -1334,6 +1400,29 @@ init python:
                 raise Stop(str(error))
             source = _translator_strip_text_tags(source)
             return source.strip() if strip else source
+
+        def resolve_scene_text(statement):
+            if type(statement).__name__ not in ("Show", "Scene"):
+                return None
+            imspec = getattr(statement, "imspec", None)
+            if not imspec or imspec[1] is not None:
+                return None
+            name = tuple(imspec[0])
+            images = getattr(getattr(getattr(renpy, "display", None), "image", None), "images", {})
+            native = getattr(getattr(getattr(renpy, "text", None), "extras", None), "ParameterizedText", None)
+            # Resolve the longest registered image name just as image lookup
+            # does. Read its argument in the shadow store; never construct it.
+            for length in range(len(name), 0, -1):
+                image = images.get(name[:length])
+                if image is None:
+                    continue
+                if native is None or type(image) is not native or length == len(name):
+                    return None
+                value = evaluate("".join(name[length:]))
+                if not isinstance(value, string_types):
+                    raise Stop("unsupported-scene-text")
+                return {"who": "", "what": text_value(value, translate=True), "italic": False}
+            return None
 
         def unwrap_curried(candidate):
             curry_module = getattr(renpy, "curry", None)
@@ -1586,10 +1675,22 @@ init python:
                 shadow[name] = value
 
         def resolve_say(statement):
+            item = resolve_say_value(statement)
+            raw = getattr(statement, "who", None)
+            if raw == "extend":
+                item["character_id"], item["who"] = speaker_state
+            else:
+                item["character_id"] = _translator_character_id(raw) if item["who"] else ""
+                speaker_state[:] = [item["character_id"], item["who"]]
+            return item
+
+        def resolve_say_value(statement):
             if getattr(statement, "arguments", None):
                 raise Stop("say-arguments")
             clean = text_value(statement.what or "")
             raw_who = getattr(statement, "who", None)
+            if raw_who == "extend":
+                return {"who": speaker_state[1], "what": clean, "italic": False}
             who = raw_who or ""
             if raw_who in shadow:
                 who = read(raw_who)
@@ -1709,19 +1810,84 @@ init python:
                 raise Stop("unsupported-node:" + kind)
             return next_node
 
+        def nested_menu_options(menu_node, active_frame_box, parent_path):
+            """Return visible nested choices and their isolated branch states."""
+            menu_id = _translator_menu_id(menu_node)
+            base = fork_value((shadow, frames, speaker_state))
+            set_expression = getattr(menu_node, "set", None)
+            set_value = None
+            if set_expression:
+                set_value = evaluate(set_expression)
+                if not isinstance(set_value, (list, set)):
+                    raise Stop("unsupported-menu-set")
+            options = []
+            for item_index, item in enumerate(getattr(menu_node, "items", None) or []):
+                restored = fork_value(base)
+                shadow.clear()
+                shadow.update(restored[0])
+                frames[:] = restored[1]
+                speaker_state[:] = restored[2]
+                active_frame_box[0] = frames[-1][1] if frames else {}
+                if not item or len(item) < 3 or not item[2]:
+                    continue
+                condition = item[1]
+                if condition not in (None, True):
+                    if condition is False or not isinstance(condition, string_types) or not evaluate(condition):
+                        continue
+                raw_choice = item[0] or ""
+                if set_value is not None and raw_choice in evaluate(set_expression):
+                    continue
+                choice_path = list(parent_path) + [[menu_id, item_index]]
+                if set_expression:
+                    selected_set = evaluate(set_expression)
+                    if isinstance(selected_set, list):
+                        selected_set.append(raw_choice)
+                    else:
+                        selected_set.add(raw_choice)
+                options.append({
+                    "node": item[2][0],
+                    "state": fork_value((shadow, frames, speaker_state)),
+                    "choice": text_value(raw_choice),
+                    "choice_path": choice_path,
+                    "stop_node": getattr(menu_node, "next", None),
+                })
+            restored = fork_value(base)
+            shadow.clear()
+            shadow.update(restored[0])
+            frames[:] = restored[1]
+            speaker_state[:] = restored[2]
+            active_frame_box[0] = frames[-1][1] if frames else {}
+            return options
+
         def resume_branch(task, active_frame_box):
             task["slices"] += 1
             restored = fork_value(task["state"])
             shadow.clear()
             shadow.update(restored[0])
             frames[:] = restored[1]
+            speaker_state[:] = restored[2]
             active_frame_box[0] = frames[-1][1] if frames else {}
             reset_slice()
             branch_record = task["record"]
             branch_node = task["node"]
             try:
                 while branch_node is not None and len(branch_record["items"]) < branch_limit:
-                    checkpoint = fork_value((shadow, frames))
+                    if branch_node is task.get("stop_node") and task.get("pending"):
+                        following = task["pending"].pop(0)
+                        branch_node = following["node"]
+                        task["choice_path"] = following["choice_path"]
+                        task["stop_node"] = following.get("stop_node")
+                        if following.get("state") is not None:
+                            restored = fork_value(following["state"])
+                            shadow.clear()
+                            shadow.update(restored[0])
+                            frames[:] = restored[1]
+                            speaker_state[:] = restored[2]
+                            active_frame_box[0] = frames[-1][1] if frames else {}
+                        task["node"] = branch_node
+                        task["state"] = fork_value((shadow, frames, speaker_state))
+                        continue
+                    checkpoint = fork_value((shadow, frames, speaker_state))
                     tick()
                     if type(branch_node).__name__ in ("Translate", "TranslateSay") and getattr(branch_node, "language", None) is None:
                         language = getattr(getattr(renpy.game, "preferences", None), "language", None)
@@ -1730,17 +1896,72 @@ init python:
                             if translated is not None and translated is not branch_node:
                                 branch_node = translated
                                 task["node"] = branch_node
-                                task["state"] = fork_value((shadow, frames))
+                                task["state"] = fork_value((shadow, frames, speaker_state))
                                 continue
                     if type(branch_node).__name__ == "Menu":
-                        raise Stop("menu-boundary")
+                        options = nested_menu_options(
+                            branch_node, active_frame_box, task.get("choice_path", []))
+                        for option in options:
+                            if option["choice"] and len(branch_record["items"]) < branch_limit:
+                                branch_record["items"].append({
+                                    "who": "",
+                                    "character_id": "",
+                                    "what": option["choice"],
+                                    "italic": False,
+                                    "entry_type": "choice",
+                                    "choice_path": option["choice_path"],
+                                })
+                        if len(branch_record["items"]) >= branch_limit or not options:
+                            break
+                        pending = task.setdefault("pending", [])
+                        parent_stop = task.get("stop_node")
+                        continuation = {
+                            "node": getattr(branch_node, "next", None),
+                            "state": None,
+                            "choice_path": list(task.get("choice_path", [])),
+                            "stop_node": parent_stop,
+                        }
+                        pending[0:0] = options[1:] + [continuation]
+                        first = options[0]
+                        branch_node = first["node"]
+                        task["choice_path"] = first["choice_path"]
+                        task["stop_node"] = first.get("stop_node")
+                        restored = fork_value(first["state"])
+                        shadow.clear()
+                        shadow.update(restored[0])
+                        frames[:] = restored[1]
+                        speaker_state[:] = restored[2]
+                        active_frame_box[0] = frames[-1][1] if frames else {}
+                        task["node"] = branch_node
+                        task["state"] = fork_value((shadow, frames, speaker_state))
+                        continue
                     if type(branch_node).__name__ in ("Say", "TranslateSay"):
                         say_item = resolve_say(branch_node)
                         if say_item["what"]:
+                            say_item["entry_type"] = "dialogue"
+                            say_item["choice_path"] = list(task.get("choice_path", []))
                             branch_record["items"].append(say_item)
+                    else:
+                        scene_item = resolve_scene_text(branch_node)
+                        if scene_item and scene_item["what"]:
+                            scene_item["entry_type"] = "dialogue"
+                            scene_item["choice_path"] = list(task.get("choice_path", []))
+                            branch_record["items"].append(scene_item)
                     branch_node = advance(branch_node, active_frame_box)
+                    if branch_node is None and task.get("pending"):
+                        following = task["pending"].pop(0)
+                        branch_node = following["node"]
+                        task["choice_path"] = following["choice_path"]
+                        task["stop_node"] = following.get("stop_node")
+                        if following.get("state") is not None:
+                            restored = fork_value(following["state"])
+                            shadow.clear()
+                            shadow.update(restored[0])
+                            frames[:] = restored[1]
+                            speaker_state[:] = restored[2]
+                            active_frame_box[0] = frames[-1][1] if frames else {}
                     task["node"] = branch_node
-                    task["state"] = fork_value((shadow, frames))
+                    task["state"] = fork_value((shadow, frames, speaker_state))
                 branch_record["complete"] = True
                 branch_record["stop_reason"] = (
                     "prefetch-limit"
@@ -1756,8 +1977,9 @@ init python:
                     shadow.clear()
                     shadow.update(checkpoint[0])
                     frames[:] = checkpoint[1]
+                    speaker_state[:] = checkpoint[2]
                     task["node"] = branch_node
-                    task["state"] = fork_value((shadow, frames))
+                    task["state"] = fork_value((shadow, frames, speaker_state))
                     branch_record["complete"] = False
                     return task["slices"] < 16
                 branch_record["complete"] = True
@@ -1771,7 +1993,7 @@ init python:
 
         def collect_menu(menu_node, active_frame_box):
             menu_id = _translator_menu_id(menu_node)
-            base = fork_value((shadow, frames))
+            base = fork_value((shadow, frames, speaker_state))
             reset_slice()
             set_value = None
             set_expression = getattr(menu_node, "set", None)
@@ -1785,6 +2007,7 @@ init python:
                 shadow.clear()
                 shadow.update(restored[0])
                 frames[:] = restored[1]
+                speaker_state[:] = restored[2]
                 active_frame_box[0] = frames[-1][1] if frames else {}
                 if not item or len(item) < 3 or not item[2]:
                     continue
@@ -1813,8 +2036,11 @@ init python:
                 branches.append(branch_record)
                 task = {
                     "node": item[2][0],
-                    "state": fork_value((shadow, frames)),
+                    "state": fork_value((shadow, frames, speaker_state)),
                     "record": branch_record,
+                    "choice_path": [[menu_id, item_index]],
+                    "stop_node": None,
+                    "pending": [],
                     "slices": 0,
                 }
                 if resume_branch(task, active_frame_box):
@@ -1825,6 +2051,7 @@ init python:
             shadow.clear()
             shadow.update(restored[0])
             frames[:] = restored[1]
+            speaker_state[:] = restored[2]
             active_frame_box[0] = frames[-1][1] if frames else {}
 
         def select_menu(menu_node):
@@ -1856,7 +2083,11 @@ init python:
             if not choices:
                 return getattr(menu_node, "next", None)
             selected_index = choice_selector([
-                {"choice_index": item["choice_index"], "choice": item["choice"]}
+                {
+                    "menu_id": _translator_menu_id(menu_node),
+                    "choice_index": item["choice_index"],
+                    "choice": item["choice"],
+                }
                 for item in choices
             ])
             selected = next(
@@ -1872,13 +2103,14 @@ init python:
                     set_value.add(selected["raw_choice"])
             debug["route_choices"].append({
                 "menu_id": _translator_menu_id(menu_node),
+                "dialogue_index": len(upcoming),
                 "choice_index": selected["choice_index"],
                 "choice": selected["choice"],
             })
             return menu_node.items[selected["choice_index"]][2][0]
 
         try:
-            if type(current).__name__ not in ("Say", "TranslateSay", "Menu"):
+            if type(current).__name__ not in ("Say", "TranslateSay", "Menu", "Show", "Scene", "With", "UserStatement"):
                 raise Stop("unsupported-current-node:" + type(current).__name__)
             context = renpy.game.context()
             returns = list(getattr(context, "return_stack", []))
@@ -1891,9 +2123,13 @@ init python:
             if frames:
                 frames[-1] = (frames[-1][0], active_frame)
             while node is not None and len(upcoming) < limit:
+                if stop_selector is not None and stop_selector(node):
+                    raise Stop("target-node")
                 tick()
                 debug["visited_nodes"] += 1
                 kind = type(node).__name__
+                if kind == "Label" and label_observer is not None:
+                    label_observer(str(getattr(node, "name", "")))
                 if kind in ("Translate", "TranslateSay") and getattr(node, "language", None) is None:
                     language = getattr(getattr(renpy.game, "preferences", None), "language", None)
                     if language is not None:
@@ -1911,6 +2147,10 @@ init python:
                     say_item = resolve_say(node)
                     if say_item["what"]:
                         upcoming.append(say_item)
+                else:
+                    scene_item = resolve_scene_text(node)
+                    if scene_item and scene_item["what"]:
+                        upcoming.append(scene_item)
                 node = advance(node, active_frame_box)
             debug["stop_reason"] = "prefetch-limit" if node is not None else "next-none"
         except Stop as error:
@@ -1923,6 +2163,14 @@ init python:
         debug["steps"] = steps[0]
         debug["elapsed_ms"] = round((clock() - started) * 1000, 3)
         debug["branch_count"] = len(branches)
+        if state_names is not None:
+            route_state = {}
+            for name in state_names:
+                if name in shadow and shadow[name] is not missing:
+                    route_state[name] = shadow[name]
+                elif not name.startswith("persistent.") and name in renpy.store.__dict__:
+                    route_state[name] = renpy.store.__dict__[name]
+            debug["route_state"] = route_state
         return upcoming, branches, debug, continuations
 
     def _translator_extract_menu_entries(renpy, menu_node):
@@ -2118,6 +2366,7 @@ init python:
                                 "source": clean_what,
                                 "entry_type": "dialogue",
                                 "speaker": _translator_normalize_speaker(speaker),
+                                "character_id": _translator_character_id(getattr(node, "who", None)),
                             }
                         )
 
@@ -2193,7 +2442,7 @@ init python:
                 with _translator_scan_lock:
                     _translator_scan_cancel_requested = True
             elif command == "set_prefetch_count":
-                _translator_prefetch_count = max(1, min(20, int(message.get("count", 5))))
+                _translator_prefetch_count = max(3, min(20, int(message.get("count", 10))))
         except Exception:
             pass
         finally:
@@ -2298,6 +2547,7 @@ init python:
                             "session_id": _translator_session_id,
                             "state_version": _translator_next_state_version(),
                             "who": visible_who,
+                            "character_id": _translator_character_id(getattr(cur, "who", None)),
                             "what": visible_what,
                             "italic": False,
                             "choices": [],
@@ -2392,6 +2642,9 @@ init python:
                                           callback=display_context is not None or "who" in kwargs)
             continuation = getattr(cur, "who", None) == "extend"
             who = _translator_apply_speaker_state(who, continuation=continuation)
+            character_id = _translator_character_id(
+                getattr(cur, "who", None),
+                (_translator_last_current_msg or {}).get("character_id", ""))
 
             is_italic = False
             stripped_what = what.strip()
@@ -2432,6 +2685,7 @@ init python:
                 "session_id": _translator_session_id,
                 "state_version": _translator_next_state_version(),
                 "who": _translator_normalize_speaker(who) if who else "",
+                "character_id": character_id if who else "",
                 "what": clean_what,
                 "italic": is_italic,
                 "choices": choices,
@@ -2462,6 +2716,7 @@ init python:
             branch_message = None
             if branches:
                 menu_id = branches[0].get("menu_id", "")
+                msg["prefetch_menu_id"] = menu_id
                 _translator_menu_versions[menu_id] = msg["state_version"]
                 branch_message = {
                     "type": "branch_prefetch",

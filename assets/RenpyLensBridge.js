@@ -16,6 +16,9 @@
  * @param qolFeatures
  * @type string
  * @default {}
+ * @param shortcuts
+ * @type string
+ * @default {}
  * @help This file is installed and removed automatically by RenpyLens.
  */
 
@@ -39,12 +42,32 @@
         dialogueRollback: false,
         saveAnywhere: false
     };
+    var shortcuts = {
+        rpgmaker_dialogue_rollback: "Ctrl+Z",
+        rpgmaker_save_anywhere: "Ctrl+S",
+        rpgmaker_move_speed: "G",
+        rpgmaker_through: "H",
+        rpgmaker_encounters: "N",
+        rpgmaker_battle_victory: "K"
+    };
     try {
         if (parameters.qolFeatures) {
             var configuredFeatures = JSON.parse(String(parameters.qolFeatures));
             if (configuredFeatures && typeof configuredFeatures === "object") {
                 Object.keys(qolFeatures).forEach(function(key) {
                     qolFeatures[key] = configuredFeatures[key] === true;
+                });
+            }
+        }
+    } catch (error) {}
+    try {
+        if (parameters.shortcuts) {
+            var configuredShortcuts = JSON.parse(String(parameters.shortcuts));
+            if (configuredShortcuts && typeof configuredShortcuts === "object") {
+                Object.keys(shortcuts).forEach(function(key) {
+                    if (Object.prototype.hasOwnProperty.call(configuredShortcuts, key)) {
+                        shortcuts[key] = String(configuredShortcuts[key] || "");
+                    }
                 });
             }
         }
@@ -109,14 +132,79 @@
             payload.engine = engine;
             payload.engine_version = String(Utils.RPGMAKER_VERSION || "");
             payload.session_id = sessionId;
-            var socket = net.createConnection({ host: "127.0.0.1", port: socketPort }, function() {
-                socket.end(JSON.stringify(payload));
+            var raw = JSON.stringify(payload);
+            var socket = null;
+            var connectedBeforeReturn = false;
+            socket = net.createConnection({ host: "127.0.0.1", port: socketPort }, function() {
+                if (socket) socket.end(raw);
+                else connectedBeforeReturn = true;
             });
+            if (connectedBeforeReturn) socket.end(raw);
             socket.setTimeout(1000, function() { socket.destroy(); });
             socket.on("error", function() {});
         } catch (error) {
             // The game must keep running when RenpyLens is not listening.
         }
+    }
+
+    function applyShortcuts(configured) {
+        if (!configured || typeof configured !== "object") return;
+        Object.keys(shortcuts).forEach(function(key) {
+            if (Object.prototype.hasOwnProperty.call(configured, key)) {
+                shortcuts[key] = String(configured[key] || "");
+            }
+        });
+    }
+
+    function setupControlServer() {
+        try {
+            var net = require("net");
+            var server = net.createServer(function(client) {
+                var chunks = "";
+                client.setEncoding("utf8");
+                client.on("data", function(chunk) { chunks += chunk; });
+                client.on("end", function() {
+                    try {
+                        var message = JSON.parse(chunks);
+                        if (message.command !== "set_shortcuts" ||
+                                String(message.session_id || "") !== sessionId) return;
+                        applyShortcuts(message.shortcuts);
+                        send({
+                            type: "shortcuts_applied",
+                            request_id: String(message.request_id || "")
+                        });
+                    } catch (error) {}
+                });
+                client.on("error", function() {});
+            });
+            server.on("error", function() {});
+            server.listen(socketPort + 1, "127.0.0.1");
+        } catch (error) {}
+    }
+
+    function shortcutMatches(event, value) {
+        var shortcut = String(value || "").trim();
+        if (!shortcut) return false;
+        var plusKey = /\+\+$/.test(shortcut);
+        var parts = plusKey ? shortcut.substring(0, shortcut.length - 2).split("+") : shortcut.split("+");
+        var key = plusKey ? "+" : String(parts.pop() || "").trim().toUpperCase();
+        var ctrl = false, alt = false, shift = false;
+        parts.forEach(function(part) {
+            part = String(part || "").trim().toUpperCase();
+            if (part === "CTRL" || part === "CONTROL") ctrl = true;
+            else if (part === "ALT") alt = true;
+            else if (part === "SHIFT") shift = true;
+        });
+        var keyCode = key.length === 1 ? key.charCodeAt(0) : ({
+            SPACE:32, TAB:9, ESC:27, ESCAPE:27, ENTER:13, RETURN:13,
+            BACKSPACE:8, DELETE:46, INSERT:45, HOME:36, END:35,
+            PAGEUP:33, PAGEDOWN:34, LEFT:37, UP:38, RIGHT:39, DOWN:40,
+            "+":187, "=":187, "-":189, ",":188, ".":190, "/":191,
+            ";":186, "[":219, "\\":220, "]":221, "'":222
+        })[key];
+        if (/^F([1-9]|1[0-9]|2[0-4])$/.test(key)) keyCode = 111 + Number(key.substring(1));
+        return Number(event.keyCode) === keyCode && !!event.ctrlKey === ctrl &&
+            !!event.altKey === alt && !!event.shiftKey === shift && !event.metaKey;
     }
 
     function actorName(id) {
@@ -1337,22 +1425,21 @@
         };
 
         document.addEventListener("keydown", function(event) {
-            if (event.repeat || event.altKey || event.metaKey) return;
-            if (event.ctrlKey && event.keyCode === 83 && featureEnabled("saveAnywhere")) {
+            if (event.repeat || event.metaKey) return;
+            if (shortcutMatches(event, shortcuts.rpgmaker_save_anywhere) && featureEnabled("saveAnywhere")) {
                 event.preventDefault();
                 openSaveAnywhere();
                 return;
             }
-            if (event.ctrlKey && event.keyCode === 90 && featureEnabled("dialogueRollback")) {
+            if (shortcutMatches(event, shortcuts.rpgmaker_dialogue_rollback) && featureEnabled("dialogueRollback")) {
                 event.preventDefault();
                 rollbackDialogueInteraction();
                 return;
             }
-            if (event.ctrlKey) return;
-            if (event.keyCode === 71 && featureEnabled("moveSpeed")) toggleSpeed();
-            else if (event.keyCode === 72 && featureEnabled("through")) toggleThrough();
-            else if (event.keyCode === 78 && featureEnabled("encounters")) toggleEncounters();
-            else if (event.keyCode === 75 && featureEnabled("battleVictory")) winBattle();
+            if (shortcutMatches(event, shortcuts.rpgmaker_move_speed) && featureEnabled("moveSpeed")) toggleSpeed();
+            else if (shortcutMatches(event, shortcuts.rpgmaker_through) && featureEnabled("through")) toggleThrough();
+            else if (shortcutMatches(event, shortcuts.rpgmaker_encounters) && featureEnabled("encounters")) toggleEncounters();
+            else if (shortcutMatches(event, shortcuts.rpgmaker_battle_victory) && featureEnabled("battleVictory")) winBattle();
             else return;
             event.preventDefault();
         }, true);
@@ -1523,6 +1610,7 @@
     };
 
     if (qolEnabled) setupQoL();
+    setupControlServer();
 
     send({
         type: "hook_ready",

@@ -191,6 +191,7 @@ def _render_plugin_registration(
     rpgmaker_qol_enabled: bool = False,
     rpgmaker_qol_locale: str = "en_US",
     rpgmaker_qol_features: dict[str, bool] | None = None,
+    shortcuts: dict[str, str] | None = None,
 ) -> str:
     features = {
         str(key): bool(value)
@@ -203,6 +204,7 @@ def _render_plugin_registration(
         "qolEnabled": "true" if rpgmaker_qol_enabled else "false",
         "qolLocale": str(rpgmaker_qol_locale or "en_US"),
         "qolFeatures": json.dumps(features, ensure_ascii=False, separators=(",", ":")),
+        "shortcuts": json.dumps(shortcuts or {}, ensure_ascii=False, separators=(",", ":")),
     }
     entry = {
         "name": RPGMAKER_BRIDGE_NAME,
@@ -225,6 +227,7 @@ def _install_rpgmaker_bridge(
     rpgmaker_qol_enabled: bool = False,
     rpgmaker_qol_locale: str = "en_US",
     rpgmaker_qol_features: dict[str, bool] | None = None,
+    shortcuts: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     content_dir = Path(target.content_dir)
     plugins_js = content_dir / "js" / "plugins.js"
@@ -250,6 +253,7 @@ def _install_rpgmaker_bridge(
             rpgmaker_qol_enabled,
             rpgmaker_qol_locale,
             rpgmaker_qol_features,
+            shortcuts,
         )
         newline = "\r\n" if "\r\n" in original_text else "\n"
         if clean_text and not clean_text.endswith(("\n", "\r")):
@@ -278,6 +282,7 @@ def _install_rpgmaker_bridge(
                 str(key): bool(value)
                 for key, value in (rpgmaker_qol_features or {}).items()
             },
+            "shortcuts": dict(shortcuts or {}),
         }
         _atomic_write(
             manifest_path,
@@ -338,6 +343,7 @@ def install_hook(
     rpgmaker_qol_enabled: bool = False,
     rpgmaker_qol_locale: str = "en_US",
     rpgmaker_qol_features: dict[str, bool] | None = None,
+    shortcuts: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     if target.engine == ENGINE_RENPY:
         return inject_renpy_hook(target.exe_path, renpy_hook_source, socket_port)
@@ -350,6 +356,7 @@ def install_hook(
         rpgmaker_qol_enabled,
         rpgmaker_qol_locale,
         rpgmaker_qol_features,
+        shortcuts,
     )
 
 
