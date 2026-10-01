@@ -39,12 +39,17 @@ Use these communities for support, feedback, release news, and early feature pre
 
 ## 🆕 Release Notes
 
-### v1.5.5 `Latest`
+### v1.5.6 `Latest`
 
-- **Character-aware translation:** Added a character panel that discovers Ren'Py characters and records display names, gender, and notes, then supplies that context to translation requests for more accurate dialogue.
-- **Custom shortcuts:** Added configurable global and RPG Maker shortcuts, including a system-wide overlay toggle and automatic synchronization of in-game controls.
-- **Translation workflow:** Unified single and batch requests under a stricter numbered protocol, improved speaker-label preservation and branch prefetching, and increased default prefetch and batch sizes.
-- **Compatibility and interface:** Added Windows shortcut (`.lnk`) launching with arguments and working directories, improved overlay word wrapping, and refined settings controls, scrolling, sizing, and menu behavior.
+- **Retranslate current dialogue:** Right-click the overlay to replace the current translation using your settings and surrounding dialogue as context.
+- **Ren'Py prediction:** Reworked story prediction and improved branch prefetching and text synchronization when selecting routes or rolling back.
+- **Translation and errors:** Reinforced target-language instructions and added localized guidance for timeouts, API key errors, rate limits, and service failures.
+
+### v1.5.5
+
+- **Character context and translation:** Added character profiles for dialogue context and improved batch translation, speaker labels, and branch prefetching.
+- **Custom shortcuts:** Added configurable global and RPG Maker shortcuts, including an overlay toggle and synchronized in-game controls.
+- **Compatibility and interface:** Added Windows shortcut (`.lnk`) launching and improved overlay wrapping, settings layout, and menu interactions.
 
 ### v1.5.4
 
@@ -95,7 +100,7 @@ Use these communities for support, feedback, release news, and early feature pre
 ## 🎮 Getting Started
 
 1. **Download RenpyLens**
-   - Download the latest `RenpyLens_v1.5.5.exe` from the repository's **Releases** page.
+   - Download the latest `RenpyLens_v1.5.6.exe` from the repository's **Releases** page.
    - Alternatively, follow the development instructions below to run it from source.
 2. **Choose a translation provider**
    - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**. If you are not in mainland China, select **Global node** in **Route**.
@@ -148,7 +153,7 @@ python build.py
 python build.py --python "C:\path\to\venv\python.exe"
 ```
 
-The build output is `RenpyLens_v1.5.5.exe`. If `upx.exe` is present in the project root, the build script uses it for compression by default. If the resulting executable is blocked by antivirus software or fails to start, build it without UPX:
+The build output is `RenpyLens_v1.5.6.exe`. If `upx.exe` is present in the project root, the build script uses it for compression by default. If the resulting executable is blocked by antivirus software or fails to start, build it without UPX:
 
 ```powershell
 python build.py --noupx

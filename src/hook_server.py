@@ -96,11 +96,37 @@ class HookServer(QObject):
         if socket in self._buffers:
             self._buffers[socket] += data
 
+    @staticmethod
+    def uses_text_event(msg: dict) -> bool:
+        """Whether current text is delivered with protocol metadata."""
+        return (
+            isinstance(msg.get("current_segment"), dict)
+            or isinstance(msg.get("choice_segments"), list)
+            or "character_id" in msg
+        )
+
     def _emit_current_text(self, msg: dict):
         current_segment = msg.get("current_segment")
         choice_segments = msg.get("choice_segments")
         if isinstance(current_segment, dict) or isinstance(choice_segments, list):
             current_segment = dict(current_segment or {})
+            # v3 producers may send only ``choice_segments`` for a menu while
+            # retaining the legacy top-level current fields.  Preserve those
+            # fields as the fallback segment so the caption/speaker is not
+            # lost when normalizing the structured event.
+            current_source = str(
+                current_segment.get("source")
+                or current_segment.get("display_text")
+                or msg.get("source")
+                or msg.get("display_text")
+                or msg.get("what")
+                or ""
+            )
+            current_display = str(
+                current_segment.get("display_text")
+                or msg.get("display_text")
+                or current_source
+            )
             normalized_choices = []
             for item in choice_segments or []:
                 if isinstance(item, dict):
@@ -118,18 +144,30 @@ class HookServer(QObject):
                         "who": str(item.get("who") or ""),
                         "character_id": str(item.get("character_id") or ""),
                         "italic": bool(item.get("italic", False)),
+                        "node_id": str(item.get("node_id") or item.get("menu_id") or ""),
+                        "edge_id": str(item.get("edge_id") or ""),
                     }
                 )
             event = {
+                "type": "current",
                 "engine": str(msg.get("engine") or ""),
                 "session_id": str(msg.get("session_id") or ""),
+                "protocol_version": int(msg.get("protocol_version", 1) or 1),
+                "graph_id": str(msg.get("graph_id") or ""),
+                "event_seq": msg.get("event_seq"),
+                "state_version": msg.get("state_version"),
+                "node_id": str(msg.get("node_id") or msg.get("menu_id") or ""),
+                "edge_id": str(msg.get("edge_id") or ""),
+                "block_id": str(msg.get("block_id") or ""),
                 "current": {
-                    "source": str(current_segment.get("source") or current_segment.get("display_text") or ""),
-                    "display_text": str(current_segment.get("display_text") or current_segment.get("source") or ""),
+                    "source": current_source,
+                    "display_text": current_display,
                     "token_values": dict(current_segment.get("token_values") or {}),
                     "who": str(current_segment.get("who") or msg.get("who") or ""),
                     "character_id": str(current_segment.get("character_id") or msg.get("character_id") or ""),
                     "italic": bool(current_segment.get("italic", msg.get("italic", False))),
+                    "node_id": str(current_segment.get("node_id") or msg.get("node_id") or ""),
+                    "edge_id": str(current_segment.get("edge_id") or msg.get("edge_id") or ""),
                 },
                 "choices": normalized_choices,
                 "menu_active": bool(msg.get("menu_active", False)),
@@ -171,8 +209,18 @@ class HookServer(QObject):
             )
             if "character_id" in msg:
                 self.text_event_received.emit({
+                    "type": "current",
+                    "session_id": str(msg.get("session_id") or ""),
+                    "protocol_version": int(msg.get("protocol_version", 1) or 1),
+                    "graph_id": str(msg.get("graph_id") or ""),
+                    "event_seq": msg.get("event_seq"),
+                    "state_version": msg.get("state_version"),
+                    "node_id": str(msg.get("node_id") or msg.get("menu_id") or ""),
+                    "edge_id": str(msg.get("edge_id") or ""),
+                    "block_id": str(msg.get("block_id") or ""),
                     "current": {"source": what, "who": who, "italic": italic,
-                                "character_id": str(msg.get("character_id") or "")},
+                                "character_id": str(msg.get("character_id") or ""),
+                                "node_id": str(msg.get("node_id") or "")},
                     "choices": [{"source": choice} for choice in choices],
                     "menu_active": menu_active,
                     "prefetch_menu_id": str(msg.get("prefetch_menu_id") or ""),

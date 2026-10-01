@@ -6,6 +6,7 @@
 # 2. 依次“放行”（取消忽略）必要的文件
 !/README.md
 !/README.zh-CN.md
+!/AGENTS.md
 !/build.py
 !/requirements.txt
 !/upx.exe
@@ -15,6 +16,14 @@
 # 3. “放行”必要的文件夹及其内部内容
 !/assets/
 !/src/
+!/graph/
+!/graph/**
+!/.codex/
+!/.codex/skills/
+!/.codex/skills/renpylens-release/
+!/.codex/skills/renpylens-release/SKILL.md
+!/.codex/skills/renpylens-release/references/
+!/.codex/skills/renpylens-release/references/github-rest.md
 
 # ==================================
 # 4. 在已放行的规则中，做特定的额外排除
@@ -23,6 +32,20 @@
 # Tests are kept locally and are not synchronized with the repository.
 tests/
 
+# Semantic Kernel fixtures and compact regression manifests are reviewable.
+!/tests/
+/tests/*
+!/tests/semantics/
+!/tests/semantics/**
+# Large phase-0 evidence stays local; manifests and tests remain reviewable.
+/tests/semantics/artifacts/
+# Ren'Py fixture runtime output stays local.
+/tests/semantics/fixtures/**/game/cache/
+/tests/semantics/fixtures/**/game/saves/
+/tests/semantics/fixtures/**/*.rpyc
+/tests/semantics/fixtures/**/log.txt
+
 # 针对源码文件夹中的编译缓存、运行时文件做基本排除
 /src/__pycache__/
 *.pyc
+*.pyo

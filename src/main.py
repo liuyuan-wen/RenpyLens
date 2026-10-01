@@ -28,7 +28,9 @@ from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QColor, QPalette, QT
 from config import load_config, save_config
 from hwid_utils import NO_EXPIRY, get_hwid, register_trial_key, fetch_trial_key_expiry
 from hook_server import HookServer
+from renpylens_semantics.protocol import EventOrderTracker
 from translator import BaseTranslator, create_translator, KeyExpiredError, RateLimitError
+from translation_errors import describe_translation_error
 from provider_registry import (
     iter_provider_options,
     provider_connection_signature,
@@ -172,6 +174,7 @@ class MainWindow(QWidget):
     _cache_state_signal = pyqtSignal(bool)
     _latency_test_signal = pyqtSignal(object)
     _character_scan_signal = pyqtSignal(str)
+    _retranslation_finished = pyqtSignal(object)
     SUPPORT_QQ_GROUP = "1058127921"
     TRANSLATION_REPEAT_CHAR_LIMIT = BaseTranslator.TRANSLATION_REPEAT_CHAR_LIMIT
     TRANSLATION_LENGTH_RATIO_LIMIT = BaseTranslator.TRANSLATION_LENGTH_RATIO_LIMIT
@@ -181,7 +184,7 @@ class MainWindow(QWidget):
         self.config = load_config()
         set_language(self.config.get("ui_language", "auto"), QApplication.instance())
 
-        version = self.config.get("version", "v1.5.5")
+        version = self.config.get("version", "v1.5.6")
         self.setWindowTitle(tr("app.title", version=version))
         self.resize(800, 10)
         self.setAcceptDrops(True)
@@ -191,6 +194,10 @@ class MainWindow(QWidget):
         self.cache = TranslationCache()
         self._prefetch_running = False
         self._latest_prefetch_items = []
+        self._recent_dialogues = deque(maxlen=20)
+        self._current_dialogue_item = None
+        self._retranslation_token = 0
+        self._retranslation_running = False
         self._latest_prefetch_menu_id = ""
         self._latest_branch_prefetch = {}
         self._is_pinned = self.config.get("window_pinned", False)
@@ -204,12 +211,19 @@ class MainWindow(QWidget):
         self._branch_prefetch_queue = []
         self._branch_prefetch_queued_texts = set()
         self._branch_prefetch_session = ""
+        self._branch_prefetch_graph = ""
         self._branch_prefetch_menu = ""
         self._branch_prefetch_version = -1
         self._branch_prefetch_selected = None
         self._branch_selection_tombstones = {}
         self._latest_hook_state_session = ""
+        self._latest_hook_graph = ""
         self._latest_hook_state_version = -1
+        self._latest_hook_event_seq = -1
+        self._hook_event_order = EventOrderTracker()
+        self._latest_hook_node_id = ""
+        self._latest_hook_edge_id = ""
+        self._latest_hook_block_id = ""
         self._branch_prefetch_epoch = 0
         self._branch_cache_epoch = 0
         self._branch_translator = None
@@ -219,6 +233,7 @@ class MainWindow(QWidget):
         self._current_game_launch: GameLaunchSpec | None = None
         self._current_game: GameTarget | None = None
         self._hook_session_id = ""
+        self._hook_graph_id = ""
         self._runtime_token_values = {}
         self._runtime_display_texts = {}
         self._game_process = None
@@ -266,6 +281,7 @@ class MainWindow(QWidget):
         self._cache_state_signal.connect(self.btn_clear_cache.setEnabled)
         self._latency_test_signal.connect(self._on_builtin_latency_result)
         self._character_scan_signal.connect(self._on_character_scan_finished)
+        self._retranslation_finished.connect(self._on_retranslation_finished)
         self._key_expired_shown = False  # 防止重复弹窗
 
         # 游戏进程监控定时器
@@ -306,6 +322,11 @@ class MainWindow(QWidget):
     def _reset_hook_session_state(self):
         if hasattr(self, "_branch_prefetch_condition"):
             self._reset_branch_prefetch(discard_results=True)
+        self._recent_dialogues.clear()
+        self._current_dialogue_item = None
+        self._latest_prefetch_items = []
+        self._retranslation_token += 1
+        self._retranslation_running = False
         self._hook_session_ready = False
         self._hook_ready_event.clear()
         self._hook_runtime_ready = False
@@ -315,19 +336,28 @@ class MainWindow(QWidget):
         self._hook_runtime_ready = True
         self._hook_runtime_ready_event.set()
 
-    def _reset_branch_prefetch(self, discard_results: bool = False, rebuild_translator: bool = False):
+    def _reset_branch_prefetch(self, discard_results: bool = False,
+                               rebuild_translator: bool = False, reset_event_order: bool = True):
         with self._branch_prefetch_condition:
             self._branch_prefetch_queue.clear()
             self._branch_prefetch_queued_texts.clear()
             self._branch_prefetch_session = ""
+            self._branch_prefetch_graph = ""
             self._branch_prefetch_menu = ""
             self._branch_prefetch_version = -1
             self._branch_prefetch_selected = None
             self._latest_branch_prefetch = {}
             self._latest_prefetch_menu_id = ""
             self._branch_selection_tombstones.clear()
-            self._latest_hook_state_session = ""
-            self._latest_hook_state_version = -1
+            if reset_event_order:
+                self._latest_hook_state_session = ""
+                self._latest_hook_graph = ""
+                self._latest_hook_state_version = -1
+                self._latest_hook_event_seq = -1
+                self._hook_event_order.reset()
+            self._latest_hook_node_id = ""
+            self._latest_hook_edge_id = ""
+            self._latest_hook_block_id = ""
             self._branch_prefetch_epoch += 1
             if discard_results:
                 self._branch_cache_epoch += 1
@@ -339,6 +369,9 @@ class MainWindow(QWidget):
         if job.get("epoch") != self._branch_prefetch_epoch:
             return False
         if job.get("session_id") != self._branch_prefetch_session:
+            return False
+        branch_graph = self.__dict__.get("_branch_prefetch_graph", "")
+        if branch_graph and job.get("graph_id") not in ("", branch_graph):
             return False
         if job.get("menu_id") != self._branch_prefetch_menu:
             return False
@@ -371,8 +404,11 @@ class MainWindow(QWidget):
         return translator
 
     def _on_branch_prefetch_received(self, message: dict):
+        if not self._observe_hook_state(message):
+            return
         session_id = str(message.get("session_id") or "")
-        menu_id = str(message.get("menu_id") or "")
+        graph_id = str(message.get("graph_id") or "")
+        menu_id = str(message.get("node_id") or message.get("menu_id") or "")
         try:
             version = int(message.get("state_version", -1))
         except (TypeError, ValueError):
@@ -381,22 +417,31 @@ class MainWindow(QWidget):
             return
 
         with self._branch_prefetch_condition:
+            branch_graph = self.__dict__.get("_branch_prefetch_graph", "")
             if self._latest_hook_state_session and session_id != self._latest_hook_state_session:
+                return
+            if self.__dict__.get("_latest_hook_graph", "") and graph_id and graph_id != self.__dict__.get("_latest_hook_graph", ""):
                 return
             if session_id == self._latest_hook_state_session and version < self._latest_hook_state_version:
                 return
             if session_id == self._branch_prefetch_session and version < self._branch_prefetch_version:
                 return
-            same_menu = session_id == self._branch_prefetch_session and menu_id == self._branch_prefetch_menu
+            same_menu = (
+                session_id == self._branch_prefetch_session
+                and menu_id == self._branch_prefetch_menu
+                and (not graph_id or not branch_graph or graph_id == branch_graph)
+            )
             if not same_menu:
                 self._branch_prefetch_queue.clear()
                 self._branch_prefetch_queued_texts.clear()
                 self._branch_prefetch_epoch += 1
                 self._branch_prefetch_selected = None
             self._branch_prefetch_session = session_id
+            self._branch_prefetch_graph = graph_id
             self._branch_prefetch_menu = menu_id
             self._branch_prefetch_version = version
-            tombstone = self._branch_selection_tombstones.get((session_id, menu_id))
+            tombstone = self._branch_selection_tombstones.get(
+                self._branch_identity_key(graph_id, session_id, menu_id))
             if tombstone is not None and tombstone[0] >= version:
                 self._branch_prefetch_selected = tombstone[1]
             normalized_branches = []
@@ -419,25 +464,36 @@ class MainWindow(QWidget):
                         raw_item = {"what": raw_item}
                     text = str(raw_item.get("what") or "").strip()
                     if text:
-                        items.append({
+                        item = {
                             "what": text,
                             "who": self._normalize_speaker(raw_item.get("who", "")),
                             "character_id": str(raw_item.get("character_id") or ""),
                             "entry_type": str(raw_item.get("entry_type") or ENTRY_TYPE_DIALOGUE),
                             "choice_path": list(raw_item.get("choice_path") or []),
                             "position": position,
-                        })
+                        }
+                        if raw_item.get("node_id"):
+                            item["node_id"] = str(raw_item.get("node_id"))
+                        if raw_item.get("edge_id"):
+                            item["edge_id"] = str(raw_item.get("edge_id"))
+                        items.append(item)
                 self.cache.characters.observe(self.cache.game_id, items)
-                normalized_branches.append({
+                normalized_branch = {
                     "choice_index": choice_index,
                     "choice": str(branch.get("choice") or "").strip(),
                     "items": items,
                     "complete": bool(branch.get("complete", True)),
-                })
+                }
+                if branch.get("node_id"):
+                    normalized_branch["node_id"] = str(branch.get("node_id"))
+                if branch.get("edge_id"):
+                    normalized_branch["edge_id"] = str(branch.get("edge_id"))
+                normalized_branches.append(normalized_branch)
             self._branch_prefetch_queue.clear()
             self._branch_prefetch_queued_texts.clear()
             self._latest_branch_prefetch = {
                 "session_id": session_id,
+                "graph_id": graph_id,
                 "state_version": version,
                 "menu_id": menu_id,
                 "linear": list(message.get("linear", []) or []),
@@ -453,8 +509,11 @@ class MainWindow(QWidget):
             self._ensure_prefetch_buffer(self._text_generation)
 
     def _on_menu_selected(self, message: dict):
+        if not self._observe_hook_state(message):
+            return
         session_id = str(message.get("session_id") or "")
-        menu_id = str(message.get("menu_id") or "")
+        graph_id = str(message.get("graph_id") or "")
+        menu_id = str(message.get("node_id") or message.get("menu_id") or "")
         try:
             choice_index = int(message.get("choice_index"))
             version = int(message.get("state_version", -1))
@@ -463,11 +522,13 @@ class MainWindow(QWidget):
         if not session_id or not menu_id or version < 0:
             return
         with self._branch_prefetch_condition:
+            branch_graph = self.__dict__.get("_branch_prefetch_graph", "")
             if self._latest_hook_state_session and session_id != self._latest_hook_state_session:
                 return
             matches_active_menu = (
                 session_id == self._branch_prefetch_session
                 and menu_id == self._branch_prefetch_menu
+                and (not graph_id or not branch_graph or graph_id == branch_graph)
                 and version == self._branch_prefetch_version
             )
             if (
@@ -478,7 +539,9 @@ class MainWindow(QWidget):
                 return
             self._latest_hook_state_session = session_id
             self._latest_hook_state_version = max(self._latest_hook_state_version, version)
-            self._branch_selection_tombstones[(session_id, menu_id)] = (version, choice_index)
+            self._branch_selection_tombstones[
+                self._branch_identity_key(graph_id, session_id, menu_id)
+            ] = (version, choice_index)
             if len(self._branch_selection_tombstones) > 16:
                 oldest = next(iter(self._branch_selection_tombstones))
                 self._branch_selection_tombstones.pop(oldest, None)
@@ -497,20 +560,49 @@ class MainWindow(QWidget):
 
     def _observe_hook_state(self, message: dict):
         """Track Ren'Py message order so late branch packets cannot revive an old route."""
+        tracker = self.__dict__.get("_hook_event_order")
+        if tracker is None:
+            tracker = EventOrderTracker()
+            self._hook_event_order = tracker
+        if not tracker.accept(message):
+            return False
         session_id = str(message.get("session_id") or "")
         if not session_id:
-            return
+            return True
         try:
             version = int(message.get("state_version", -1))
         except (TypeError, ValueError):
-            return
+            return True
         if version < 0:
-            return
+            return True
+        graph_id = str(message.get("graph_id") or "")
+        try:
+            event_seq = int(message.get("event_seq", -1))
+        except (TypeError, ValueError):
+            event_seq = -1
         with self._branch_prefetch_condition:
+            fields = self.__dict__
+            latest_graph = fields.get("_latest_hook_graph", "")
+            latest_event_seq = fields.get("_latest_hook_event_seq", -1)
             if self._latest_hook_state_session and session_id != self._latest_hook_state_session:
-                return
+                return False
+            if latest_graph and graph_id and graph_id != latest_graph:
+                return False
+            # EventOrderTracker has already checked v3 sequence ordering.
+            # Keep this legacy field for existing UI state and v1/v2 events.
             self._latest_hook_state_session = session_id
+            if graph_id:
+                self._latest_hook_graph = graph_id
             self._latest_hook_state_version = max(self._latest_hook_state_version, version)
+            if event_seq >= 0:
+                self._latest_hook_event_seq = max(latest_event_seq, event_seq)
+        return True
+
+    def _branch_identity_key(self, graph_id: str, session_id: str, node_id: str):
+        """Return the canonical in-memory key for one menu visit."""
+        graph = str(graph_id or self.__dict__.get("_latest_hook_graph", "") or
+                    self.__dict__.get("_branch_prefetch_graph", ""))
+        return graph, str(session_id or ""), str(node_id or "")
 
     def _branch_prefetch_worker(self):
         while True:
@@ -608,6 +700,9 @@ class MainWindow(QWidget):
                 self._key_expired_signal.emit()
             except Exception as error:
                 print(f"[BranchPrefetch] Translation failed: {error}")
+                self._status_signal.emit(tr(
+                    "status.prefetch_failed", detail=describe_translation_error(error)
+                ))
             finally:
                 with self._inflight_lock:
                     self._clear_inflight(claimed, owner=owner)
@@ -1897,7 +1992,7 @@ class MainWindow(QWidget):
             self.engine_combo.blockSignals(False)
 
     def retranslate_ui(self, *_):
-        version = self.config.get("version", "v1.5.5")
+        version = self.config.get("version", "v1.5.6")
         self.setWindowTitle(tr("app.title", version=version))
         self.btn_settings.setText(tr("main.settings"))
         self.btn_pin.setText(tr("common.pin"))
@@ -2351,7 +2446,7 @@ class MainWindow(QWidget):
                     "token": token,
                     "url": url,
                     "ok": False,
-                    "error": str(exc),
+                    "error": describe_translation_error(exc),
                 }
             finally:
                 if tester is not None:
@@ -2679,6 +2774,7 @@ class MainWindow(QWidget):
         self.overlay.edit_saved.connect(self._save_manual_translation)
         self.overlay.autosave_requested.connect(self._autosave_manual_translation)
         self.overlay.show_workbench_requested.connect(self._show_workbench)
+        self.overlay.retranslate_requested.connect(self._on_retranslate_requested)
         self.overlay.visibility_changed.connect(self._update_overlay_toggle_button)
         self._update_overlay_toggle_button()
         self._screen_text_active = False
@@ -3338,14 +3434,23 @@ class MainWindow(QWidget):
             self.overlay.set_screen_text_mode(self._screen_text_active)
 
         if msg_type == "current":
-            self._observe_hook_state(message)
+            # Both segmented messages and flat Ren'Py dialogue carrying a
+            # character ID reach text_event_received. Check their order there
+            # once; text-only messages retain the check at this entry point.
+            if not HookServer.uses_text_event(message):
+                if not self._observe_hook_state(message):
+                    return
 
         if msg_type == "hook_ready":
             hook_session = str(message.get("session_id") or "")
+            hook_graph = str(message.get("graph_id") or "")
+            if hook_graph:
+                self._hook_graph_id = hook_graph
             if hook_session and hook_session != self._latest_hook_state_session:
                 self._reset_branch_prefetch(discard_results=False)
                 with self._branch_prefetch_condition:
                     self._latest_hook_state_session = hook_session
+            self._hook_event_order.establish(hook_graph, hook_session)
             self._hook_session_ready = True
             self._hook_ready_event.set()
             print(f"[Hook] Hook ready on control port {message.get('control_port', '')}")
@@ -3385,6 +3490,8 @@ class MainWindow(QWidget):
             return
 
         if msg_type == "route_invalidated":
+            if not self._observe_hook_state(message):
+                return
             session_id = str(message.get("session_id") or "")
             try:
                 version = int(message.get("state_version", -1))
@@ -3395,7 +3502,7 @@ class MainWindow(QWidget):
                     return
                 if version < self._latest_hook_state_version:
                     return
-            self._reset_branch_prefetch(discard_results=False)
+            self._reset_branch_prefetch(discard_results=False, reset_event_order=False)
             with self._branch_prefetch_condition:
                 self._latest_hook_state_session = session_id
                 self._latest_hook_state_version = version
@@ -3503,6 +3610,9 @@ class MainWindow(QWidget):
                 if self._bulk_job.get("cancel_requested"):
                     return False
                 last_request_time = float(self._bulk_job.get("last_request_time") or 0.0)
+            if self._foreground_translation_pending.is_set():
+                time.sleep(0.05)
+                continue
             remaining = interval - (time.monotonic() - last_request_time)
             if remaining <= 0:
                 break
@@ -3632,9 +3742,13 @@ class MainWindow(QWidget):
             self._finish_bulk_job(job_id, "failed", tr("bulk.paused", detail=e))
         except KeyExpiredError as e:
             self._key_expired_signal.emit()
-            self._finish_bulk_job(job_id, "failed", tr("bulk.failed_detail", detail=e))
+            self._finish_bulk_job(job_id, "failed", tr(
+                "bulk.failed_detail", detail=describe_translation_error(e)
+            ))
         except Exception as e:
-            self._finish_bulk_job(job_id, "failed", tr("bulk.failed_detail", detail=e))
+            self._finish_bulk_job(job_id, "failed", tr(
+                "bulk.failed_detail", detail=describe_translation_error(e)
+            ))
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -4125,8 +4239,17 @@ class MainWindow(QWidget):
 
     # --- 文本处理 ---
     def _on_text_event_received(self, event: dict):
-        """Handle the structured protocol used by RPG Maker bridges."""
+        """Handle text with protocol metadata from supported game bridges."""
         event = event or {}
+        if not self._observe_hook_state(event):
+            return
+        self._latest_hook_node_id = str(
+            event.get("node_id") or (event.get("current") or {}).get("node_id") or ""
+        )
+        self._latest_hook_edge_id = str(
+            event.get("edge_id") or (event.get("current") or {}).get("edge_id") or ""
+        )
+        self._latest_hook_block_id = str(event.get("block_id") or "")
         self._latest_prefetch_menu_id = str(event.get("prefetch_menu_id") or "")
         current = dict(event.get("current") or {})
         source = str(current.get("source") or current.get("display_text") or "").strip()
@@ -4190,6 +4313,14 @@ class MainWindow(QWidget):
         import time as _time
         what = what or ""
         who = self._normalize_speaker(who or "")
+        self._current_dialogue_item = (
+            {"what": what, "who": who, "character_id": character_id, "italic": italic}
+            if what else None
+        )
+        if (self._current_dialogue_item
+                and (not self._recent_dialogues
+                     or self._recent_dialogues[-1] != self._current_dialogue_item)):
+            self._recent_dialogues.append(dict(self._current_dialogue_item))
         choices = [c for c in (choices or []) if c]
         visible_choices = choices if menu_active else []
         timing_enabled = self.config.get("enable_timing_log", False)
@@ -4267,6 +4398,144 @@ class MainWindow(QWidget):
         #    inflight 的句子会被视为已就绪而跳过
         if not need_async and not self._is_bulk_job_active():
             self._ensure_prefetch_buffer(gen)
+
+    def _build_retranslation_batch(self) -> tuple[list[dict], int]:
+        current = self._current_dialogue_item
+        if not current:
+            return [], -1
+        count = max(3, int(self.config.get("prefetch_count", 10)))
+        before_count = (count - 1) // 2
+        after_count = count - before_count - 1
+        history = list(self._recent_dialogues)
+        if history and history[-1] == current:
+            history.pop()
+        previous = history[-before_count:]
+        following = [
+            dict(item) for item in self._latest_prefetch_items
+            if str(item.get("what") or "").strip()
+        ][:after_count]
+        return previous + [dict(current)] + following, len(previous)
+
+    def _on_retranslate_requested(self):
+        if self._retranslation_running:
+            return
+        items, current_index = self._build_retranslation_batch()
+        if not items or not self._current_game_exe:
+            return
+        self._text_generation += 1
+        self._retranslation_token += 1
+        token = self._retranslation_token
+        game_id = self.cache.game_id
+        with self._branch_prefetch_condition:
+            self._branch_prefetch_queue.clear()
+            self._branch_prefetch_queued_texts.clear()
+            self._branch_prefetch_epoch += 1
+            self._branch_cache_epoch += 1
+            self._branch_translator_generation += 1
+            self._foreground_translation_count += 1
+            self._foreground_translation_pending.set()
+            self._branch_prefetch_condition.notify_all()
+        self._retranslation_running = True
+        self._set_status("status.retranslating", count=len(items))
+        threading.Thread(
+            target=self._retranslate_batch_async,
+            args=(items, current_index, game_id, token), daemon=True,
+        ).start()
+
+    def _retranslate_batch_async(self, items: list[dict], current_index: int,
+                                 game_id: str, token: int):
+        source = items[current_index]["what"]
+        try:
+            with self._translator_lock:
+                if token != self._retranslation_token or game_id != self.cache.game_id:
+                    return
+                if self.translator:
+                    self.translator.close()
+                self.translator = create_translator(
+                    self.config.get("translation_engine", "builtin"), self.config
+                )
+                results = self.translator.translate_batch(
+                    [item["what"] for item in items],
+                    source_lang=self.config["source_lang"],
+                    target_lang=self.config["target_lang"],
+                    game_title=self.game_title,
+                    characters=self.cache.characters.context(game_id, items),
+                )
+            guard = self._guard_batch_translation_results(
+                [item["what"] for item in items], results, "RetranslationGuard"
+            )
+            if token != self._retranslation_token or game_id != self.cache.game_id:
+                return
+            accepted = guard["accepted_results"]
+            current_result = (
+                accepted[current_index]["translation"]
+                if current_index < len(accepted) else ""
+            )
+            if not current_result:
+                self._retranslation_finished.emit({
+                    "token": token, "game_id": game_id, "source": source,
+                    "error": tr("translation.error_output"),
+                })
+                return
+            saved_count = 0
+            for index, record in enumerate(accepted):
+                if index == current_index or record["source"] == source:
+                    continue
+                translation = record["translation"]
+                if translation and self.cache.save_machine_translation(
+                    record["source"], translation,
+                    entry_type=items[index].get("entry_type", ENTRY_TYPE_DIALOGUE),
+                    speaker=items[index].get("who", ""),
+                    character_id=items[index].get("character_id", ""),
+                ):
+                    saved_count += 1
+            current = items[current_index]
+            if self.cache.save_machine_translation(
+                source, current_result,
+                entry_type=ENTRY_TYPE_DIALOGUE,
+                speaker=current.get("who", ""),
+                character_id=current.get("character_id", ""),
+                replace_manual=True,
+            ):
+                saved_count += 1
+            self._retranslation_finished.emit({
+                "token": token, "game_id": game_id, "source": source,
+                "saved_count": saved_count, "total": len(items),
+            })
+        except Exception as error:
+            print(f"[Retranslation] Failed: {error}")
+            self._retranslation_finished.emit({
+                "token": token, "game_id": game_id, "source": source,
+                "error": describe_translation_error(error),
+            })
+        finally:
+            with self._branch_prefetch_condition:
+                self._foreground_translation_count = max(
+                    0, self._foreground_translation_count - 1
+                )
+                if not self._foreground_translation_count:
+                    self._foreground_translation_pending.clear()
+                self._branch_prefetch_condition.notify_all()
+            if (token == self._retranslation_token and game_id == self.cache.game_id
+                    and not self._is_bulk_job_active()):
+                self._ensure_prefetch_buffer(self._text_generation)
+
+    def _on_retranslation_finished(self, result: dict):
+        if (result.get("token") != self._retranslation_token
+                or result.get("game_id") != self.cache.game_id):
+            return
+        self._retranslation_running = False
+        if result.get("error"):
+            self._set_status("status.retranslate_failed", detail=result["error"])
+            return
+        self._sync_clear_cache_button()
+        self._refresh_workbench_entries(selected_source=result["source"])
+        if self._last_displayed_data.get("what") == result["source"]:
+            self._refresh_current_display_from_cache()
+        self._set_status(
+            "status.retranslate_done",
+            done=result["saved_count"], total=result["total"],
+        )
 
     def _preview_text(self, text: str, limit: int = 60) -> str:
         text = str(text or "").replace("\n", " ").strip()
@@ -4732,10 +5001,11 @@ class MainWindow(QWidget):
                 self.translation_ready.emit(display)
             self._key_expired_signal.emit()
         except Exception as e:
+            detail = describe_translation_error(e)
             if self._text_generation == gen:
-                current_result = tr("translation.failed_detail", detail=e) if what else ""
+                current_result = tr("translation.failed_detail", detail=detail) if what else ""
                 choice_results = [
-                    self.cache.get(choice) or tr("translation.failed_detail", detail=e)
+                    self.cache.get(choice) or tr("translation.failed_detail", detail=detail)
                     for choice in visible_choices
                 ]
                 display = self._format_display(
@@ -4747,7 +5017,8 @@ class MainWindow(QWidget):
                     choice_translations=choice_results,
                 )
                 self.translation_ready.emit(display)
-            self._status_signal.emit(tr("status.translation_failed", support=self._support_tip()))
+            print(f"[Batch] Translation failed: {e}")
+            self._status_signal.emit(tr("status.translation_failed", detail=detail))
         finally:
             with self._inflight_lock:
                 self._clear_inflight(batch_texts, owner="batch-current")
@@ -4995,7 +5266,9 @@ class MainWindow(QWidget):
             self._key_expired_signal.emit()
         except Exception as e:
             print(f"[Prefetch] Batch translation failed: {e}")
-            self._status_signal.emit(tr("status.prefetch_failed", support=self._support_tip()))
+            self._status_signal.emit(tr(
+                "status.prefetch_failed", detail=describe_translation_error(e)
+            ))
         finally:
             self._prefetch_running = False
             with self._inflight_lock:

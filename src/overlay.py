@@ -300,6 +300,7 @@ class TranslationOverlay(QWidget):
     edit_saved = pyqtSignal(dict)
     autosave_requested = pyqtSignal(dict)
     show_workbench_requested = pyqtSignal()
+    retranslate_requested = pyqtSignal()
 
     READ_MIN_WIDTH = 280
     EDIT_MIN_WIDTH = 420
@@ -1418,6 +1419,8 @@ class TranslationOverlay(QWidget):
 
         if self._edit_context.get("dialogue"):
             menu.addSeparator()
+            retranslate_action = menu.addAction(tr("overlay.retranslate"))
+            retranslate_action.triggered.connect(self.retranslate_requested.emit)
             edit_dialogue_action = menu.addAction(tr("overlay.edit_dialogue"))
             edit_dialogue_action.triggered.connect(
                 lambda checked=False, target=self._edit_context["dialogue"]: self.start_edit(target)

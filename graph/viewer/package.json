@@ -1,0 +1,20 @@
+{
+  "name": "renpylens-story-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "node tests/panes-browser.cjs && node tests/browser.cjs && node tests/whole-browser.cjs && node tests/player-browser.cjs && node tests/normal-play-browser.cjs"
+  },
+  "dependencies": {
+    "@dagrejs/dagre": "3.1.1",
+    "@lezer/python": "1.1.19",
+    "@streamparser/json": "0.0.26"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "playwright": "1.58.2"
+  }
+}

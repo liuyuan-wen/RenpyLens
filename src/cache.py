@@ -476,8 +476,9 @@ class TranslationCache:
         entry_type: str = ENTRY_TYPE_DIALOGUE,
         speaker: str = "",
         character_id: str = "",
+        replace_manual: bool = False,
     ) -> bool:
-        """Store a fresh machine result, without replacing a manual edit."""
+        """Store a fresh machine result; explicit retranslation may replace a manual edit."""
         text = str(text or "").strip()
         translation = str(translation or "").strip()
         speaker = normalize_speaker_name(speaker)
@@ -488,7 +489,7 @@ class TranslationCache:
         with self._lock:
             key = self._resolve_entry_key(text) or text
             entry = self._mem_entries.get(key)
-            if entry is not None and entry.get("is_manual"):
+            if entry is not None and entry.get("is_manual") and not replace_manual:
                 return False
             if entry is None:
                 entry = self._build_entry(
@@ -503,6 +504,8 @@ class TranslationCache:
                 self._mem_entries[text] = entry
             else:
                 entry["translation"] = translation
+                if replace_manual:
+                    entry["is_manual"] = False
                 entry["entry_type"] = entry_type or entry.get("entry_type") or ENTRY_TYPE_DIALOGUE
                 if speaker:
                     entry["speaker"] = speaker

@@ -108,6 +108,11 @@ Output:
 [3][Mother] 早点回家。
 [4][Cameraman] 摄像机准备好了。
 """
+    _TARGET_LANGUAGE_REMINDER = (
+        "\n- LOCALIZE ALL numbered lines into {target_lang} so they read as if "
+        "originally written in {target_lang}. Dialogue should sound natural, "
+        "narration should flow like polished prose. Never translate word-for-word."
+    )
 
     def __init__(self, config: dict):
         self.config = config
@@ -223,13 +228,14 @@ Output:
             f"src_len={quality['source_length']} out_len={quality['translation_length']}"
         )
 
-    def _single_system_prompt(self, target_lang: str, source_lang: str, game_title: str, text: str) -> str:
+    def _single_system_prompt(self, target_lang: str, source_lang: str, game_title: str,
+                              text: str, context: str = "") -> str:
         system_prompt = self.batch_prompt.format(target_lang=target_lang, game_title=game_title)
         if "⟦RL_" in str(text):
             system_prompt += self._placeholder_instruction
         return system_prompt + self._BATCH_FORMAT_INSTRUCTION.format(
             proper_names=self._name_instruction if self._keep_names else ""
-        )
+        ) + context + self._TARGET_LANGUAGE_REMINDER.format(target_lang=target_lang)
 
     def _character_context(self, characters):
         # Brackets/newlines in displayed names must not introduce numbered items.
@@ -279,8 +285,11 @@ Output:
         result = parsed.get(1, "") if parsed else self._clean_result(response)
         return self._strip_speaker_label(result, speaker_label, text)
 
-    def _recover_translation_once(self, text: str, system_prompt: str, context: str, speaker_label="") -> str:
-        result = self._translate_once(text, system_prompt + self._RETRY_QUALITY_INSTRUCTION, speaker_label)
+    def _recover_translation_once(self, text: str, system_prompt: str, context: str,
+                                  speaker_label="", target_lang="") -> str:
+        reminder = self._TARGET_LANGUAGE_REMINDER.format(target_lang=target_lang or self.target_lang)
+        retry_prompt = system_prompt.removesuffix(reminder) + self._RETRY_QUALITY_INSTRUCTION + reminder
+        result = self._translate_once(text, retry_prompt, speaker_label)
         quality = self._translation_quality(text, result)
         if quality["valid"]:
             return result
@@ -312,15 +321,16 @@ Output:
     def _translate_single_batch(self, text, source_lang, target_lang, game_title, character):
         tl = target_lang or self.target_lang
         sl = source_lang or self.source_lang
-        system_prompt = self._single_system_prompt(tl, sl, game_title, text)
         labels, context = self._character_context([character or {}])
-        system_prompt += context
+        system_prompt = self._single_system_prompt(tl, sl, game_title, text, context)
         result = self._translate_once(text, system_prompt, labels[0])
         quality = self._translation_quality(text, result)
         if quality["valid"]:
             return result
         self._log_quality_failure(quality, "single translation")
-        return self._recover_translation_once(text, system_prompt, "single translation retry", labels[0])
+        return self._recover_translation_once(
+            text, system_prompt, "single translation retry", labels[0], tl
+        )
 
     def translate_batch(self, texts: list, source_lang=None, target_lang=None, game_title="Unknown Game", characters=None) -> list:
         characters = list(characters) if characters is not None else [{} for _ in texts]
@@ -343,6 +353,7 @@ Output:
         system_prompt += self._BATCH_FORMAT_INSTRUCTION.format(
             proper_names=self._name_instruction if self._keep_names else ""
         )
+        system_prompt += self._TARGET_LANGUAGE_REMINDER.format(target_lang=tl)
 
         max_retries = 3
         for attempt in range(max_retries):
@@ -430,19 +441,20 @@ Output:
             if translation and self._translation_quality(texts[index], translation)["valid"]:
                 results[index] = translation
                 continue
+            labels, context = self._character_context([characters[index]])
             system_prompt = self._single_system_prompt(
                 target_lang,
                 source_lang,
                 game_title,
                 text,
+                context,
             )
-            labels, context = self._character_context([characters[index]])
-            system_prompt += context
             results[index] = self._recover_translation_once(
                 text,
                 system_prompt,
                 f"batch recovery item {index + 1}/{len(texts)}",
                 labels[0],
+                target_lang,
             )
         return results
 
@@ -535,6 +547,8 @@ class GeminiTranslator(BaseTranslator):
                 url = f"{self.api_url}{sep}key={self.api_key}"
                 resp = client.post(url, json=payload)
                 if resp.status_code == 429:
+                    if attempt == self.max_retries - 1:
+                        resp.raise_for_status()
                     wait = 2 ** attempt
                     print(f"[Gemini] 429 rate limited, waiting {wait}s")
                     time.sleep(wait)
@@ -600,6 +614,8 @@ class ZhipuTranslator(BaseTranslator):
                 self._rate_limit()
                 resp = client.post(self.api_url, json=payload, headers=headers)
                 if resp.status_code == 429:
+                    if attempt == self.max_retries - 1:
+                        resp.raise_for_status()
                     wait = 2 ** attempt
                     print(f"[Zhipu] 429 rate limited, waiting {wait}s")
                     time.sleep(wait)
@@ -852,9 +868,7 @@ class BuiltinTranslator(BaseTranslator):
                 raise
             except Exception as e:
                 if attempt == self.max_retries - 1:
-                    raise RuntimeError(
-                        f"Builtin channel max retries exhausted: {e}\n\nPlease check server logs or configuration."
-                    )
+                    raise
                 print(f"[Builtin] Retry {attempt + 1}/{self.max_retries}: {e}")
                 time.sleep(1)
         raise RuntimeError("Builtin channel max retries exhausted")
@@ -1002,6 +1016,8 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 self._rate_limit()
                 resp = client.post(self.api_url, json=payload, headers=headers)
                 if resp.status_code == 429:
+                    if attempt == self.max_retries - 1:
+                        resp.raise_for_status()
                     wait = 2 ** attempt
                     print(f"[{self.engine.capitalize()}] 429 rate limited, waiting {wait}s")
                     time.sleep(wait)
@@ -1070,6 +1086,8 @@ class AnthropicTranslator(BaseTranslator):
                 self._rate_limit()
                 resp = client.post(self.api_url, json=payload, headers=headers)
                 if resp.status_code == 429:
+                    if attempt == self.max_retries - 1:
+                        resp.raise_for_status()
                     wait = 2 ** attempt
                     print(f"[Anthropic] 429 rate limited, waiting {wait}s")
                     time.sleep(wait)

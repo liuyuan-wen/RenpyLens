@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QPointF
 from PyQt5.QtGui import QKeySequence, QPainter, QPolygonF, QColor
-from i18n import LANGUAGE_OPTIONS, localized_node_name, manager as i18n_manager, tr
+from i18n import LANGUAGE_OPTIONS, manager as i18n_manager, tr
 from provider_registry import (
     get_provider_spec,
     iter_provider_options,
@@ -477,28 +477,12 @@ class SettingsDialog(QDialog):
         builtin_form = QFormLayout(builtin_group)
         builtin_form.setSpacing(10)
         builtin_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
-        # 每个节点单独一行 URL
-        self._builtin_node_inputs = []  # [(name, QLineEdit)]
-        builtin_nodes = self.config.get("builtin_nodes", [])
-        for node in builtin_nodes:
-            name = node.get("name", tr("common.unnamed_node"))
-            url = node.get("url", "")
-            url_input = QLineEdit(url)
-            display_name = localized_node_name(name)
-            url_input.setPlaceholderText(tr("settings.node_api_address", name=display_name))
-            builtin_form.addRow(f"{display_name}:", url_input)
-            self._builtin_node_inputs.append((name, url_input))
         builtin_row, self.builtin_key_input = self._create_key_input(
             self.config.get("builtin_api_key", ""),
             tr("settings.server_auth")
         )
         builtin_form.addRow("API Key:", builtin_row)
-        
-        # 添加试用 API 地址配置
-        self.trial_url_input = QLineEdit(self.config.get("trial_key_url", "https://www-map.h53633179.nyat.app:58385/get_trial_key"))
-        self.trial_url_input.setPlaceholderText(tr("settings.trial_endpoint_placeholder"))
-        builtin_form.addRow(tr("settings.trial_endpoint"), self.trial_url_input)
-        
+
         layout.insertWidget(0, builtin_group)
 
         layout.addStretch()
@@ -883,7 +867,7 @@ class SettingsDialog(QDialog):
         vbox = QVBoxLayout(tab)
         vbox.setSpacing(16)
         
-        version = self.config.get("version", "v1.5.5")
+        version = self.config.get("version", "v1.5.6")
         
         community_section = (
             f'<b>{tr("settings.community")}</b>1058127921<br>'
@@ -970,18 +954,6 @@ class SettingsDialog(QDialog):
             self.config["translation_engine"] = "builtin"
 
         self.config["builtin_api_key"] = self.builtin_key_input.text().strip()
-        self.config["trial_key_url"] = self.trial_url_input.text().strip()
-        # 写回每个节点的 URL
-        builtin_nodes = self.config.get("builtin_nodes", [])
-        current_builtin_url = self.config.get("builtin_url", "")
-        for i, (name, url_input) in enumerate(self._builtin_node_inputs):
-            new_url = url_input.text().strip()
-            if i < len(builtin_nodes):
-                old_url = builtin_nodes[i].get("url", "")
-                builtin_nodes[i]["url"] = new_url
-                # 若当前活动节点的 URL 被修改，同步更新 builtin_url
-                if old_url == current_builtin_url:
-                    self.config["builtin_url"] = new_url
 
         self.config["prefetch_count"] = self.prefetch_spin.value()
         self.config["debounce_ms"] = self.debounce_spin.value()

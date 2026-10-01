@@ -6,13 +6,17 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import tempfile
 import time
+import zipfile
 from ctypes import wintypes
 from dataclasses import dataclass
 
 
 _HOOK_FILE_PREFIX = "_translator_hook"
 _HOOK_FILE_EXTENSIONS = {".rpy", ".rpyc"}
+_SEMANTICS_ARCHIVE_NAME = "_renpylens_semantics.zip"
+_SEMANTICS_MARKER = "RenpyLens Semantic Kernel\n"
 
 
 if os.name == "nt":
@@ -288,13 +292,14 @@ def is_renpy_game(exe_path: str) -> bool:
     return False
 
 
-def _render_hook_script(hook_rpy_path: str, socket_port: int) -> str:
+def _render_hook_script(hook_rpy_path: str, socket_port: int, graph_id: str = "") -> str:
     with open(hook_rpy_path, "r", encoding="utf-8") as f:
         content = f.read()
 
     return (
         content.replace("{{SOCKET_PORT}}", str(int(socket_port)))
         .replace("{{CONTROL_PORT}}", str(int(socket_port) + 1))
+        .replace("{{GRAPH_ID}}", str(graph_id or ""))
     )
 
 
@@ -332,6 +337,55 @@ def _hook_relative_path(path: str, game_dir: str) -> str:
     return os.path.relpath(path, game_dir).replace(os.sep, "/")
 
 
+def _find_semantics_source(hook_rpy_path: str) -> str | None:
+    hook_dir = os.path.dirname(os.path.abspath(hook_rpy_path))
+    candidates = (
+        os.path.join(hook_dir, "renpylens_semantics"),
+        os.path.join(hook_dir, "..", "src", "renpylens_semantics"),
+    )
+    for candidate in candidates:
+        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "__init__.py")):
+            return os.path.abspath(candidate)
+    return None
+
+
+def _semantics_archive_owned(path: str) -> bool:
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            return archive.read("__renpylens_manifest__.txt").decode("utf-8") == _SEMANTICS_MARKER
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile, UnicodeError):
+        return False
+
+
+def _stage_semantics_archive(source_dir: str, game_dir: str) -> str:
+    destination = os.path.join(game_dir, _SEMANTICS_ARCHIVE_NAME)
+    if os.path.exists(destination) and not _semantics_archive_owned(destination):
+        raise RuntimeError("existing semantic kernel archive is not owned by RenpyLens")
+
+    temporary = tempfile.NamedTemporaryFile(
+        prefix=".renpylens-semantics-", suffix=".tmp", dir=game_dir, delete=False
+    )
+    temporary_path = temporary.name
+    temporary.close()
+    try:
+        with zipfile.ZipFile(temporary_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("__renpylens_manifest__.txt", _SEMANTICS_MARKER)
+            for root, _dirs, files in os.walk(source_dir):
+                for filename in sorted(files):
+                    if not filename.endswith(".py"):
+                        continue
+                    path = os.path.join(root, filename)
+                    relative = os.path.relpath(path, source_dir).replace(os.sep, "/")
+                    archive.write(path, "renpylens_semantics/" + relative)
+        return temporary_path
+    except Exception:
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+        raise
+
+
 def inject_hook(exe_path: str, hook_rpy_path: str, socket_port: int) -> tuple[bool, str]:
     """Render and inject the hook script into the target game's game/ folder."""
     if not os.path.isfile(exe_path):
@@ -346,9 +400,19 @@ def inject_hook(exe_path: str, hook_rpy_path: str, socket_port: int) -> tuple[bo
 
     dest = os.path.join(game_dir, "_translator_hook.rpy")
     try:
-        rendered = _render_hook_script(hook_rpy_path, socket_port)
+        from renpylens_semantics.renpy_adapter import graph_id_for
+
+        rendered = _render_hook_script(hook_rpy_path, socket_port, graph_id_for(game_dir))
     except Exception as e:
         return False, f"Failed to read Hook script: {e}"
+
+    semantics_source = _find_semantics_source(hook_rpy_path)
+    if semantics_source is None:
+        return False, "Semantic Kernel package not found"
+    try:
+        staged_archive = _stage_semantics_archive(semantics_source, game_dir)
+    except Exception as e:
+        return False, f"Failed to stage Semantic Kernel: {e}"
 
     dest_normalized = _normalize_path(dest)
     try:
@@ -365,15 +429,32 @@ def inject_hook(exe_path: str, hook_rpy_path: str, socket_port: int) -> tuple[bo
             os.remove(path)
             removed.append(relative_path)
         except Exception as e:
+            try:
+                os.remove(staged_archive)
+            except OSError:
+                pass
             return False, f"Failed to remove residual Hook '{relative_path}': {e}"
 
     try:
         with open(dest, "w", encoding="utf-8", newline="\n") as f:
             f.write(rendered)
     except Exception as e:
+        try:
+            os.remove(staged_archive)
+        except OSError:
+            pass
         return False, f"Failed to write Hook script: {e}"
 
-    message = f"Injected to: {dest}"
+    try:
+        os.replace(staged_archive, os.path.join(game_dir, _SEMANTICS_ARCHIVE_NAME))
+    except Exception as e:
+        try:
+            os.remove(staged_archive)
+        except OSError:
+            pass
+        return False, f"Failed to install Semantic Kernel: {e}"
+
+    message = f"Injected to: {dest} (Semantic Kernel installed)"
     if removed:
         message += f"; cleaned {len(removed)} residual Hook file(s): {', '.join(removed)}"
     return True, message
@@ -398,6 +479,14 @@ def remove_hook(exe_path: str) -> tuple[bool, str]:
             removed.append(relative_path)
         except Exception as e:
             return False, f"Failed to remove Hook '{relative_path}': {e}"
+
+    semantics_archive = os.path.join(game_dir, _SEMANTICS_ARCHIVE_NAME)
+    if os.path.isfile(semantics_archive) and _semantics_archive_owned(semantics_archive):
+        try:
+            os.remove(semantics_archive)
+            removed.append(_SEMANTICS_ARCHIVE_NAME)
+        except Exception as e:
+            return False, f"Failed to remove Semantic Kernel: {e}"
 
     if removed:
         return True, f"Removed: {', '.join(removed)}"

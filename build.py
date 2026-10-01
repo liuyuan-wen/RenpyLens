@@ -110,9 +110,9 @@ def build_exe():
     sys.path.append(os.path.join(os.getcwd(), "src"))
     try:
         from config import DEFAULT_CONFIG
-        version = DEFAULT_CONFIG.get("version", "v1.5.5")
+        version = DEFAULT_CONFIG.get("version", "v1.5.6")
     except ImportError:
-        version = "v1.5.5"
+        version = "v1.5.6"
 
     print(f"开始打包 RenpyLens {version}...")
     
@@ -180,6 +180,7 @@ def build_exe():
         "--add-data", "assets/_translator_hook.rpy;.", # 包含必须的资源文件
         "--add-data", "assets/RenpyLensBridge.js;.", # RPG Maker MV/MZ 运行时桥接
         "--add-data", "assets/icon.ico;.", # 包含图标以便程序运行时提取
+        "--add-data", "src/renpylens_semantics;renpylens_semantics", # Semantic Kernel
         "--add-data", "assets/icon.png;.", 
         "--add-data", "assets/locales;assets/locales",
         "--icon", "assets/icon.ico", # 指定程序本身的图标
