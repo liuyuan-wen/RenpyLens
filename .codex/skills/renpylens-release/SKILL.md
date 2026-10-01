@@ -22,9 +22,11 @@ python -m unittest discover -s tests -v
 
 - 测试失败时不得继续发布；先修复失败或向用户说明阻塞原因。
 
-### 3. 构建并校验 EXE
+### 3. 准备 EXE
 
-若用户要求执行完整发布流程，则接着运行：
+用户已明确说明目标版本打包完成时，按仓库根目录 [AGENTS.md](../../../AGENTS.md) 的“构建与打包”规则使用现有文件，继续第 4 步。
+
+需要本流程构建时，运行：
 
 ```powershell
 python build.py
