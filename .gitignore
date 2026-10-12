@@ -9,6 +9,18 @@
 !/AGENTS.md
 !/build.py
 !/requirements.txt
+!/.gitattributes
+!/.github/
+!/.github/workflows/
+!/.github/workflows/build-macos.yml
+!/start.bat
+!/start_build.bat
+!/start.command
+!/start_build.command
+!/scripts/
+/scripts/*
+!/scripts/launch_windows.bat
+!/scripts/launch_macos.sh
 !/upx.exe
 !/LICENSE
 
@@ -16,8 +28,6 @@
 # 3. “放行”必要的文件夹及其内部内容
 !/assets/
 !/src/
-!/graph/
-!/graph/**
 !/.codex/
 !/.codex/skills/
 !/.codex/skills/renpylens-release/
@@ -28,6 +38,7 @@
 # ==================================
 # 4. 在已放行的规则中，做特定的额外排除
 /assets/icon-raw.png
+/.codex/artifacts/
 
 # Tests are kept locally and are not synchronized with the repository.
 tests/
@@ -37,7 +48,7 @@ tests/
 /tests/*
 !/tests/semantics/
 !/tests/semantics/**
-# Large phase-0 evidence stays local; manifests and tests remain reviewable.
+# Runtime acceptance artifacts stay local.
 /tests/semantics/artifacts/
 # Ren'Py fixture runtime output stays local.
 /tests/semantics/fixtures/**/game/cache/
@@ -49,3 +60,6 @@ tests/
 /src/__pycache__/
 *.pyc
 *.pyo
+
+# Standalone story-graph tools stay local until they are ready for release.
+/graph/

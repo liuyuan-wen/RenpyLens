@@ -15,19 +15,21 @@ import threading
 import textwrap
 import time
 import uuid
+from dataclasses import asdict
 from collections import deque
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QComboBox, QLineEdit, QTextEdit, QFileDialog,
     QStyledItemDelegate, QDialog, QDialogButtonBox, QFrame, QMenu, QCheckBox,
-    QToolButton, QWidgetAction, QToolTip
+    QToolButton, QWidgetAction, QToolTip, QLayout
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject, QPoint
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QObject, QPoint, QSize
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon, QColor, QPalette, QTextCursor, QPixmap
 
 from config import load_config, save_config
 from hwid_utils import NO_EXPIRY, get_hwid, register_trial_key, fetch_trial_key_expiry
 from hook_server import HookServer
+from single_instance import SingleInstance
 from renpylens_semantics.protocol import EventOrderTracker
 from translator import BaseTranslator, create_translator, KeyExpiredError, RateLimitError
 from translation_errors import describe_translation_error
@@ -52,6 +54,7 @@ from engine_adapters import (
     ENGINE_RPGMAKER_MZ,
     GameTarget,
     detect_game,
+    game_launch_environment,
     install_hook,
     scan_rpgmaker_game,
     uninstall_hook,
@@ -72,6 +75,7 @@ from updater import (
     download_release_asset,
     launch_windows_updater_script,
 )
+from ui_theme import BRAND_ICON_PX, PRIMARY_ACTION_FONT_PX, ui_px, ui_style, ui_rich_text, fit_window_to_screen, refresh_ui_font, settings_icon
 from i18n import (
     LANGUAGE_OPTIONS,
     LocalizedString,
@@ -116,6 +120,15 @@ RPGMAKER_TOOL_LEGACY_FEATURES = {
     key: key not in {"messageOpacity", "autoAdvance", "dialogueRollback", "saveAnywhere"}
     for key in RPGMAKER_TOOL_FEATURES
 }
+
+
+def _game_drop_path(mime_data) -> str:
+    """Normalize directory URLs before checking a dropped game's suffix."""
+    for url in mime_data.urls():
+        path = os.path.normpath(url.toLocalFile())
+        if path.lower().endswith((".exe", ".lnk", ".app")):
+            return path
+    return ""
 
 
 class LogStream(QObject):
@@ -175,6 +188,7 @@ class MainWindow(QWidget):
     _latency_test_signal = pyqtSignal(object)
     _character_scan_signal = pyqtSignal(str)
     _retranslation_finished = pyqtSignal(object)
+    _game_start_finished = pyqtSignal(object)
     SUPPORT_QQ_GROUP = "1058127921"
     TRANSLATION_REPEAT_CHAR_LIMIT = BaseTranslator.TRANSLATION_REPEAT_CHAR_LIMIT
     TRANSLATION_LENGTH_RATIO_LIMIT = BaseTranslator.TRANSLATION_LENGTH_RATIO_LIMIT
@@ -184,9 +198,9 @@ class MainWindow(QWidget):
         self.config = load_config()
         set_language(self.config.get("ui_language", "auto"), QApplication.instance())
 
-        version = self.config.get("version", "v1.5.6")
+        version = self.config.get("version", "v1.6.0")
         self.setWindowTitle(tr("app.title", version=version))
-        self.resize(800, 10)
+        self.resize(ui_px(800), ui_px(10))
         self.setAcceptDrops(True)
 
         # 1. 基础状态量初始化 (必须在 _setup_ui 之前，防止信号触发导致 AttributeError)
@@ -236,7 +250,11 @@ class MainWindow(QWidget):
         self._hook_graph_id = ""
         self._runtime_token_values = {}
         self._runtime_display_texts = {}
+        self._runtime_text_affixes = {}
         self._game_process = None
+        self._game_starting = False
+        self._game_start_cancelled = threading.Event()
+        self._close_after_game_start = False
         self._selected_game_detected_running = False
         self._hook_installed = False
         self._hook_config_dirty = False
@@ -282,6 +300,7 @@ class MainWindow(QWidget):
         self._latency_test_signal.connect(self._on_builtin_latency_result)
         self._character_scan_signal.connect(self._on_character_scan_finished)
         self._retranslation_finished.connect(self._on_retranslation_finished)
+        self._game_start_finished.connect(self._on_game_start_finished)
         self._key_expired_shown = False  # 防止重复弹窗
 
         # 游戏进程监控定时器
@@ -302,6 +321,7 @@ class MainWindow(QWidget):
             self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
             
         self._center_window()
+        fit_window_to_screen(self)
         QTimer.singleShot(1500, self._auto_check_updates)
 
     def _new_bulk_job_state(self) -> dict:
@@ -462,7 +482,7 @@ class MainWindow(QWidget):
                 for position, raw_item in enumerate(branch.get("items", []) or []):
                     if not isinstance(raw_item, dict):
                         raw_item = {"what": raw_item}
-                    text = str(raw_item.get("what") or "").strip()
+                    text = str(raw_item.get("source") or raw_item.get("what") or raw_item.get("display_text") or "").strip()
                     if text:
                         item = {
                             "what": text,
@@ -753,17 +773,17 @@ class MainWindow(QWidget):
 
     def _center_window(self):
         self.adjustSize()
-        screen = QApplication.desktop().availableGeometry()
+        screen = self.screen().availableGeometry()
         size = self.size()
-        self.move((screen.width() - size.width()) // 2,
-                  (screen.height() - size.height()) // 2)
+        self.move(screen.x() + (screen.width() - size.width()) // 2,
+                  screen.y() + (screen.height() - size.height()) // 2)
 
     def _setup_ui(self):
-        self.setStyleSheet("""
+        self.setStyleSheet(ui_style("""
             QWidget {
                 background-color: #1a1a2e;
                 color: #eee;
-                font-family: "Microsoft YaHei", "Segoe UI";
+                font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI";
                 font-size: 20px;
             }
             QLabel#title {
@@ -810,11 +830,11 @@ class MainWindow(QWidget):
                 border: 1px solid #555;
                 padding: 4px 8px;
             }
-        """)
+        """))
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(14)
-        layout.setContentsMargins(20, 0, 20, 14)    # (Left, Top, Right, Bottom)
+        layout.setSpacing(ui_px(14))
+        layout.setContentsMargins(ui_px(20), 0, ui_px(20), ui_px(14))    # (Left, Top, Right, Bottom)
 
         # 工具栏（设置按钮在左，标题居中，置顶按钮在右）
         toolbar = QHBoxLayout()
@@ -828,7 +848,10 @@ class MainWindow(QWidget):
             QPushButton:checked { color: #4a9eff; border-color: #4a9eff; }
         """
         self.btn_settings = QPushButton(tr("main.settings"))
-        self.btn_settings.setStyleSheet(_toolbar_btn_style)
+        settings_icon_px = ui_px(26)
+        self.btn_settings.setIcon(settings_icon(settings_icon_px))
+        self.btn_settings.setIconSize(QSize(settings_icon_px, settings_icon_px))
+        self.btn_settings.setStyleSheet(ui_style(_toolbar_btn_style))
         self.btn_settings.clicked.connect(self._on_settings)
         toolbar.addWidget(self.btn_settings)
         toolbar.addStretch()        
@@ -844,13 +867,13 @@ class MainWindow(QWidget):
         title_container = QWidget()
         title_layout = QHBoxLayout(title_container)
         title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(10) # 图片和文字之间的距离
+        title_layout.setSpacing(ui_px(10)) # 图片和文字之间的距离
         title_layout.setAlignment(Qt.AlignCenter)
         
         icon_label = QLabel()
-        pixmap = QPixmap(icon_path).scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pixmap = QPixmap(icon_path).scaled(BRAND_ICON_PX, BRAND_ICON_PX, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         icon_label.setPixmap(pixmap)
-        icon_label.setStyleSheet("margin-top: 10px;") 
+        icon_label.setStyleSheet(ui_style("margin-top: 10px;"))
         title_layout.addWidget(icon_label)
         
         text_label = QLabel("RenpyLens")
@@ -862,16 +885,19 @@ class MainWindow(QWidget):
         self.btn_pin = QPushButton(tr("common.pin"))
         self.btn_pin.setCheckable(True)
         self.btn_pin.setChecked(self._is_pinned)
-        self.btn_pin.setStyleSheet(_toolbar_btn_style)
+        self.btn_pin.setStyleSheet(ui_style(_toolbar_btn_style))
         self.btn_pin.clicked.connect(self._toggle_pin)
         toolbar.addWidget(self.btn_pin)
         layout.addLayout(toolbar)
+        toolbar_button_height = max(self.btn_settings.sizeHint().height(), self.btn_pin.sizeHint().height())
+        self.btn_settings.setMinimumHeight(toolbar_button_height)
+        self.btn_pin.setMinimumHeight(toolbar_button_height)
 
         # 拖放/点击区域
-        self.drop_label = QLabel(tr("main.drop_game"))
+        self.drop_label = QLabel(ui_rich_text(tr("main.drop_game")))
         self.drop_label.setObjectName("drop_zone")
         self.drop_label.setAlignment(Qt.AlignCenter)
-        self.drop_label.setMinimumHeight(160)
+        self.drop_label.setMinimumHeight(ui_px(160))
         self.drop_label.setCursor(Qt.PointingHandCursor)
         self.drop_label.setTextFormat(Qt.RichText)
         self.drop_label.mousePressEvent = self._on_drop_zone_clicked
@@ -886,50 +912,51 @@ class MainWindow(QWidget):
 
         # 按钮行：开始游戏 | 装载 Hook | 卸载 Hook
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(10)
+        btn_layout.setSpacing(ui_px(10))
         self.btn_start_game = QPushButton(tr("main.start_game"))
         self.btn_start_game.setEnabled(False)
         self.btn_start_game.clicked.connect(self._on_start_game)
         btn_layout.addWidget(self.btn_start_game, 2)
-        self.btn_start_game.setFixedHeight(60)
-        self.btn_start_game.setStyleSheet("QPushButton { font-size: 26px; }")
+        self.btn_start_game.setFixedHeight(ui_px(60))
+        self.btn_start_game.setStyleSheet(f"QPushButton {{ font-size: {PRIMARY_ACTION_FONT_PX}px; font-weight: bold; }}")
         self.btn_start_game.setToolTip(tr("main.start_game_tip"))
 
         self.btn_uninstall = QPushButton(tr("main.uninstall_hook"))
         self.btn_uninstall.setEnabled(False)
         self.btn_uninstall.clicked.connect(self._on_uninstall)
         btn_layout.addWidget(self.btn_uninstall, 1)
-        self.btn_uninstall.setFixedHeight(60)
-        self.btn_uninstall.setStyleSheet("QPushButton { font-size: 20px; }")
+        self.btn_uninstall.setFixedHeight(ui_px(60))
+        self.btn_uninstall.setStyleSheet(ui_style("QPushButton { font-size: 20px; }"))
         self.btn_uninstall.setToolTip(tr("main.uninstall_hook_tip"))
 
         self.btn_clear_cache = QPushButton(tr("main.clear_cache"))
         self.btn_clear_cache.setEnabled(False)
         self.btn_clear_cache.clicked.connect(self._on_clear_cache)
         btn_layout.addWidget(self.btn_clear_cache, 1)
-        self.btn_clear_cache.setFixedHeight(60)
-        self.btn_clear_cache.setStyleSheet("QPushButton { font-size: 20px; }")
+        self.btn_clear_cache.setFixedHeight(ui_px(60))
+        self.btn_clear_cache.setStyleSheet(ui_style("QPushButton { font-size: 20px; }"))
         self.btn_clear_cache.setToolTip(tr("main.clear_cache_tip"))
         layout.addLayout(btn_layout)
 
         # 翻译引擎和模型选择区；RPGM 速通开关占用右侧空白区域。
         translation_selection_layout = QHBoxLayout()
         translation_selection_layout.setContentsMargins(0, 0, 0, 0)
-        translation_selection_layout.setSpacing(16)
+        translation_selection_layout.setSpacing(ui_px(16))
         selection_fields_layout = QVBoxLayout()
         selection_fields_layout.setContentsMargins(0, 0, 0, 0)
-        selection_fields_layout.setSpacing(14)
+        selection_fields_layout.setSpacing(ui_px(14))
 
         # 翻译引擎选择行
         engine_layout = QHBoxLayout()
+        engine_layout.setSpacing(ui_px(10))
         self.engine_label = QLabel(tr("main.engine"))
-        self.engine_label.setStyleSheet("font-size: 20px; color: #aaa;")
+        self.engine_label.setStyleSheet(ui_style("font-size: 20px; color: #aaa;"))
         engine_layout.addWidget(self.engine_label)
         self.engine_combo = QComboBox()
         self.engine_combo.setEditable(True)
         self.engine_combo.lineEdit().setReadOnly(True)
         self._reload_engine_combo()
-        self.engine_combo.setStyleSheet("""
+        self.engine_combo.setStyleSheet(ui_style("""
             QComboBox {
                 background-color: #16213e; color: #eee;
                 border: 1px solid #555; border-radius: 4px;
@@ -951,21 +978,22 @@ class MainWindow(QWidget):
                 outline: 0px;
                 border: 1px solid #555;
             }
-        """)
+        """))
         self.engine_combo.setItemDelegate(QStyledItemDelegate())
-        self.engine_combo.setFixedHeight(48)
+        self.engine_combo.setFixedHeight(ui_px(48))
         engine_layout.addWidget(self.engine_combo)
         engine_layout.addStretch()
         selection_fields_layout.addLayout(engine_layout)
 
         # 模型选择行
         model_layout = QHBoxLayout()
+        model_layout.setSpacing(ui_px(10))
         self.model_label = QLabel(tr("main.model"))
-        self.model_label.setStyleSheet("font-size: 20px; color: #aaa;")
+        self.model_label.setStyleSheet(ui_style("font-size: 20px; color: #aaa;"))
         model_layout.addWidget(self.model_label)
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)  # 可手动输入任意模型名
-        self.model_combo.setStyleSheet("""
+        self.model_combo.setStyleSheet(ui_style("""
             QComboBox {
                 background-color: #16213e; color: #eee;
                 border: 1px solid #555; border-radius: 4px;
@@ -987,7 +1015,7 @@ class MainWindow(QWidget):
                 outline: 0px;
                 border: 1px solid #555;
             }
-        """)
+        """))
         self._update_model_combo()  # 填充模型列表
         # 下拉选择立即提交；手动输入只在回车或失去焦点后提交，避免每次
         # 按键都重建翻译器。
@@ -995,10 +1023,10 @@ class MainWindow(QWidget):
         model_editor = self.model_combo.lineEdit()
         if model_editor:
             model_editor.editingFinished.connect(self._on_model_editing_finished)
-        self.model_combo.setFixedHeight(48)
+        self.model_combo.setFixedHeight(ui_px(48))
         model_layout.addWidget(self.model_combo)
         self.model_hint = QLabel(tr("main.model_editable"))
-        self.model_hint.setStyleSheet("font-size: 18px; color: #666;")
+        self.model_hint.setStyleSheet(ui_style("font-size: 18px; color: #666;"))
         model_layout.addWidget(self.model_hint)
         model_layout.addStretch()
         selection_fields_layout.addLayout(model_layout)
@@ -1007,28 +1035,31 @@ class MainWindow(QWidget):
         self.rpgmaker_qol_container = QWidget(self)
         qol_layout = QHBoxLayout(self.rpgmaker_qol_container)
         qol_layout.setContentsMargins(0, 0, 0, 0)
-        qol_layout.setSpacing(6)
+        qol_layout.setSpacing(ui_px(6))
 
         self.rpgmaker_qol_switch_group = QFrame()
         self.rpgmaker_qol_switch_group.setObjectName("rpgmakerQolSwitchGroup")
-        self.rpgmaker_qol_switch_group.setFixedHeight(48)
-        self.rpgmaker_qol_switch_group.setStyleSheet("""
+        self.rpgmaker_qol_switch_group.setFixedHeight(ui_px(48))
+        self.rpgmaker_qol_switch_group.setStyleSheet(ui_style("""
             QFrame#rpgmakerQolSwitchGroup {
                 background-color: #303044;
                 border: 1px solid #55576a;
                 border-radius: 6px;
             }
-        """)
+        """))
         qol_switch_layout = QHBoxLayout(self.rpgmaker_qol_switch_group)
-        qol_switch_layout.setContentsMargins(1, 1, 1, 1)
+        qol_switch_layout.setSizeConstraint(QLayout.SetFixedSize)
+        # The styled frame already reserves its one-pixel border. Derive the
+        # child height from the frame so rounding cannot cover the bottom edge.
+        qol_switch_layout.setContentsMargins(0, 0, 0, 0)
         qol_switch_layout.setSpacing(0)
 
         self.btn_rpgmaker_qol = QPushButton()
         self.btn_rpgmaker_qol.setCheckable(True)
         self.btn_rpgmaker_qol.setCursor(Qt.PointingHandCursor)
-        self.btn_rpgmaker_qol.setFixedHeight(46)
-        self.btn_rpgmaker_qol.setMinimumWidth(160)
-        self.btn_rpgmaker_qol.setStyleSheet("""
+        self.btn_rpgmaker_qol.setFixedHeight(self.rpgmaker_qol_switch_group.height() - 2)
+        self.btn_rpgmaker_qol.setMinimumWidth(ui_px(160))
+        self.btn_rpgmaker_qol.setStyleSheet(ui_style("""
             QPushButton {
                 background-color: transparent; color: #aaa;
                 border: none; border-radius: 5px;
@@ -1039,24 +1070,24 @@ class MainWindow(QWidget):
                 background-color: #174b38; color: #69e3a9;
             }
             QPushButton:disabled { background-color: transparent; color: #666; }
-        """)
+        """))
         self.btn_rpgmaker_qol.toggled.connect(self._on_rpgmaker_qol_toggled)
         qol_switch_layout.addWidget(self.btn_rpgmaker_qol)
 
         qol_separator = QFrame()
         qol_separator.setObjectName("rpgmakerQolSeparator")
-        qol_separator.setFixedSize(1, 28)
+        qol_separator.setFixedSize(1, ui_px(28))
         qol_separator.setStyleSheet(
-            "QFrame#rpgmakerQolSeparator { background-color: #505165; border: none; }"
+            ui_style("QFrame#rpgmakerQolSeparator { background-color: #505165; border: none; }")
         )
         qol_switch_layout.addWidget(qol_separator, 0, Qt.AlignVCenter)
 
         self.btn_rpgmaker_qol_features = QToolButton()
         self.btn_rpgmaker_qol_features.setCursor(Qt.PointingHandCursor)
-        self.btn_rpgmaker_qol_features.setFixedSize(42, 46)
+        self.btn_rpgmaker_qol_features.setFixedSize(ui_px(42), self.rpgmaker_qol_switch_group.height() - 2)
         self.btn_rpgmaker_qol_features.setText("▼")
         self.btn_rpgmaker_qol_features.setPopupMode(QToolButton.InstantPopup)
-        self.btn_rpgmaker_qol_features.setStyleSheet("""
+        self.btn_rpgmaker_qol_features.setStyleSheet(ui_style("""
             QToolButton {
                 background-color: transparent; color: #85879b;
                 border: none; border-radius: 5px;
@@ -1072,7 +1103,7 @@ class MainWindow(QWidget):
                 background-color: transparent; color: #505163;
             }
             QToolButton::menu-indicator { image: none; width: 0px; }
-        """)
+        """))
         self.rpgmaker_qol_feature_menu = QMenu(self.btn_rpgmaker_qol_features)
         self.rpgmaker_qol_feature_menu.aboutToShow.connect(
             lambda: self.btn_rpgmaker_qol_features.setText("▲")
@@ -1100,8 +1131,8 @@ class MainWindow(QWidget):
             row = RPGMakerFeatureRow()
             row.setCursor(Qt.PointingHandCursor)
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(10, 4, 8, 4)
-            row_layout.setSpacing(8)
+            row_layout.setContentsMargins(ui_px(10), ui_px(4), ui_px(8), ui_px(4))
+            row_layout.setSpacing(ui_px(8))
             checkbox = RPGMakerFeatureCheckBox()
             checkbox.setCursor(Qt.PointingHandCursor)
             row.clicked.connect(checkbox.toggle)
@@ -1113,8 +1144,8 @@ class MainWindow(QWidget):
             row_layout.addWidget(checkbox, 1)
             help_label = QPushButton("?")
             help_label.setCursor(Qt.PointingHandCursor)
-            help_label.setFixedSize(28, 28)
-            help_label.setStyleSheet(qol_help_style)
+            help_label.setFixedSize(ui_px(28), ui_px(28))
+            help_label.setStyleSheet(ui_style(qol_help_style))
             help_label.clicked.connect(
                 lambda _checked=False, widget=help_label:
                     self._show_rpgmaker_qol_help(widget)
@@ -1131,8 +1162,8 @@ class MainWindow(QWidget):
 
         self.btn_rpgmaker_qol_help = QPushButton("?")
         self.btn_rpgmaker_qol_help.setCursor(Qt.PointingHandCursor)
-        self.btn_rpgmaker_qol_help.setFixedSize(28, 28)
-        self.btn_rpgmaker_qol_help.setStyleSheet(qol_help_style)
+        self.btn_rpgmaker_qol_help.setFixedSize(ui_px(28), ui_px(28))
+        self.btn_rpgmaker_qol_help.setStyleSheet(ui_style(qol_help_style))
         self.btn_rpgmaker_qol_help.clicked.connect(
             lambda _checked=False: self._show_rpgmaker_qol_help_dialog()
         )
@@ -1144,19 +1175,20 @@ class MainWindow(QWidget):
         layout.addLayout(translation_selection_layout)
         self._refresh_rpgmaker_qol_control()
 
-        # ── 引擎设置区域（固定高度容器，防止切换引擎时布局跳动）──
+        # ── 引擎设置区域 ──
         self.engine_settings_container = QWidget()
         _es_layout = QVBoxLayout(self.engine_settings_container)
         _es_layout.setContentsMargins(0, 0, 0, 0)
-        _es_layout.setSpacing(14)
+        _es_layout.setSpacing(ui_px(14))
         _es_layout.setAlignment(Qt.AlignTop)  # 行紧贴顶部，空白留底部
 
         # 节点选择行 (内置通道专属) — 包在 QWidget 中便于整行隐藏
         self.node_row = QWidget()
         self.node_layout = QHBoxLayout(self.node_row)
+        self.node_layout.setSpacing(ui_px(10))
         self.node_layout.setContentsMargins(0, 0, 0, 0)
         self.node_label = QLabel(tr("main.route"))
-        self.node_label.setStyleSheet("font-size: 20px; color: #aaa;")
+        self.node_label.setStyleSheet(ui_style("font-size: 20px; color: #aaa;"))
         self.node_layout.addWidget(self.node_label)
         self.node_combo = QComboBox()
         self.node_combo.setEditable(True)
@@ -1168,7 +1200,7 @@ class MainWindow(QWidget):
             url = node.get("url", "")
             self.node_combo.addItem(localized_node_name(name), url)
             
-        self.node_combo.setStyleSheet("""
+        self.node_combo.setStyleSheet(ui_style("""
             QComboBox {
                 background-color: #16213e; color: #eee;
                 border: 1px solid #555; border-radius: 4px;
@@ -1188,7 +1220,7 @@ class MainWindow(QWidget):
                 outline: 0px;
                 border: 1px solid #555;
             }
-        """)
+        """))
         current_builtin_url = self.config.get("builtin_url", "https://www-api-1.h53633179.nyat.app:50588/v1")
         idx = self.node_combo.findData(current_builtin_url)
         if idx >= 0:
@@ -1197,14 +1229,14 @@ class MainWindow(QWidget):
             self.node_combo.setCurrentIndex(0)
         self.node_combo.currentIndexChanged.connect(self._on_node_changed)
         self.node_combo.setItemDelegate(QStyledItemDelegate())
-        self.node_combo.setFixedHeight(48)
+        self.node_combo.setFixedHeight(ui_px(48))
         self.node_layout.addWidget(self.node_combo)
 
         self.btn_test_latency = QPushButton()
         self.btn_test_latency.setCursor(Qt.PointingHandCursor)
-        self.btn_test_latency.setFixedHeight(40)
-        self.btn_test_latency.setMinimumWidth(88)
-        self.btn_test_latency.setStyleSheet("""
+        self.btn_test_latency.setFixedHeight(ui_px(40))
+        self.btn_test_latency.setMinimumWidth(ui_px(88))
+        self.btn_test_latency.setStyleSheet(ui_style("""
             QPushButton {
                 background-color: #16213e; color: #4a9eff;
                 border: 1px solid #4a9eff; border-radius: 4px;
@@ -1212,7 +1244,7 @@ class MainWindow(QWidget):
             }
             QPushButton:hover { background-color: #1a2744; color: #6bb5ff; }
             QPushButton:disabled { color: #777; border-color: #555; }
-        """)
+        """))
         self.btn_test_latency.clicked.connect(self._on_test_builtin_latency)
         self.node_layout.addWidget(self.btn_test_latency)
         self._render_latency_button()
@@ -1224,7 +1256,8 @@ class MainWindow(QWidget):
         self.builtin_api_row = QWidget()
         self.builtin_api_layout = QHBoxLayout(self.builtin_api_row)
         self.builtin_api_layout.setContentsMargins(0, 0, 0, 0)
-        self.builtin_api_layout.setSpacing(10)
+        self.builtin_api_layout.setSpacing(ui_px(10))
+        self.builtin_api_layout.addStretch()
 
         builtin_api_btn_style = """
             QPushButton {
@@ -1236,32 +1269,31 @@ class MainWindow(QWidget):
             QPushButton:disabled { color: #555; border-color: #444; }
         """
 
-        self.builtin_api_layout.addStretch() # 占位
         self.btn_trial_key = QPushButton(tr("main.get_trial"))
         self.btn_trial_key.setCursor(Qt.PointingHandCursor)
-        self.btn_trial_key.setStyleSheet(builtin_api_btn_style)
+        self.btn_trial_key.setStyleSheet(ui_style(builtin_api_btn_style))
         self.btn_trial_key.clicked.connect(self._on_request_trial_key)
         self.builtin_api_layout.addWidget(self.btn_trial_key)
 
         self.api_status_label = QLabel()
-        self.api_status_label.setStyleSheet("font-size: 18px; padding-left: 8px;")
+        self.api_status_label.setStyleSheet(ui_style("font-size: 18px; padding-left: 8px;"))
         self.builtin_api_layout.addWidget(self.api_status_label)
 
         self.expiry_group = QWidget()
         self.expiry_group_layout = QHBoxLayout(self.expiry_group)
         self.expiry_group_layout.setContentsMargins(0, 0, 0, 0)
-        self.expiry_group_layout.setSpacing(2)
+        self.expiry_group_layout.setSpacing(ui_px(2))
 
         self.api_expiry_label = QLabel()
         self.api_expiry_label.setAlignment(Qt.AlignVCenter)
-        self.api_expiry_label.setStyleSheet("font-size: 18px; color: #aaa;")
+        self.api_expiry_label.setStyleSheet(ui_style("font-size: 18px; color: #aaa;"))
         self.expiry_group_layout.addWidget(self.api_expiry_label)
 
         self.btn_refresh_expiry = QPushButton("⟳")
         self.btn_refresh_expiry.setCursor(Qt.PointingHandCursor)
         self.btn_refresh_expiry.setToolTip(tr("main.refresh_expiry"))
-        self.btn_refresh_expiry.setFixedSize(22, 22)
-        self.btn_refresh_expiry.setStyleSheet("""
+        self.btn_refresh_expiry.setFixedSize(ui_px(22), ui_px(22))
+        self.btn_refresh_expiry.setStyleSheet(ui_style("""
             QPushButton {
                 background-color: transparent;
                 color: #4a9eff;
@@ -1272,33 +1304,32 @@ class MainWindow(QWidget):
             }
             QPushButton:hover { color: #6bb5ff; }
             QPushButton:disabled { color: #555; }
-        """)
+        """))
         self.btn_refresh_expiry.clicked.connect(self._on_refresh_trial_expiry_clicked)
         self.expiry_group_layout.addWidget(self.btn_refresh_expiry)
 
-        self.builtin_api_layout.addWidget(self.expiry_group)
-        self.builtin_api_layout.setAlignment(self.expiry_group, Qt.AlignVCenter)
-
+        self.builtin_api_layout.addWidget(self.expiry_group, 0, Qt.AlignVCenter)
         self.builtin_api_layout.addStretch()
         _es_layout.addWidget(self.builtin_api_row)
 
         # API 地址行 — 包在 QWidget 中便于整行隐藏
         self.url_row = QWidget()
         self.url_layout = QHBoxLayout(self.url_row)
+        self.url_layout.setSpacing(ui_px(10))
         self.url_layout.setContentsMargins(0, 0, 0, 0)
         self.url_label = QLabel(tr("main.api_address"))
-        self.url_label.setStyleSheet("font-size: 20px; color: #aaa;")
+        self.url_label.setStyleSheet(ui_style("font-size: 20px; color: #aaa;"))
         self.url_layout.addWidget(self.url_label)
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText(tr("main.example_url", url="https://www-api-1.h53633179.nyat.app:50588/v1"))
-        self.url_input.setStyleSheet("""
+        self.url_input.setStyleSheet(ui_style("""
             QLineEdit {
                 background-color: #16213e; color: #eee;
                 border: 1px solid #555; border-radius: 4px;
                 padding: 10px 14px; font-size: 18px; min-width: 400px;
             }
             QLineEdit:focus { border-color: #4a9eff; }
-        """)
+        """))
         self.url_input.editingFinished.connect(self._on_url_changed)
         self.url_layout.addWidget(self.url_input)
         self.url_layout.addStretch()
@@ -1307,47 +1338,48 @@ class MainWindow(QWidget):
         # API Key 行 — 包在 QWidget 中便于整行隐藏
         self.key_row = QWidget()
         self.key_layout = QHBoxLayout(self.key_row)
+        self.key_layout.setSpacing(ui_px(10))
         self.key_layout.setContentsMargins(0, 0, 0, 0)
         self.key_label = QLabel(tr("main.api_key"))
-        self.key_label.setStyleSheet("font-size: 20px; color: #aaa;")
+        self.key_label.setStyleSheet(ui_style("font-size: 20px; color: #aaa;"))
         self.key_layout.addWidget(self.key_label)
         
         self.key_container = QWidget()
         h_key = QHBoxLayout(self.key_container)
         h_key.setContentsMargins(0, 0, 0, 0)
-        h_key.setSpacing(6)
+        h_key.setSpacing(ui_px(6))
         
         # key_input + toggle 包在子容器中，方便单独隐藏
         self.key_input_wrapper = QWidget()
         h_input = QHBoxLayout(self.key_input_wrapper)
         h_input.setContentsMargins(0, 0, 0, 0)
-        h_input.setSpacing(6)
+        h_input.setSpacing(ui_px(6))
         
         self.key_input = QLineEdit()
         self.key_input.setEchoMode(QLineEdit.Password)
-        self.key_input.setStyleSheet("""
+        self.key_input.setStyleSheet(ui_style("""
             QLineEdit {
                 background-color: #16213e; color: #eee;
                 border: 1px solid #555; border-radius: 4px;
                 padding: 10px 14px; font-size: 18px; min-width: 400px;
             }
             QLineEdit:focus { border-color: #4a9eff; }
-        """)
+        """))
         self.key_input.editingFinished.connect(self._on_key_changed)
         h_input.addWidget(self.key_input)
         
         self.btn_key_toggle = QPushButton("🙈")
-        self.btn_key_toggle.setFixedSize(42, 42)
+        self.btn_key_toggle.setFixedSize(ui_px(42), ui_px(42))
         self.btn_key_toggle.setToolTip(tr("common.show_hide_key"))
         self.btn_key_toggle.setCursor(Qt.PointingHandCursor)
-        self.btn_key_toggle.setStyleSheet("""
+        self.btn_key_toggle.setStyleSheet(ui_style("""
             QPushButton {
                 background-color: #16213e; color: #888;
                 border: 1px solid #555; border-radius: 4px;
                 font-size: 18px; padding: 0;
             }
             QPushButton:hover { color: #4a9eff; border-color: #4a9eff; }
-        """)
+        """))
         def _toggle_echo():
             if self.key_input.echoMode() == QLineEdit.Password:
                 self.key_input.setEchoMode(QLineEdit.Normal)
@@ -1363,9 +1395,8 @@ class MainWindow(QWidget):
         self.key_layout.addStretch()
         _es_layout.addWidget(self.key_row)
 
-        # 固定容器高度 = 2行控件(每行48px) + 1个间距(14px) = 110px
-        self.engine_settings_container.setFixedHeight(110)
         layout.addWidget(self.engine_settings_container)
+        self._align_provider_labels()
 
         # 连接引擎选择信号并设置初始选项 (放最后以确保其他 UI 已创建)
         self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
@@ -1387,7 +1418,7 @@ class MainWindow(QWidget):
         # 日志面板按钮行
         log_toggle_layout = QHBoxLayout()
         log_toggle_layout.setContentsMargins(0, 0, 0, 0)
-        log_toggle_layout.setSpacing(8)
+        log_toggle_layout.setSpacing(ui_px(8))
 
         # 共通按钮样式
         _footer_btn_style = """
@@ -1403,21 +1434,21 @@ class MainWindow(QWidget):
         # 1. 显示浮窗与位置菜单
         self.overlay_toggle_group = QFrame()
         self.overlay_toggle_group.setObjectName("overlayToggleGroup")
-        self.overlay_toggle_group.setFixedHeight(40)
-        self.overlay_toggle_group.setStyleSheet("""
+        self.overlay_toggle_group.setFixedHeight(ui_px(40))
+        self.overlay_toggle_group.setStyleSheet(ui_style("""
             QFrame#overlayToggleGroup {
                 background-color: transparent;
                 border: 1px solid #444;
                 border-radius: 4px;
             }
-        """)
+        """))
         overlay_toggle_layout = QHBoxLayout(self.overlay_toggle_group)
-        overlay_toggle_layout.setContentsMargins(1, 1, 1, 1)
+        overlay_toggle_layout.setContentsMargins(0, 0, 0, 0)
         overlay_toggle_layout.setSpacing(0)
 
         self.btn_overlay_toggle = QPushButton(tr("main.show_overlay"))
-        self.btn_overlay_toggle.setFixedHeight(38)
-        self.btn_overlay_toggle.setStyleSheet("""
+        self.btn_overlay_toggle.setFixedHeight(self.overlay_toggle_group.height() - 2)
+        self.btn_overlay_toggle.setStyleSheet(ui_style("""
             QPushButton {
                 background-color: transparent; color: #888;
                 border: none; border-radius: 3px;
@@ -1425,15 +1456,15 @@ class MainWindow(QWidget):
             }
             QPushButton:hover { background-color: #16213e; color: #ccc; }
             QPushButton:disabled { background-color: transparent; color: #444; }
-        """)
+        """))
         self.btn_overlay_toggle.clicked.connect(self._toggle_overlay_visibility)
         overlay_toggle_layout.addWidget(self.btn_overlay_toggle)
 
         overlay_separator = QFrame()
         overlay_separator.setObjectName("overlayToggleSeparator")
-        overlay_separator.setFixedSize(1, 22)
+        overlay_separator.setFixedSize(1, ui_px(22))
         overlay_separator.setStyleSheet(
-            "QFrame#overlayToggleSeparator { background-color: #3d3e50; border: none; }"
+            ui_style("QFrame#overlayToggleSeparator { background-color: #3d3e50; border: none; }")
         )
         overlay_toggle_layout.addWidget(overlay_separator, 0, Qt.AlignVCenter)
 
@@ -1442,9 +1473,9 @@ class MainWindow(QWidget):
         # Qt aligns a right-to-left tool button's popup to its right edge.
         self.btn_overlay_menu.setLayoutDirection(Qt.RightToLeft)
         self.btn_overlay_menu.setCursor(Qt.PointingHandCursor)
-        self.btn_overlay_menu.setFixedSize(34, 38)
+        self.btn_overlay_menu.setFixedSize(ui_px(34), self.overlay_toggle_group.height() - 2)
         self.btn_overlay_menu.setText("▼")
-        self.btn_overlay_menu.setStyleSheet("""
+        self.btn_overlay_menu.setStyleSheet(ui_style("""
             QToolButton {
                 background-color: transparent; color: #888;
                 border: none; border-radius: 3px;
@@ -1453,11 +1484,11 @@ class MainWindow(QWidget):
             QToolButton:hover { background-color: #16213e; color: #ccc; }
             QToolButton:pressed { background-color: #111a30; color: #4a9eff; }
             QToolButton::menu-indicator { image: none; width: 0px; }
-        """)
+        """))
         self.overlay_menu = QMenu(self.btn_overlay_menu)
         self.overlay_menu.setLayoutDirection(Qt.LeftToRight)
         self.btn_overlay_menu.setMenu(self.overlay_menu)
-        self.overlay_menu.setStyleSheet("""
+        self.overlay_menu.setStyleSheet(ui_style("""
             QMenu {
                 background-color: #1a1a2e; color: #eee;
                 border: 1px solid #444; padding: 5px;
@@ -1465,7 +1496,7 @@ class MainWindow(QWidget):
             }
             QMenu::item { padding: 6px 16px; border-radius: 3px; }
             QMenu::item:selected { background-color: #16213e; color: #4a9eff; }
-        """)
+        """))
         self.overlay_menu.aboutToShow.connect(
             lambda: self.btn_overlay_menu.setText("▲")
         )
@@ -1484,22 +1515,22 @@ class MainWindow(QWidget):
         # 2. 译文工作台
         self.btn_workbench_toggle = QPushButton(tr("main.workbench"))
         self.btn_workbench_toggle.setEnabled(False)
-        self.btn_workbench_toggle.setStyleSheet(_footer_btn_style)
+        self.btn_workbench_toggle.setStyleSheet(ui_style(_footer_btn_style))
         self.btn_workbench_toggle.clicked.connect(self._show_workbench)
         log_toggle_layout.addWidget(self.btn_workbench_toggle)
 
         # 3. 日志展开/收起
         self.btn_log_toggle = QPushButton(tr("main.log_closed"))
-        self.btn_log_toggle.setStyleSheet(_footer_btn_style)
+        self.btn_log_toggle.setStyleSheet(ui_style(_footer_btn_style))
         self.btn_log_toggle.clicked.connect(self._toggle_log)
         log_toggle_layout.addWidget(self.btn_log_toggle)
         log_toggle_layout.addStretch()
 
         # 4. 界面语言（靠右；菜单始终使用各语言自己的名称）
         self.btn_language = QPushButton()
-        self.btn_language.setStyleSheet(_footer_btn_style)
+        self.btn_language.setStyleSheet(ui_style(_footer_btn_style))
         self.language_menu = QMenu(self.btn_language)
-        self.language_menu.setStyleSheet("""
+        self.language_menu.setStyleSheet(ui_style("""
             QMenu {
                 background-color: #1a1a2e; color: #eee;
                 border: 1px solid #444; padding: 5px;
@@ -1507,7 +1538,7 @@ class MainWindow(QWidget):
             }
             QMenu::item { padding: 7px 28px 7px 12px; border-radius: 3px; }
             QMenu::item:selected { background-color: #16213e; color: #4a9eff; }
-        """)
+        """))
         self.btn_language.setMenu(self.language_menu)
         self._rebuild_language_menu()
         log_toggle_layout.addWidget(self.btn_language)
@@ -1517,9 +1548,9 @@ class MainWindow(QWidget):
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(200)
+        self.log_text.setMinimumHeight(ui_px(200))
         self.log_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        self.log_text.setStyleSheet("""
+        self.log_text.setStyleSheet(ui_style("""
             QTextEdit {
                 background-color: #0d1117;
                 color: #8b949e;
@@ -1547,7 +1578,7 @@ class MainWindow(QWidget):
             QTextEdit QScrollBar::sub-line:vertical {
                 height: 0px;
             }
-        """)
+        """))
         self.log_text.setVisible(False)
         layout.addWidget(self.log_text)
 
@@ -1676,7 +1707,7 @@ class MainWindow(QWidget):
     def _normalize_speaker(self, speaker) -> str:
         return normalize_speaker_name(speaker)
 
-    def _save_manual_translation_entry(self, payload: dict, refresh_workbench: bool):
+    def _save_manual_translation_entry(self, payload: dict, refresh_workbench: bool, refresh_display: bool = True):
         source = str(payload.get("source") or "").strip()
         if not source:
             return None
@@ -1702,7 +1733,8 @@ class MainWindow(QWidget):
         if not saved_entry:
             return None
         self.btn_clear_cache.setEnabled(not self.cache.is_empty())
-        self._refresh_current_display_from_cache()
+        if refresh_display:
+            self._refresh_current_display_from_cache()
         if refresh_workbench:
             self._refresh_workbench_entries(selected_source=source)
         return saved_entry
@@ -1718,6 +1750,8 @@ class MainWindow(QWidget):
         self._fit_footer_buttons()
 
     def _set_status(self, key: str, **params):
+        if "support" in params:
+            params["support"] = self._support_tip()
         self._status_message = (key, dict(params))
         self.status_label.setText(tr(key, **params))
 
@@ -1794,7 +1828,7 @@ class MainWindow(QWidget):
             return
         widest_checkbox = max(checkbox.sizeHint().width() for checkbox in checks.values())
         # Row margins (18), spacing (8), help button (28), and the menu frame (2).
-        menu.setMinimumWidth(max(260, widest_checkbox + 56))
+        menu.setMinimumWidth(max(ui_px(260), widest_checkbox + ui_px(56)))
         menu.updateGeometry()
 
     def _refresh_rpgmaker_qol_control(self):
@@ -1824,10 +1858,10 @@ class MainWindow(QWidget):
             if feature_menu is None or not feature_menu.isVisible():
                 self.btn_rpgmaker_qol_features.setText("▼")
             matched_width = max(
-                160,
+                ui_px(160),
                 self.btn_rpgmaker_qol.fontMetrics().horizontalAdvance(
                     self.btn_rpgmaker_qol.text()
-                ) + 36,
+                ) + ui_px(36),
             )
             self.btn_rpgmaker_qol.setFixedWidth(matched_width)
         selected_features = self._rpgmaker_qol_features()
@@ -1907,7 +1941,7 @@ class MainWindow(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(tr("main.rpgmaker_qol_help_title"))
         dialog.setModal(True)
-        dialog.setStyleSheet("""
+        dialog.setStyleSheet(ui_style("""
             QDialog { background-color: #1a1a2e; }
             QTextEdit#rpgmakerQolHelpContent {
                 background-color: transparent; color: #eeeeee;
@@ -1922,11 +1956,11 @@ class MainWindow(QWidget):
             QDialogButtonBox QPushButton:hover {
                 background-color: #3a3d56; border-color: #777b96;
             }
-        """)
+        """))
 
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 22, 24, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(ui_px(24), ui_px(22), ui_px(24), ui_px(18))
+        layout.setSpacing(ui_px(14))
 
         content = QTextEdit(dialog)
         content.setObjectName("rpgmakerQolHelpContent")
@@ -1946,21 +1980,22 @@ class MainWindow(QWidget):
         if screen is None:
             screen = QApplication.primaryScreen()
         available = screen.availableGeometry()
-        width = min(760, max(420, available.width() - 120))
-        height = min(620, max(360, available.height() - 120))
-        dialog.setMinimumSize(min(560, width), min(420, height))
+        width = min(ui_px(760), max(ui_px(420), available.width() - ui_px(120)))
+        height = min(ui_px(620), max(ui_px(360), available.height() - ui_px(120)))
+        dialog.setMinimumSize(min(ui_px(560), width), min(ui_px(420), height))
         dialog.resize(width, height)
         dialog.exec_()
         return dialog
 
     def _on_status_signal(self, text):
         if isinstance(text, LocalizedString):
-            self._status_message = (text.key, text.params)
-        self.status_label.setText(str(text or ""))
+            self._set_status(text.key, **text.params)
+        else:
+            self.status_label.setText(str(text or ""))
 
     def _refresh_drop_label_language(self):
         if not self._current_game_exe:
-            self.drop_label.setText(tr("main.drop_game"))
+            self.drop_label.setText(ui_rich_text(tr("main.drop_game")))
             return
         name = os.path.basename(self._current_game_exe)
         extra = ""
@@ -1968,7 +2003,7 @@ class MainWindow(QWidget):
             extra = f'<br><span style="color:#ffb454;">{tr("drop.game_already_running")}</span>'
         elif self._hook_installed:
             extra = f'<br><span style="color:#4a9eff;">{tr("drop.hook_loaded")}</span>'
-        self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}{extra}')
+        self.drop_label.setText(ui_rich_text(f'<span style="font-size: 48px;">🎮</span><br>{name}{extra}'))
 
     def _reload_engine_combo(self, preferred_engine: str | None = None):
         """Rebuild provider choices while preserving the stable provider id."""
@@ -1992,7 +2027,8 @@ class MainWindow(QWidget):
             self.engine_combo.blockSignals(False)
 
     def retranslate_ui(self, *_):
-        version = self.config.get("version", "v1.5.6")
+        refresh_ui_font(self)
+        version = self.config.get("version", "v1.6.0")
         self.setWindowTitle(tr("app.title", version=version))
         self.btn_settings.setText(tr("main.settings"))
         self.btn_pin.setText(tr("common.pin"))
@@ -2009,6 +2045,7 @@ class MainWindow(QWidget):
             self._hook_config_dirty = True
         self._refresh_rpgmaker_qol_control()
         self.node_label.setText(tr("main.route"))
+        self._align_provider_labels()
         self._render_latency_button()
         self.btn_trial_key.setText(tr("main.get_trial"))
         self.btn_refresh_expiry.setToolTip(tr("main.refresh_expiry"))
@@ -2039,7 +2076,7 @@ class MainWindow(QWidget):
         self._fit_footer_buttons()
         self._refresh_drop_label_language()
         key, params = self._status_message
-        self.status_label.setText(tr(key, **params))
+        self._set_status(key, **params)
         self._update_api_status_label()
         self._update_api_expiry_label()
         self._update_bulk_workbench_state()
@@ -2285,10 +2322,10 @@ class MainWindow(QWidget):
         key = self.config.get("builtin_api_key", "")
         if key:
             self.api_status_label.setText(tr("status.api_ready"))
-            self.api_status_label.setStyleSheet("font-size: 18px; padding-left: 8px; color: #4caf50;")
+            self.api_status_label.setStyleSheet(ui_style("font-size: 18px; padding-left: 8px; color: #4caf50;"))
         else:
             self.api_status_label.setText(tr("status.api_missing"))
-            self.api_status_label.setStyleSheet("font-size: 18px; padding-left: 8px; color: #ff5252;")
+            self.api_status_label.setStyleSheet(ui_style("font-size: 18px; padding-left: 8px; color: #ff5252;"))
 
     def _update_api_expiry_label(self, text: str | None = None, loading: bool = False):
         """更新内置通道 API 到期时间显示"""
@@ -2313,7 +2350,7 @@ class MainWindow(QWidget):
             else:
                 color = "#ddd"
         self.api_expiry_label.setText(tr("status.api_expiry", value=display_text))
-        self.api_expiry_label.setStyleSheet(f"font-size: 18px; color: {color}; padding-left: 12px;")
+        self.api_expiry_label.setStyleSheet(ui_style(f"font-size: 18px; color: {color};"))
 
     def _set_expiry_refresh_loading(self, loading: bool):
         self.btn_refresh_expiry.setEnabled(not loading)
@@ -2491,10 +2528,11 @@ class MainWindow(QWidget):
             self.btn_log_toggle.setText(tr("main.log_closed"))
         else:
             # 用保存的高度恢复窗口尺寸
-            saved_h = getattr(self, '_log_saved_height', 200)
+            saved_h = getattr(self, '_log_saved_height', ui_px(200))
             target_h = self.height() + saved_h + spacing
             self.log_text.setVisible(True)
             self.resize(self.width(), target_h)
+            fit_window_to_screen(self)
             self.btn_log_toggle.setText(tr("main.log_open"))
         self._fit_footer_buttons()
 
@@ -2513,6 +2551,18 @@ class MainWindow(QWidget):
             button = getattr(self, button_name, None)
             if button is not None:
                 button.setFixedWidth(button.sizeHint().width())
+
+    def _align_provider_labels(self):
+        labels = (self.engine_label, self.model_label, self.node_label,
+                  self.url_label, self.key_label)
+        for label in labels:
+            label.ensurePolished()
+        # A fixed width also affects QLabel's next sizeHint.  Measure text so
+        # switching back from a longer locale can shrink the shared column.
+        width = max(label.fontMetrics().horizontalAdvance(label.text())
+                    + 2 * label.margin() for label in labels) + 1
+        for label in labels:
+            label.setFixedWidth(width)
 
     def _language_button_text(self) -> str:
         preference = self.config.get("ui_language", "auto")
@@ -2553,9 +2603,10 @@ class MainWindow(QWidget):
 
     def _on_overlay_hotkey(self):
         foreground_pid = foreground_process_id()
-        allowed = os.getpid() in process_ancestry(foreground_pid)
+        ancestors = process_ancestry(foreground_pid)
+        allowed = os.getpid() in ancestors
         if not allowed and self._game_process:
-            allowed = self._game_process.pid in process_ancestry(foreground_pid)
+            allowed = self._game_process.pid in ancestors
         if not allowed and self._current_game_exe:
             allowed = process_executable_path(foreground_pid) == os.path.normcase(
                 os.path.abspath(self._current_game_exe)
@@ -2664,7 +2715,7 @@ class MainWindow(QWidget):
             self._restore_status_after_update_check()
             return
 
-        if not getattr(sys, "frozen", False):
+        if sys.platform != "win32" or not getattr(sys, "frozen", False):
             QMessageBox.information(
                 self,
                 tr("dialog.new_version"),
@@ -2808,12 +2859,12 @@ class MainWindow(QWidget):
         server.message_received.connect(self._on_hook_message_received)
 
     def _start_hook_server(self):
-        kill_port_process(self.config["socket_port"])
         self.server = HookServer(port=self.config["socket_port"])
         if self._current_game and self._current_game.engine != ENGINE_RENPY:
             self.server.set_expected_session(self._hook_session_id)
         self._connect_hook_server_signals(self.server)
-        self.server.start()
+        if not self.server.start():
+            raise OSError(tr("dialog.hook_server_start_failed", port=self.server.port, error=self.server.error_string))
         print(f"[Main] Socket server started, port: {self.config['socket_port']}")
 
     def _restart_hook_server(self):
@@ -3140,9 +3191,9 @@ class MainWindow(QWidget):
         dialog = QDialog(owner)
         dialog.setWindowTitle(tr("bulk.title"))
         dialog.setWindowModality(Qt.WindowModal)
-        dialog.setMinimumWidth(620)
+        dialog.setMinimumWidth(ui_px(620))
         dialog.setStyleSheet(
-            """
+            ui_style("""
             QDialog {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0b1220, stop:1 #111827);
                 color: #edf2ff;
@@ -3187,31 +3238,32 @@ class MainWindow(QWidget):
                 border-color: #7482a2;
                 background-color: rgba(255, 255, 255, 0.04);
             }
-            """
+            """)
         )
 
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(22, 16, 22, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(ui_px(22), ui_px(16), ui_px(22), ui_px(18))
+        layout.setSpacing(ui_px(12))
 
         body = QLabel(self._build_bulk_translate_message())
         body.setWordWrap(True)
         body.setTextFormat(Qt.RichText)
-        body.setStyleSheet("background: transparent; font-size: 19px; color: #d8e2f4;")
+        body.setStyleSheet(ui_style("background: transparent; font-size: 19px; color: #d8e2f4;"))
         layout.addWidget(body)
 
         if self.config.get("translation_engine", "builtin") == "builtin":
             warning = QFrame()
             warning.setObjectName("bulk_warning")
             warning_layout = QVBoxLayout(warning)
-            warning_layout.setContentsMargins(14, 12, 14, 12)
-            warning_layout.setSpacing(6)
+            warning_layout.setContentsMargins(ui_px(14), ui_px(12), ui_px(14), ui_px(12))
+            warning_layout.setSpacing(ui_px(6))
 
             warning_text = QLabel(
                 '<div style="font-size: 17px; line-height: 1.45;">'
                 f'<span style="font-weight: bold; color: #ffd27a;">{tr("bulk.builtin_warning_title")}</span><br>'
                 f'<span style="color: #f0c987;">{tr("bulk.builtin_warning")}</span></div>'
             )
+            warning_text.setText(ui_rich_text(warning_text.text()))
             warning_text.setWordWrap(True)
             warning_layout.addWidget(warning_text)
             layout.addWidget(warning)
@@ -3751,35 +3803,34 @@ class MainWindow(QWidget):
             ))
 
     def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith((".exe", ".lnk")):
-                    event.acceptProposedAction()
-                    self.drop_label.setStyleSheet(
-                        "#drop_zone { border-color: #e94560; background-color: #1a2744; }"
-                    )
-                    return
+        if _game_drop_path(event.mimeData()):
+            event.acceptProposedAction()
+            self.drop_label.setStyleSheet(
+                ui_style("#drop_zone { border-color: #e94560; background-color: #1a2744; }")
+            )
+            return
         event.ignore()
 
     def dragLeaveEvent(self, event):
-        self.drop_label.setStyleSheet("")
+        self.drop_label.setStyleSheet(ui_style(""))
 
     def dropEvent(self, event: QDropEvent):
-        self.drop_label.setStyleSheet("")
-        for url in event.mimeData().urls():
-            file_path = url.toLocalFile()
-            if file_path.lower().endswith((".exe", ".lnk")):
-                self._select_game(file_path)
-                return
+        self.drop_label.setStyleSheet(ui_style(""))
+        file_path = _game_drop_path(event.mimeData())
+        if file_path:
+            self._select_game(file_path)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def _on_drop_zone_clicked(self, event):
-        """点击拖放区域 → 打开文件浏览器选择 .exe"""
+        """点击拖放区域 → 打开文件浏览器选择游戏"""
         last_dir = self.config.get("last_game_dir", "")
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             tr("file.choose_game"),
             last_dir,
-            tr("file.executable_filter"),
+            tr("file.executable_filter").replace("*.exe *.lnk", "*.app") if sys.platform == "darwin" else tr("file.executable_filter"),
         )
         if file_path:
             # 保存上次打开的目录
@@ -3788,7 +3839,9 @@ class MainWindow(QWidget):
             self._select_game(file_path)
 
     def _select_game(self, selected_path: str):
-        """选中游戏 EXE 或快捷方式（仅记录路径，不注入不启动）。"""
+        """选中游戏包、可执行文件或快捷方式（仅记录路径，不注入不启动）。"""
+        if self._game_starting:
+            return
         launch_spec = resolve_game_launch(selected_path)
         exe_path = launch_spec.executable if launch_spec else selected_path
         target = detect_game(exe_path)
@@ -3811,9 +3864,10 @@ class MainWindow(QWidget):
             )
         self._runtime_token_values.clear()
         self._runtime_display_texts.clear()
+        self._runtime_text_affixes.clear()
         self._reset_hook_session_state()
-        name = os.path.basename(exe_path)
-        self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}')
+        name = target.title
+        self.drop_label.setText(ui_rich_text(f'<span style="font-size: 48px;">🎮</span><br>{name}'))
         self._set_status("status.selected_engine", name=name, engine=target.engine_label)
         self.cache.set_game(
             exe_path,
@@ -3868,15 +3922,15 @@ class MainWindow(QWidget):
         if running:
             self.btn_start_game.setEnabled(False)
             self.drop_label.setText(
-                f'<span style="font-size: 48px;">🎮</span><br>{name}'
-                f'<br><span style="color:#ffb454;">{tr("drop.game_already_running")}</span>'
+                ui_rich_text(f'<span style="font-size: 48px;">🎮</span><br>{name}'
+                f'<br><span style="color:#ffb454;">{tr("drop.game_already_running")}</span>')
             )
             self._set_status("status.game_running", name=name)
             self.selected_game_timer.start(1000)
             return
 
         self.selected_game_timer.stop()
-        self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}')
+        self.drop_label.setText(ui_rich_text(f'<span style="font-size: 48px;">🎮</span><br>{name}'))
         self._set_status("status.selected", name=name)
         self.btn_start_game.setEnabled(not self._is_bulk_job_active())
 
@@ -3924,7 +3978,7 @@ class MainWindow(QWidget):
             return
 
         name = os.path.basename(exe_path)
-        self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}<br><span style="color:#4a9eff;">{tr("drop.hook_loaded")}</span>')
+        self.drop_label.setText(ui_rich_text(f'<span style="font-size: 48px;">🎮</span><br>{name}<br><span style="color:#4a9eff;">{tr("drop.hook_loaded")}</span>'))
         self._set_status("status.injected", name=name)
 
         self.btn_uninstall.setEnabled(True)
@@ -3935,35 +3989,96 @@ class MainWindow(QWidget):
 
     def _on_start_game(self):
         """开始游戏：若未装载 Hook 则自动装载，然后启动游戏"""
-        if not self._current_game_exe:
+        if not self._current_game_exe or self._game_starting:
             return
-        if is_game_running(self._current_game_exe):
-            self._set_selected_game_running_state(True)
-            return
-        # 若尚未装载 Hook，自动装载
-        if not self._hook_installed or self._hook_config_dirty:
-            self._on_install_hook()
-            if not self._hook_installed:
-                return  # 装载失败，中止
-
         exe_path = self._current_game_exe
-        # 注入期间游戏也可能被从外部启动；再次检查以避免重复启动实例。
-        if is_game_running(exe_path):
-            self._set_selected_game_running_state(True)
-            return
-
-        # 启动游戏时，禁用引擎切换，防止竞态冲突
+        target = self._current_game
+        launch_spec = self._current_game_launch or GameLaunchSpec(executable=exe_path)
+        needs_hook = not self._hook_installed or self._hook_config_dirty
+        hook_options = {
+            "rpgmaker_qol_enabled": self._rpgmaker_qol_enabled(),
+            "rpgmaker_qol_locale": i18n_manager().locale,
+            "rpgmaker_qol_features": self._rpgmaker_qol_features(),
+            "shortcuts": rpgmaker_shortcuts(self.config),
+        }
+        socket_port = self.config.get("socket_port", 19876)
+        session_id = self._hook_session_id
+        finished = self._game_start_finished
+        cancelled = self._game_start_cancelled
+        cancelled.clear()
+        self._game_starting = True
+        self.btn_start_game.setEnabled(False)
+        self.btn_uninstall.setEnabled(False)
+        self.drop_label.setEnabled(False)
         self._set_translation_controls_enabled(False)
         self._reset_hook_session_state()
+        self._set_status("status.injecting" if needs_hook else "status.starting_game")
 
-        self._set_status("status.starting_game")
+        def worker():
+            result = {"process": None, "running": False, "hook_message": "", "hook_error": ""}
+            try:
+                if is_game_running(exe_path):
+                    result["running"] = True
+                    return
+                if needs_hook:
+                    ok, message = install_hook(
+                        target, HOOK_SCRIPT, RPGMAKER_BRIDGE_SCRIPT,
+                        socket_port, session_id, **hook_options,
+                    )
+                    if not ok:
+                        result["hook_error"] = message
+                        return
+                    result["hook_message"] = message
+                # A game opened externally during injection must not be launched twice.
+                if cancelled.is_set():
+                    return
+                if is_game_running(exe_path):
+                    result["running"] = True
+                    return
+                result["process"] = launch_game(
+                    launch_spec.executable,
+                    arguments=launch_spec.arguments,
+                    working_directory=launch_spec.working_directory,
+                    environment=game_launch_environment(target),
+                )
+            except Exception as error:
+                print(f"[Launcher] Game startup failed: {error}")
+                if needs_hook and not result["hook_message"]:
+                    result["hook_error"] = str(error)
+            finally:
+                finished.emit(result)
 
-        launch_spec = self._current_game_launch or GameLaunchSpec(executable=exe_path)
-        self._game_process = launch_game(
-            launch_spec.executable,
-            arguments=launch_spec.arguments,
-            working_directory=launch_spec.working_directory,
-        )
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_game_start_finished(self, result):
+        """Apply the background launch result on the Qt thread."""
+        self._game_starting = False
+        self.drop_label.setEnabled(True)
+        if result["hook_message"]:
+            self._hook_installed = True
+            self._hook_config_dirty = False
+            name = os.path.basename(self._current_game_exe)
+            self.drop_label.setText(ui_rich_text(f'<span style="font-size: 48px;">🎮</span><br>{name}<br><span style="color:#4a9eff;">{tr("drop.hook_loaded")}</span>'))
+            print(f"[Main] {result['hook_message']}")
+        elif result["hook_error"]:
+            self._hook_installed = False
+        self.btn_uninstall.setEnabled(self._hook_installed)
+        self._game_process = result["process"]
+        if self._close_after_game_start:
+            self.close()
+            return
+        if result["running"]:
+            self._set_translation_controls_enabled(True)
+            self._set_selected_game_running_state(True)
+            return
+        if result["hook_error"]:
+            msg = result["hook_error"]
+            self._set_translation_controls_enabled(True)
+            self.btn_start_game.setEnabled(not self._is_bulk_job_active())
+            self._set_status("status.inject_failed", detail=msg, support=self._support_tip())
+            QMessageBox.critical(self, tr("dialog.inject_failed"), f"{msg}\n\n{self._support_tip()}")
+            return
+
         if self._game_process:
             has_warmup = False
             with self._translator_lock:
@@ -3989,6 +4104,7 @@ class MainWindow(QWidget):
             )
             self.overlay.show()
             self._set_translation_controls_enabled(True)
+            self.btn_start_game.setEnabled(not self._is_bulk_job_active())
 
     def _check_game_status(self):
         """定时检查游戏进程是否结束"""
@@ -3999,7 +4115,7 @@ class MainWindow(QWidget):
             self.showNormal()  # 恢复主窗口
             if self._current_game_exe:
                 name = os.path.basename(self._current_game_exe)
-                self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{name}<br><span style="color:#4a9eff;">{tr("drop.hook_loaded")}</span>')
+                self.drop_label.setText(ui_rich_text(f'<span style="font-size: 48px;">🎮</span><br>{name}<br><span style="color:#4a9eff;">{tr("drop.hook_loaded")}</span>'))
                 self.btn_start_game.setEnabled(True)
             self._game_process = None
             self._reset_hook_session_state()
@@ -4171,11 +4287,11 @@ class MainWindow(QWidget):
         # 设置可编辑样式
         le = self.model_combo.lineEdit()
         if le:
-            le.setStyleSheet("""
+            le.setStyleSheet(ui_style("""
                 background-color: #16213e; color: #eee;
                 border: none; padding: 0px; font-size: 18px;
                 selection-background-color: #4a9eff;
-            """)
+            """))
 
         self.model_combo.blockSignals(False)
 
@@ -4209,6 +4325,8 @@ class MainWindow(QWidget):
         save_config(self.config)
 
     def _on_uninstall(self):
+        if self._game_starting:
+            return
         if self._current_game:
             ok, msg = uninstall_hook(self._current_game)
             if ok:
@@ -4219,7 +4337,7 @@ class MainWindow(QWidget):
                 self._hook_installed = False
                 self._hook_config_dirty = False
                 self._reset_hook_session_state()
-                self.drop_label.setText(f'<span style="font-size: 48px;">🎮</span><br>{os.path.basename(self._current_game_exe)}')
+                self.drop_label.setText(ui_rich_text(f'<span style="font-size: 48px;">🎮</span><br>{os.path.basename(self._current_game_exe)}'))
                 self.overlay.hide()
                 self._update_overlay_toggle_button()
             else:
@@ -4257,6 +4375,9 @@ class MainWindow(QWidget):
         if source:
             self._runtime_token_values[source] = dict(current.get("token_values") or {})
             self._runtime_display_texts[source] = display_text
+            self._runtime_text_affixes[source] = (
+                str(current.get("display_prefix") or ""),
+                str(current.get("display_suffix") or ""))
 
         choice_sources = []
         for choice in event.get("choices", []) or []:
@@ -4280,11 +4401,12 @@ class MainWindow(QWidget):
             character_id=str(current.get("character_id") or ""),
         )
 
-    def _resolve_runtime_tokens(self, text: str, source: str) -> str:
+    def _resolve_runtime_tokens(self, text: str, source: str, decorate: bool = True) -> str:
         value = str(text or "")
         for token, replacement in self._runtime_token_values.get(str(source or ""), {}).items():
             value = value.replace(str(token), str(replacement or ""))
-        return value
+        prefix, suffix = self._runtime_text_affixes.get(str(source or ""), ("", "")) if decorate else ("", "")
+        return prefix + value + suffix if value else value
 
     def _on_text_received(
         self,
@@ -5030,7 +5152,7 @@ class MainWindow(QWidget):
         cached_ahead = 0
 
         for item in self._latest_prefetch_items:
-            text = str(item.get("what", "") or "").strip()
+            text = str(item.get("source") or item.get("what") or item.get("display_text") or "").strip()
             if text and self.cache.get(text) is not None:
                 cached_ahead += 1
                 continue
@@ -5282,7 +5404,7 @@ class MainWindow(QWidget):
         for item in items or []:
             if not isinstance(item, dict):
                 item = {"what": item, "who": "", "italic": False}
-            text = str(item.get("what", "") or "").strip()
+            text = str(item.get("source") or item.get("what") or item.get("display_text") or "").strip()
             if not text:
                 continue
             normalized_items.append(
@@ -5404,7 +5526,7 @@ class MainWindow(QWidget):
         if first_is_caption:
             # 如果 choices[0] 就是说明，则直接显示翻译后的它，且不带编号
             trans = choice_translations[0] if choice_translations else ""
-            clean_c = _clean_line(self._resolve_runtime_tokens(trans, choices[0]))
+            clean_c = _clean_line(self._resolve_runtime_tokens(trans, choices[0], decorate=False))
             if clean_c:
                 lines.append(clean_c)
         else:
@@ -5421,7 +5543,7 @@ class MainWindow(QWidget):
         choice_start_idx = 1 if first_is_caption else 0
         for i in range(choice_start_idx, len(choices)):
             trans = choice_translations[i] if i < len(choice_translations) else ""
-            clean_trans = _clean_line(self._resolve_runtime_tokens(trans, choices[i]))
+            clean_trans = _clean_line(self._resolve_runtime_tokens(trans, choices[i], decorate=False))
             clean_trans = _format_screen_choice(choices[i], clean_trans)
             if clean_trans:
                 idx_num = i + 1 - choice_start_idx
@@ -5429,8 +5551,74 @@ class MainWindow(QWidget):
 
         return "\n".join(lines)
 
+    def prepare_instance_replacement(self) -> dict:
+        """Save pending edits and release services without removing the live hook."""
+        if self.workbench.has_unsaved_changes():
+            payload = self.workbench._build_save_payload()
+            if payload:
+                if not self._save_manual_translation_entry(payload, refresh_workbench=False, refresh_display=False):
+                    raise ValueError(tr("dialog.placeholder_mismatch"))
+                self.workbench._apply_saved_payload(payload)
+        if self.overlay._edit_is_dirty:
+            payload = self.overlay._build_edit_payload()
+            if payload:
+                if not self._save_manual_translation_entry(payload, refresh_workbench=False, refresh_display=False):
+                    raise ValueError(tr("dialog.placeholder_mismatch"))
+                self.overlay._set_edit_dirty_state(False, base_text=payload['translation'])
+
+        state = {
+            'game_path': self._current_game.bundle_path or self._current_game_exe if self._current_game else '',
+            'launch': asdict(self._current_game_launch) if self._current_game_launch else None,
+            'hook_session': self._hook_session_id,
+            'hook_graph': self._hook_graph_id,
+            'hook_installed': self._hook_installed,
+            'hook_ready': self._hook_session_ready,
+            'runtime_ready': self._hook_runtime_ready,
+            'display': dict(self._last_displayed_data),
+            'overlay_visible': self.overlay.isVisible(),
+            'workbench_visible': self.workbench.isVisible(),
+            'screen_text': self._screen_text_active,
+        }
+        if self._is_bulk_job_active():
+            self._on_workbench_bulk_cancel_requested()
+        self._replacing_instance = True
+        self.close()
+        return state
+
+    def restore_instance_state(self, state: dict):
+        """Reconnect the selected game with its existing bridge session."""
+        if not state.get('game_path'):
+            return
+        self._select_game(state['game_path'])
+        if not self._current_game:
+            return
+        if state.get('launch'):
+            self._current_game_launch = GameLaunchSpec(**state['launch'])
+        self._hook_session_id = state['hook_session']
+        self._hook_graph_id = state['hook_graph']
+        self._hook_installed = state['hook_installed']
+        self.server.set_expected_session(self._hook_session_id if self._is_rpgmaker_selected() else '')
+        self._hook_session_ready = state['hook_ready']
+        if self._hook_session_ready:
+            self._hook_ready_event.set()
+        if state['runtime_ready']:
+            self._mark_hook_runtime_ready()
+        self._last_displayed_data = state['display']
+        self._screen_text_active = state['screen_text']
+        self.overlay.set_screen_text_mode(self._screen_text_active)
+        self._refresh_current_display_from_cache()
+        self.btn_uninstall.setEnabled(self._hook_installed)
+        self.overlay.setVisible(state['overlay_visible'])
+        if state['workbench_visible']:
+            self._show_workbench()
+
     # --- 关闭 ---
     def closeEvent(self, event):
+        if self._game_starting:
+            self._game_start_cancelled.set()
+            self._close_after_game_start = True
+            event.ignore()
+            return
         if hasattr(self, "workbench") and self.workbench:
             if not self.workbench.confirm_discard_or_save(parent=self):
                 event.ignore()
@@ -5453,7 +5641,7 @@ class MainWindow(QWidget):
         if hasattr(self, "_overlay_hotkey"):
             self._overlay_hotkey.stop()
         # 清理 hook
-        if self._current_game:
+        if self._current_game and not getattr(self, '_replacing_instance', False):
             uninstall_hook(self._current_game)
         # 停止服务器
         self.server.stop()
@@ -5465,63 +5653,27 @@ class MainWindow(QWidget):
         event.accept()
 
 
-def kill_port_process(port: int):
-    """杀死占用指定端口的旧进程"""
-    # 正常启动时端口空闲，无需启动 netstat 扫描整台机器的连接。
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        try:
-            if os.name == "nt":
-                probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-            probe.bind(("127.0.0.1", port))
-        except OSError:
-            pass
-        else:
-            return
-
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    try:
-        result = subprocess.run(
-            ["netstat", "-ano"],
-            capture_output=True, text=True, timeout=5,
-            creationflags=creationflags,
-        )
-        my_pid = os.getpid()
-        pids_to_kill = set()
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if (len(parts) >= 5 and parts[0] == "TCP"
-                    and parts[1].rsplit(":", 1)[-1] == str(port)
-                    and parts[3] == "LISTENING"):
-                pid = int(parts[-1])
-                if pid != my_pid and pid != 0:
-                    pids_to_kill.add(pid)
-        for pid in pids_to_kill:
-            print(f"[Cleanup] Killing old process occupying port {port}, PID={pid}")
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                           capture_output=True, timeout=5,
-                           creationflags=creationflags)
-    except Exception as e:
-        print(f"[Cleanup] Port cleanup failed (can be ignored): {e}")
-
-
 def main():
     # 设置任务栏和窗口图标
     try:
         import ctypes
         # 设置 AppUserModelID，让 Windows 将其视为独立应用而非 Python 脚本，以正确显示任务栏图标
         myappid = 'renpylens.translator.app.v1'
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        if sys.platform == "win32":
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     except Exception:
         pass
 
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    set_language('auto', app)
 
     # 兼容 PyInstaller 运行时的 _MEIPASS 路径
     if getattr(sys, 'frozen', False):
         base_path = sys._MEIPASS
     else:
-        base_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets")
+        base_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
         
     # 尝试加载 icon.ico 或 icon.png
     icon_ico = os.path.join(base_path, "icon.ico")
@@ -5537,11 +5689,27 @@ def main():
     palette.setColor(QPalette.WindowText, QColor(238, 238, 238))
     app.setPalette(palette)
 
-    window = MainWindow()
-    window.setWindowIcon(app.windowIcon())
-    window.show()
-    sys.exit(app.exec_())
+    instance = None
+    try:
+        instance = SingleInstance(parent=app)
+        state = instance.acquire(port=int(load_config()['socket_port']))
+        if state is None:
+            return 0
+        window = MainWindow()
+        window.restore_instance_state(state)
+        instance.set_replacement_handler(window.prepare_instance_replacement)
+        window.setWindowIcon(app.windowIcon())
+        window.show()
+        return app.exec_()
+    except (OSError, RuntimeError) as error:
+        set_language(load_config().get('ui_language', 'auto'), app)
+        message = tr('dialog.instance_replace_timeout') if isinstance(error, TimeoutError) else str(error)
+        QMessageBox.critical(None, tr('dialog.app_start_failed_title'), message)
+        return 1
+    finally:
+        if instance:
+            instance.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

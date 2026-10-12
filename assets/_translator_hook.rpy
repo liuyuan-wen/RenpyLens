@@ -9,7 +9,7 @@ init python:
     import threading as _tthread
     import uuid as _tuuid
     import renpy as _translator_runtime
-    _translator_kernel_archive = _tos.path.join(
+    _translator_kernel_archive = _tos.environ.get("RENPYLENS_KERNEL_PATH") or _tos.path.join(
         getattr(_translator_runtime.config, "gamedir", ""),
         "_renpylens_semantics.zip",
     )
@@ -188,7 +188,17 @@ init python:
     def _translator_invalidate_route(reason):
         global _translator_menu_versions
         global _translator_session_id
+        global _translator_last_menu_signature
+        global _translator_last_current_msg
+        global _translator_last_visible_signature
+        global _translator_last_resolved_who
+        # These used to be reset by the game's store on load/restart. They
+        # now live in the runtime module, so clear capture state explicitly.
         _translator_menu_versions = {}
+        _translator_last_menu_signature = None
+        _translator_last_current_msg = None
+        _translator_last_visible_signature = None
+        _translator_last_resolved_who = ""
         _translator_session_id = getattr(
             _translator_runtime, "_renpylens_session_id", _translator_session_id
         )
@@ -364,7 +374,7 @@ init python:
         )
         return cleaned
 
-    def _translator_clean_text(renpy, text):
+    def _translator_clean_text(renpy, text, strip=True, translate=True):
         if not text:
             return ""
         try:
@@ -373,7 +383,7 @@ init python:
             string_types = (str,)
         cleaned = text if isinstance(text, string_types) else str(text)
         translator = getattr(getattr(renpy, "translation", None), "translate_string", None)
-        if translator is not None:
+        if translate and translator is not None:
             cleaned = translator(cleaned)
 
         def resolve(code, conversion, spec):
@@ -396,7 +406,26 @@ init python:
                 cleaned = renpy.substitute(cleaned)
             except Exception:
                 cleaned = _expand_name_vars(cleaned)
-        return _translator_strip_text_tags(cleaned).strip()
+        cleaned = _translator_strip_text_tags(cleaned)
+        return cleaned.strip() if strip else cleaned
+
+    def _translator_script_segment(renpy, node, displayed=None):
+        from renpylens_semantics.graph_machine import render_segment
+        if type(node).__name__ not in ("Say", "TranslateSay"):
+            text = displayed if displayed is not None else _translator_clean_text(renpy, getattr(node, "what", ""))
+            return {"source": text, "display_text": text}
+        try:
+            return render_segment(renpy, node, displayed=displayed)
+        except ValueError:
+            text = displayed if displayed is not None else _translator_strip_text_tags(getattr(node, "what", "") or "").strip()
+            return {"source": text, "display_text": text}
+
+    def _translator_menu_text(renpy, text):
+        from renpylens_semantics.graph_machine import render_text
+        try:
+            return render_text(renpy, text)
+        except ValueError:
+            return _translator_strip_text_tags(text or "").strip()
 
     def _translator_normalize_speaker(value):
         import re as _tre
@@ -607,7 +636,7 @@ init python:
                 if screen_obj is not None:
                     scope = getattr(screen_obj, "scope", None)
                     if scope and "what" in scope:
-                        visible = _translator_clean_text(renpy, scope.get("what"))
+                        visible = _translator_strip_text_tags(str(scope.get("what") or "")).strip()
                         if visible:
                             return visible
             except Exception:
@@ -762,7 +791,36 @@ init python:
         _walk(displayable)
         return body, choices
 
+    def _translator_is_menu_page(renpy):
+        store = getattr(renpy, "store", None)
+        if getattr(store, "main_menu", False) or getattr(store, "_menu", False):
+            return True
+        try:
+            context = renpy.game.context()
+            if getattr(context, "_menu", False):
+                return True
+            layers = context.scene_lists.layers
+        except Exception:
+            return False
+
+        # A custom menu may be opened with Show/CallScreen instead of
+        # ShowMenu. Its menu tag still identifies it, on any screen layer.
+        for entries in layers.values():
+            for entry in (entries or []):
+                tag = getattr(entry, "tag", None)
+                if "$" in str(tag or ""):
+                    continue
+                screen = getattr(entry, "displayable", None)
+                if screen is None or screen.__class__.__name__ != "ScreenDisplayable":
+                    continue
+                if (tag == "menu" or getattr(screen, "tag", None) == "menu"
+                        or getattr(getattr(screen, "screen", None), "tag", None) == "menu"):
+                    return True
+        return False
+
     def _translator_get_custom_screen_payload(renpy):
+        if _translator_is_menu_page(renpy):
+            return None
         try:
             scene_lists = renpy.game.context().scene_lists
             # Ren'Py stores (layer, tag) in older engines and
@@ -803,6 +861,8 @@ init python:
                 if isinstance(screen_name, str):
                     screen_name = (screen_name,)
                 primary_name = str(screen_name[0] if screen_name else "")
+                if primary_name in ("_exception", "_parse_errors"):
+                    return None
                 if primary_name in ("say", "multiple_say", "nvl"):
                     continue
 
@@ -838,6 +898,9 @@ init python:
         global _translator_last_visible_signature
 
         try:
+            if _translator_is_menu_page(renpy):
+                return False
+
             if _translator_get_visible_what(renpy):
                 return False
 
@@ -1008,7 +1071,7 @@ init python:
             },
         )
 
-    def _translator_extract_menu_entries(renpy, menu_node):
+    def _translator_extract_menu_entries(renpy, menu_node, caption_only=False):
         caption = ""
         choices = []
         seen = set()
@@ -1018,15 +1081,17 @@ init python:
         for item in (menu_node.items or []):
             if not item or len(item) < 1:
                 continue
+            branch = item[2] if len(item) >= 3 else None
+            if caption_only and branch:
+                continue
             if not _translator_menu_item_is_visible(renpy, item):
                 continue
-            clean_choice = _translator_clean_text(renpy, item[0])
+            clean_choice = _translator_menu_text(renpy, item[0])
             if not clean_choice:
                 continue
 
             # Ren'Py stores a menu caption as an item without a branch block.
             # It is explanatory text, not a selectable option.
-            branch = item[2] if len(item) >= 3 else None
             if not branch:
                 if not caption:
                     caption = clean_choice
@@ -1049,7 +1114,7 @@ init python:
                 continue
             if not _translator_menu_item_is_visible(renpy, item):
                 continue
-            text = _translator_clean_text(renpy, item[0])
+            text = _translator_menu_text(renpy, item[0])
             if not text or text not in wanted:
                 continue
             target = item[2][0]
@@ -1061,6 +1126,104 @@ init python:
                 "choice_index": index,
             })
         return result
+
+    def _translator_visible_menu_choice_segments(renpy, menu_node):
+        """Read rendered choices; screen parameters can hide AST menu items."""
+        try:
+            layers = renpy.game.context().scene_lists.layers
+        except Exception:
+            return None
+
+        items = getattr(menu_node, "items", None) or []
+        location = getattr(menu_node, "name", None)
+        result = []
+        seen = set()
+        ready = [False]
+
+        def _choice_index(action):
+            if isinstance(action, (list, tuple)) or type(action).__name__ == "RevertableList":
+                for child in action:
+                    index = _choice_index(child)
+                    if index is not None:
+                        return index
+                return None
+            if type(action).__name__ not in ("ChoiceReturn", "Choice"):
+                return None
+            if getattr(action, "location", location) != location:
+                return None
+            index = getattr(action, "value", None)
+            if isinstance(index, int) and 0 <= index < len(items) and items[index][2]:
+                return index
+            return None
+
+        def _children(node):
+            children = getattr(node, "children", None)
+            return children if children is not None else (node.visit() or [])
+
+        def _button_text(node):
+            parts = []
+            visited = set()
+
+            def _collect(child):
+                if child is None or id(child) in visited:
+                    return
+                visited.add(id(child))
+                if type(child).__name__ == "Text":
+                    text = _translator_extract_widget_text(renpy, child, resolved=True)
+                    if text:
+                        parts.append(text)
+                elif type(child).__name__ not in ("Button", "ImageButton", "TextButton"):
+                    for descendant in _children(child):
+                        _collect(descendant)
+
+            for child in _children(node):
+                _collect(child)
+            return " ".join(parts)
+
+        def _walk(node):
+            if node is None or id(node) in seen:
+                return
+            seen.add(id(node))
+            kind = type(node).__name__
+            if kind == "ScreenDisplayable":
+                # start_interact runs before the screen's first update.
+                screen_module = getattr(getattr(renpy, "display", None), "screen", None)
+                if getattr(node, "phase", None) in (
+                        getattr(screen_module, "PREDICT", 0),
+                        getattr(screen_module, "HIDE", 3),
+                        getattr(screen_module, "OLD", 4)):
+                    return
+                if getattr(node, "child", node) is None:
+                    return
+                scope = getattr(node, "scope", None) or {}
+                for entry in scope.get("items", ()) or ():
+                    if _choice_index(getattr(entry, "action", None)) is not None:
+                        ready[0] = True
+                        break
+            if kind in ("Button", "ImageButton", "TextButton"):
+                index = _choice_index(getattr(node, "action", None))
+                if index is None:
+                    index = _choice_index(getattr(node, "clicked", None))
+                if index is not None:
+                    ready[0] = True
+                    item = items[index]
+                    source = _translator_menu_text(renpy, item[0])
+                    if source:
+                        result.append({
+                            "source": source,
+                            "display_text": _button_text(node) or source,
+                            "node_id": _translator_menu_id(menu_node),
+                            "edge_id": _translator_edge_id(menu_node, item[2][0], "MENU_CHOICE", index),
+                            "choice_index": index,
+                        })
+                    return
+            for child in _children(node):
+                _walk(child)
+
+        for entries in layers.values():
+            for entry in entries or []:
+                _walk(getattr(entry, "displayable", None))
+        return result if ready[0] else None
 
     def _translator_collect_branch_nodes(node, queue):
         next_node = getattr(node, "next", None)
@@ -1206,7 +1369,8 @@ init python:
                 visited_nodes.add(node_id)
 
                 if hasattr(node, "what") and hasattr(node, "who"):
-                    clean_what = _translator_clean_text(renpy, getattr(node, "what", ""))
+                    segment = _translator_script_segment(renpy, node)
+                    clean_what = segment["source"]
                     if clean_what and clean_what not in seen_sources:
                         speaker = ""
                         try:
@@ -1218,20 +1382,16 @@ init python:
                         except Exception:
                             speaker = ""
                         seen_sources.add(clean_what)
-                        batch.append(
-                            {
-                                "source": clean_what,
-                                "entry_type": "dialogue",
-                                "speaker": _translator_normalize_speaker(speaker),
-                                "character_id": _translator_character_id(getattr(node, "who", None)),
-                            }
-                        )
+                        segment.update(entry_type="dialogue",
+                                       speaker=_translator_normalize_speaker(speaker),
+                                       character_id=_translator_character_id(getattr(node, "who", None)))
+                        batch.append(segment)
 
                 if node.__class__.__name__ == "Menu" and hasattr(node, "items"):
                     for item in (node.items or []):
                         if not item or len(item) < 1:
                             continue
-                        menu_text = _translator_clean_text(renpy, item[0])
+                        menu_text = _translator_menu_text(renpy, item[0])
                         if menu_text and menu_text not in seen_sources:
                             seen_sources.add(menu_text)
                             branch = item[2] if len(item) >= 3 else None
@@ -1333,65 +1493,86 @@ init python:
                 except Exception:
                     pass
 
+    def _translator_menu_interact_callback():
+        import renpy
+
+        global _translator_last_menu_signature
+        global _translator_last_current_msg
+        global _translator_last_visible_signature
+        try:
+            if _translator_is_menu_page(renpy):
+                return False
+            cur = _translator_get_current_node(renpy)
+            if cur is None or type(cur).__name__ != "Menu":
+                return False
+            choice_segments = _translator_visible_menu_choice_segments(renpy, cur)
+            if choice_segments is None:
+                return False
+            choices = [item["source"] for item in choice_segments]
+            menu_id = _translator_menu_id(cur)
+            signature = (menu_id, tuple(
+                (item["choice_index"], item["source"], item["display_text"])
+                for item in choice_segments))
+            if signature == _translator_last_menu_signature:
+                return False
+            # Engine/screen filtering already evaluated option conditions.
+            caption, _ = _translator_extract_menu_entries(renpy, cur, caption_only=True)
+            _translator_last_menu_signature = signature
+            _translator_last_visible_signature = None
+            state_version = _translator_next_state_version()
+            upcoming, branches, prediction_debug, continuations = _translator_predict(renpy, cur)
+            _translator_menu_versions[menu_id] = state_version
+            current_msg = {
+                "type": "current",
+                "session_id": _translator_session_id,
+                "state_version": state_version,
+                "node_id": menu_id,
+                "menu_id": menu_id,
+                "prefetch_menu_id": menu_id,
+                "who": "",
+                "what": caption,
+                "italic": False,
+                "choices": choices,
+                "choice_segments": choice_segments,
+                "menu_active": True,
+                "prefetch": upcoming,
+                "prefetch_debug": prediction_debug,
+            }
+            _translator_last_current_msg = dict(current_msg)
+            branch_message = None
+            if branches:
+                branch_message = {
+                    "type": "branch_prefetch",
+                    "session_id": _translator_session_id,
+                    "state_version": state_version,
+                    "menu_id": menu_id,
+                    "node_id": menu_id,
+                    "linear": upcoming,
+                    "branches": branches,
+                }
+            _translator_start_thread(
+                _translator_send_current_and_branches, (current_msg, branch_message))
+            if branch_message and continuations:
+                _translator_schedule_branch_continuations(
+                    continuations, state_version, branch_message)
+        except Exception:
+            pass
+        return False
+
     def _translator_interact_callback():
         import renpy
 
         global _translator_last_menu_signature
         global _translator_last_current_msg
         global _translator_last_visible_signature
-        global _translator_last_current_msg
         try:
             _translator_mark_runtime_ready()
+            if _translator_is_menu_page(renpy):
+                _translator_last_menu_signature = None
+                return
             cur = _translator_get_current_node(renpy)
             if cur and cur.__class__.__name__ == "Menu":
-                caption, choices = _translator_extract_menu_entries(renpy, cur)
-                choice_segments = _translator_menu_choice_segments(renpy, cur, choices)
-                signature = (caption, tuple(choices))
-                if choices and signature != _translator_last_menu_signature:
-                    _translator_last_menu_signature = signature
-                    _translator_last_visible_signature = None
-                    state_version = _translator_next_state_version()
-                    upcoming, branches, prediction_debug, continuations = _translator_predict(renpy, cur)
-                    menu_id = _translator_menu_id(cur)
-                    _translator_menu_versions[menu_id] = state_version
-                    current_msg = {
-                        "type": "current",
-                        "session_id": _translator_session_id,
-                        "state_version": state_version,
-                        "node_id": menu_id,
-                        "menu_id": menu_id,
-                        "prefetch_menu_id": menu_id,
-                        "who": "",
-                        "what": caption,
-                        "italic": False,
-                        "choices": choices,
-                        "choice_segments": choice_segments,
-                        "menu_active": True,
-                        "prefetch": upcoming,
-                        "prefetch_debug": prediction_debug,
-                    }
-                    _translator_last_current_msg = dict(current_msg)
-                    branch_message = None
-                    if branches:
-                        branch_message = {
-                            "type": "branch_prefetch",
-                            "session_id": _translator_session_id,
-                            "state_version": state_version,
-                            "menu_id": menu_id,
-                            "node_id": menu_id,
-                            "linear": upcoming,
-                            "branches": branches,
-                        }
-                    _translator_start_thread(
-                        _translator_send_current_and_branches,
-                        (current_msg, branch_message),
-                    )
-                    if branch_message and continuations:
-                        _translator_schedule_branch_continuations(
-                            continuations,
-                            state_version,
-                            branch_message,
-                        )
+                _translator_menu_interact_callback()
             else:
                 _translator_last_menu_signature = None
 
@@ -1417,6 +1598,7 @@ init python:
                             "choices": [],
                             "menu_active": False,
                         }
+                        msg["current_segment"] = _translator_script_segment(renpy, cur, visible_what)
                         _translator_last_current_msg = dict(msg)
                         _translator_start_thread(_translator_send, (msg,))
         except Exception:
@@ -1438,6 +1620,8 @@ init python:
 
             refreshed = dict(_translator_last_current_msg)
             refreshed["who"] = visible_who
+            if "current_segment" in refreshed:
+                refreshed["current_segment"] = dict(refreshed["current_segment"], who=visible_who)
             _translator_last_current_msg = refreshed
             _translator_start_thread(_translator_send, (refreshed,))
         except Exception:
@@ -1446,8 +1630,10 @@ init python:
     def _translator_menu_wrapper(*menu_args, **menu_kwargs):
         """Report the real menu result without changing Ren'Py menu semantics."""
         import renpy
+        global _translator_last_menu_signature
         current = _translator_get_current_node(renpy)
         menu_id = _translator_menu_id(current) if type(current).__name__ == "Menu" else ""
+        _translator_last_menu_signature = None
         result = _translator_original_menu(*menu_args, **menu_kwargs)
         if menu_id and result is not None:
             edge_id = ""
@@ -1490,8 +1676,7 @@ init python:
             display_context = getattr(renpy, "_renpylens_display_context", None)
             if display_context is not None:
                 raw_who, captured_what = display_context[:2]
-                if not what:
-                    what = captured_what
+                what = captured_what
             if what is None:
                 what = ""
             if raw_who is None:
@@ -1526,7 +1711,11 @@ init python:
             if stripped_what.startswith("{i}") and stripped_what.endswith("{/i}"):
                 is_italic = True
 
-            clean_what = _translator_clean_text(renpy, what)
+            # display_say already substituted the script and character affixes.
+            # Parsing it again would expand escaped literal brackets twice.
+            clean_what = (_translator_strip_text_tags(what).strip()
+                          if display_context is not None else
+                          _translator_clean_text(renpy, what, translate=False))
 
             choices = []
             seen_choices = set()
@@ -1565,7 +1754,9 @@ init python:
             if not clean_what and not choices:
                 return
 
-            menu_active = is_menu_node or (not clean_what and bool(choices))
+            # AST choices here are for pretranslation. The updated menu screen
+            # decides which buttons are currently visible.
+            menu_active = False
 
             msg = {
                 "type": "current",
@@ -1579,6 +1770,7 @@ init python:
                 "choices": choices,
                 "menu_active": menu_active,
             }
+            msg["current_segment"] = _translator_script_segment(renpy, cur, clean_what)
             if choice_segments:
                 msg["choice_segments"] = choice_segments
             _translator_last_current_msg = dict(msg)
@@ -1650,6 +1842,9 @@ init python:
 
         if hasattr(config, "needs_redraw_callbacks"):
             config.needs_redraw_callbacks.append(
+                _translator_menu_interact_callback
+            )
+            config.needs_redraw_callbacks.append(
                 _translator_custom_screen_interact_callback
             )
         elif hasattr(config, "interact_callbacks"):
@@ -1657,6 +1852,10 @@ init python:
         if hasattr(config, "after_load_callbacks"):
             config.after_load_callbacks.append(
                 lambda: _translator_invalidate_route("load")
+            )
+        if hasattr(config, "start_callbacks"):
+            config.start_callbacks.append(
+                lambda: _translator_invalidate_route("start")
             )
     except Exception:
         pass

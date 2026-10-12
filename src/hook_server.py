@@ -63,7 +63,7 @@ class HookServer(QObject):
         ok = self._server.listen(QHostAddress.LocalHost, self.port)
         if ok:
             print(f"[HookServer] Listening on: 127.0.0.1:{self.port}")
-            return
+            return True
 
         print(f"[HookServer] Listen failed: {self._server.errorString()}")
         self._server.close()
@@ -74,6 +74,11 @@ class HookServer(QObject):
             print(f"[HookServer] Retry listen succeeded: 127.0.0.1:{self.port}")
         else:
             print(f"[HookServer] Retry listen also failed: {self._server.errorString()}")
+        return ok
+
+    @property
+    def error_string(self):
+        return self._server.errorString()
 
     def stop(self):
         if self._server:
@@ -137,9 +142,9 @@ class HookServer(QObject):
                     continue
                 normalized_prefetch.append(
                     {
-                        "what": str(item.get("source") or item.get("display_text") or ""),
-                        "source": str(item.get("source") or item.get("display_text") or ""),
-                        "display_text": str(item.get("display_text") or item.get("source") or ""),
+                        "what": str(item.get("source") or item.get("what") or item.get("display_text") or ""),
+                        "source": str(item.get("source") or item.get("what") or item.get("display_text") or ""),
+                        "display_text": str(item.get("display_text") or item.get("source") or item.get("what") or ""),
                         "token_values": dict(item.get("token_values") or {}),
                         "who": str(item.get("who") or ""),
                         "character_id": str(item.get("character_id") or ""),
@@ -163,6 +168,8 @@ class HookServer(QObject):
                     "source": current_source,
                     "display_text": current_display,
                     "token_values": dict(current_segment.get("token_values") or {}),
+                    "display_prefix": str(current_segment.get("display_prefix") or ""),
+                    "display_suffix": str(current_segment.get("display_suffix") or ""),
                     "who": str(current_segment.get("who") or msg.get("who") or ""),
                     "character_id": str(current_segment.get("character_id") or msg.get("character_id") or ""),
                     "italic": bool(current_segment.get("italic", msg.get("italic", False))),

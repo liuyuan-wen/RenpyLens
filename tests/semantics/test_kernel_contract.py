@@ -32,8 +32,10 @@ class SemanticKernelContractTests(unittest.TestCase):
             with self.subTest(module=name):
                 self.assertIsNotNone(importlib.import_module("renpylens_semantics." + name))
 
-    def test_legacy_runtime_entrypoints_are_thin_wrappers(self):
+    def test_runtime_entrypoints_are_thin_wrappers(self):
         root = Path(__file__).resolve().parents[2]
+        if not (root / "graph" / "renpy_story_graph_runtime.py").is_file():
+            self.skipTest("Standalone story-graph tools are kept locally")
         graph_wrapper = (root / "graph" / "renpy_story_graph_runtime.py").read_text(
             encoding="utf-8"
         )

@@ -1,4 +1,4 @@
-"""Run the phase-0 through phase-4 regression sequence.
+"""Run current StoryGraph and runtime semantic regression checks.
 
 The large-game artifacts are intentionally local and ignored by Git.  Full
 acceptance requires both a Ren'Py launcher and the preserved large game.
@@ -9,7 +9,6 @@ reported as a passed phase gate.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -29,11 +28,6 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 FIXTURE_GAME = Path(__file__).resolve().parent / "fixtures" / "semantic_cases" / "game"
 BASELINE_TOOLS = Path(__file__).resolve().parent / "baseline_tools.py"
-ARTIFACT_ROOT = Path(__file__).resolve().parent / "artifacts" / "phase0-large-game"
-DEFAULT_BASELINE_GRAPH = ARTIFACT_ROOT / "renpy_story_graph.json"
-DEFAULT_BASELINE_ROUTE = ARTIFACT_ROOT / "shadow_route_result.json"
-DEFAULT_GRAPH = ROOT / "tests" / "renpy_story_graph.json"
-DEFAULT_ROUTE = ROOT / "tests" / "shadow_route_result.json"
 FIXTURE_STATE_NAMES = (
     "semantic_score", "semantic_counter", "semantic_random", "semantic_name",
     "phase0_checkpoint",
@@ -174,11 +168,11 @@ def _normalize_hook_trace(messages):
 
 
 def _run(name, command, required=True):
-    print("[phase0] %s" % name)
+    print("[semantics] %s" % name)
     completed = subprocess.run(command, cwd=str(ROOT))
     ok = completed.returncode == 0
     if not ok:
-        print("[phase0] %s failed with exit code %s" % (name, completed.returncode))
+        print("[semantics] %s failed with exit code %s" % (name, completed.returncode))
     return ok or not required
 
 
@@ -209,48 +203,7 @@ def fixture_lint():
             "duplicate_labels": len(labels) - len(set(labels)),
         }))
         return False
-    print("[phase0] fixture labels: %s" % ", ".join(labels))
-    return True
-
-
-def verify_local_artifacts():
-    """Verify the ignored large evidence when it is available locally."""
-    manifest_path = Path(__file__).resolve().parent / "baselines" / "phase0.json"
-    if not manifest_path.is_file():
-        return True
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    expected = manifest.get("artifacts", {})
-    paths = {name: ARTIFACT_ROOT / name for name in expected}
-    if not expected or not all(path.is_file() for path in paths.values()):
-        print("[phase0] local large artifacts unavailable; integrity check skipped")
-        return True
-    for name, metadata in expected.items():
-        path = paths[name]
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        actual_sha = digest.hexdigest()
-        actual_size = path.stat().st_size
-        if (actual_sha.lower() != str(metadata.get("sha256", "")).lower()
-                or actual_size != int(metadata.get("bytes", -1))):
-            print("[phase0] artifact integrity mismatch: %s" % name)
-            return False
-    expected_presentation = manifest.get("story_graph", {}).get(
-        "presentation_conservative_user_statements"
-    )
-    if expected_presentation is not None:
-        graph = json.loads((ARTIFACT_ROOT / "renpy_story_graph.json").read_text(encoding="utf-8"))
-        actual_presentation = sum(
-            1 for node in graph.get("icfg", {}).get("nodes", [])
-            if node.get("kind") == "UserStatement" and node.get("precision") == "conservative"
-        )
-        if actual_presentation != expected_presentation:
-            print("[phase0] presentation relevance mismatch: %s != %s" %
-                  (actual_presentation, expected_presentation))
-            return False
-        print("[phase0] conservative presentation UserStatement count: %s" % actual_presentation)
-    print("[phase0] local large artifact integrity verified")
+    print("[semantics] fixture labels: %s" % ", ".join(labels))
     return True
 
 
@@ -316,7 +269,7 @@ def _fixture_runtime(renpy_executable, output_root, args):
     try:
         trace = _normalize_hook_trace(collector.messages)
     except ValueError as error:
-        print("[phase0] invalid fixture Hook trace: %s" % error)
+        print("[semantics] invalid fixture Hook trace: %s" % error)
         return None
     hook_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"graph": graph_path, "route": route_path, "hook": hook_path}
@@ -329,7 +282,7 @@ def _compare_fixture_artifacts(actual, update_goldens=False):
         for name in names:
             source = actual["graph" if "story" in name else "route" if "shadow" in name else "hook"]
             if not source.is_file():
-                print("[phase0] fixture golden source missing: %s" % source.name)
+                print("[semantics] fixture golden source missing: %s" % source.name)
                 return False
             shutil.copy2(source, FIXTURE_GOLDEN_ROOT / name)
         return True
@@ -337,47 +290,30 @@ def _compare_fixture_artifacts(actual, update_goldens=False):
         source = actual["graph" if "story" in name else "route" if "shadow" in name else "hook"]
         expected = FIXTURE_GOLDEN_ROOT / name
         if not source.is_file() or not expected.is_file():
-            print("[phase0] fixture golden unavailable: %s" % name)
+            print("[semantics] fixture golden unavailable: %s" % name)
             return False
         try:
             actual_value = _canonical_json(json.loads(source.read_text(encoding="utf-8")))
             expected_value = _canonical_json(json.loads(expected.read_text(encoding="utf-8")))
         except (OSError, ValueError, json.JSONDecodeError):
-            print("[phase0] fixture golden JSON is invalid: %s" % name)
+            print("[semantics] fixture golden JSON is invalid: %s" % name)
             return False
         if actual_value != expected_value:
-            print("[phase0] fixture golden mismatch: %s" % name)
+            print("[semantics] fixture golden mismatch: %s" % name)
             return False
     return True
 
 
-def _verify_v3_graph(path, baseline, projection_path):
+def _verify_v3_graph(path):
     from renpylens_semantics.audit import validate
-    from renpylens_semantics.serialization import load_graph, project_v2
+    from renpylens_semantics.serialization import load_graph
 
-    graph = load_graph(path)
-    value = graph.to_dict()
-    counts = (len(value["icfg"]["nodes"]), len(value["icfg"]["edges"]),
-              len(value["narrative_graph"]["blocks"]))
+    value = load_graph(path).to_dict()
     audit = validate(value)
-    # Stage 5 can replace source-scan edges with proved Screen Action edges.
-    # Node and block counts remain frozen here; edge deltas are accepted only
-    # when the document carries the corresponding Screen/candidate evidence.
-    edge_changed = counts[1] != 234977
-    screen_evidence = bool(value.get("screens") or value.get("candidate_edges"))
-    if counts[0] != 229869 or counts[2] != 17987 or not audit.get("valid") \
-            or (edge_changed and not screen_evidence):
-        print("[phase0] v3 graph acceptance failed: counts=%s audit=%s" %
-              (counts, audit.get("valid")))
-        return False
-    print("[phase0] v3 topology: nodes=%d edges=%d (%+d) blocks=%d candidates=%d" %
-          (counts[0], counts[1], counts[1] - 234977, counts[2],
-           len(value.get("candidate_edges", []))))
-    projection_path.write_text(json.dumps(project_v2(graph), ensure_ascii=False, indent=2),
-                               encoding="utf-8")
-    return _run("v3 projected exact-v2 graph", [
-        sys.executable, str(BASELINE_TOOLS), "exact-v2", str(baseline), str(projection_path),
-    ])
+    print("[semantics] current graph: nodes=%d edges=%d blocks=%d valid=%s" % (
+        len(value["icfg"]["nodes"]), len(value["icfg"]["edges"]),
+        len(value["narrative_graph"]["blocks"]), audit["valid"]))
+    return audit["valid"]
 
 
 def main():
@@ -389,7 +325,7 @@ def main():
     parser.add_argument("--update-goldens", action="store_true")
     parser.add_argument("--baseline-graph")
     parser.add_argument("--baseline-route")
-    parser.add_argument("--graph", help="actual v2 graph for exact-v2 comparison")
+    parser.add_argument("--graph", help="current v3 graph for comparison")
     parser.add_argument("--route", help="actual route for semantic-route comparison")
     parser.add_argument("--skip-unittest", action="store_true")
     parser.add_argument("--seed", type=int, default=20260908)
@@ -423,32 +359,23 @@ def main():
         }
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        print("[phase0] report: %s" % report_path)
+        print("[semantics] report: %s" % report_path)
         return code
 
     if not args.static_only and (not args.renpy_executable or not args.large_game):
         status("fixture_runtime", "not_run", "missing --renpy-executable")
         status("large_rebuild", "not_run", "missing --large-game")
-        print("[phase0] full acceptance requires --renpy-executable and --large-game; use --static-only for repository checks")
+        print("[semantics] full acceptance requires --renpy-executable and --large-game; use --static-only for repository checks")
         return finish(2)
 
     if not fixture_lint():
         status("fixture_source_check", "failed")
         return finish(1)
     status("fixture_source_check", "passed")
-    if not verify_local_artifacts():
-        status("historical_artifact_integrity", "failed")
-        return finish(1)
-    status("historical_artifact_integrity", "passed")
-
     graph_path = Path(args.graph).expanduser().resolve() if args.graph else None
     route_path = Path(args.route).expanduser().resolve() if args.route else None
-    baseline_graph = Path(args.baseline_graph).expanduser().resolve() if args.baseline_graph else (
-        DEFAULT_BASELINE_GRAPH if DEFAULT_BASELINE_GRAPH.is_file() else None
-    )
-    baseline_route = Path(args.baseline_route).expanduser().resolve() if args.baseline_route else (
-        DEFAULT_BASELINE_ROUTE if DEFAULT_BASELINE_ROUTE.is_file() else None
-    )
+    baseline_graph = Path(args.baseline_graph).expanduser().resolve() if args.baseline_graph else None
+    baseline_route = Path(args.baseline_route).expanduser().resolve() if args.baseline_route else None
     if not args.static_only:
         if not _fixture_renpy_lint(args.renpy_executable, output_root):
             status("fixture_renpy_lint", "failed")
@@ -459,28 +386,15 @@ def main():
             status("fixture_runtime", "failed")
             return finish(1)
         status("fixture_runtime", "passed")
-        graph_path = graph_path or output_root / "large_story_graph_v2.json"
+        graph_path = graph_path or output_root / "large_story_graph.json"
         route_path = route_path or output_root / "large_shadow_route.json"
-        if not _run("large exact-v2 graph", [
-            sys.executable, str(ROOT / "graph" / "run_renpy_story_graph.py"),
-            args.large_game, "--schema-version", "2", "--output", str(graph_path),
-        ]):
-            status("large_v2_rebuild", "failed")
-            return finish(1)
-        status("large_v2_rebuild", "passed")
-        v3_path = output_root / "large_story_graph_v3.json"
-        projection_path = output_root / "large_story_graph_v3_projection.json"
         if not _run("large v3 graph", [
             sys.executable, str(ROOT / "graph" / "run_renpy_story_graph.py"),
-            args.large_game, "--schema-version", "3", "--output", str(v3_path),
-        ]):
-            status("large_v3_rebuild", "failed")
+            args.large_game, "--output", str(graph_path),
+        ]) or not _verify_v3_graph(graph_path):
+            status("large_rebuild", "failed")
             return finish(1)
-        status("large_v3_rebuild", "passed")
-        if baseline_graph and not _verify_v3_graph(v3_path, baseline_graph, projection_path):
-            status("large_v3_projection", "failed")
-            return finish(1)
-        status("large_v3_projection", "passed")
+        status("large_rebuild", "passed")
         route_command = [
             sys.executable, str(ROOT / "tests" / "tools" / "run_renpy_random_playthrough.py"),
             args.large_game, "--output", str(route_path), "--seed", str(args.seed),
@@ -493,11 +407,10 @@ def main():
             return finish(1)
         status("semantic_route_generation", "passed")
     else:
-        print("[phase0] static-only: fixture runtime and large-game rebuild were not executed")
+        print("[semantics] static-only: fixture runtime and large-game rebuild were not executed")
         status("fixture_runtime", "not_run", "static-only mode")
         status("fixture_renpy_lint", "not_run", "static-only mode")
-        status("large_v2_rebuild", "not_run", "static-only mode")
-        status("large_v3_rebuild", "not_run", "static-only mode")
+        status("large_rebuild", "not_run", "static-only mode")
 
     if not args.skip_unittest and not _run("unit tests", [
         sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v",
@@ -510,16 +423,16 @@ def main():
         status("unit_tests", "not_run", "--skip-unittest")
 
     if baseline_graph and graph_path:
-        if not _run("exact-v2 graph", [
-            sys.executable, str(BASELINE_TOOLS), "exact-v2",
+        if not _run("current graph comparison", [
+            sys.executable, str(BASELINE_TOOLS), "story-graph",
             str(baseline_graph), str(graph_path),
         ]):
-            status("exact_v2", "failed")
+            status("story_graph", "failed")
             return finish(1)
-        status("exact_v2", "passed")
+        status("story_graph", "passed")
     else:
-        print("[phase0] exact-v2 skipped (pass --baseline-graph and --graph/--game)")
-        status("exact_v2", "not_run", "no current rebuild artifact")
+        print("[semantics] graph comparison skipped (pass --baseline-graph and --graph/--large-game)")
+        status("story_graph", "not_run", "no current rebuild artifact")
 
     if baseline_route and route_path:
         if not _run("semantic route", [
@@ -530,9 +443,9 @@ def main():
             return finish(1)
         status("semantic_route", "passed")
     else:
-        print("[phase0] semantic-route skipped (pass --baseline-route and --route/--game)")
+        print("[semantics] semantic-route skipped (pass --baseline-route and --route/--large-game)")
         status("semantic_route", "not_run", "no current route artifact")
-    print("[phase0] regression sequence completed")
+    print("[semantics] regression sequence completed")
     return finish(0)
 
 

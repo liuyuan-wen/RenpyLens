@@ -1,4 +1,6 @@
 import hashlib
+import gzip
+import json
 from collections import OrderedDict
 import sys
 import tempfile
@@ -20,13 +22,28 @@ from renpylens_semantics.model import (
     ScreenAnalysis, ScreenIR, SourceLocation, SymbolRef,
 )
 from renpylens_semantics.protocol import EventOrderTracker, EventSequencer, envelope
-from renpylens_semantics.renpy_adapter import IdentityIndex, canonical_path, script_manifest
-from renpylens_semantics.serialization import from_dict, project_v2, semantic_view
+from renpylens_semantics.renpy_adapter import IdentityIndex, canonical_path, initial_scalar_state, script_manifest, screen_source_records
+from renpylens_semantics.serialization import (dump_graph, from_dict, load_graph,
+                                               read_json, semantic_view, write_json)
 from renpylens_semantics.graph_v3 import _block_precision
-from renpylens_semantics.screen_semantics import analyze_action_source, analyze_screen_sources
+from renpylens_semantics.screen_semantics import analyze_action_source, analyze_screen_sources, instantiate_screen
+from renpylens_semantics.assembly_records import node_ir, edge_ir
+from renpylens_semantics.static_values import constant_value, substitute_source
 
 
 class IRModelTests(unittest.TestCase):
+    def test_runtime_member_condition_preserves_known_topology_and_parse_errors_remain_explicit(self):
+        edge = edge_ir({'edge_id': 'e', 'from': 'a', 'to': 'b', 'kind': 'IF_BRANCH',
+                        'precision': 'exact', 'condition': 'preferences.afm_enable or who.lower() == "me"'}, 'G')
+        self.assertEqual(edge.precision.topology, 'exact')
+        self.assertEqual(edge.precision.state, 'partial')
+        self.assertTrue(edge.metadata['condition_ir'].reads)
+        failed = edge_ir({'edge_id': 'e', 'precision': 'exact', 'condition': 'preferences['}, 'G')
+        self.assertEqual(failed.precision.topology, 'unknown')
+        node = node_ir({'node_id': 'n', 'kind': 'Python', 'source': "name = renpy.input('Name')\nname = name.strip()"}, 'G')
+        self.assertEqual(node.precision.topology, 'exact')
+        self.assertEqual(node.precision.state, 'partial')
+
     def test_value_objects_round_trip(self):
         expression = ExprIR(
             "persistent.flag and score",
@@ -118,16 +135,72 @@ class IRModelTests(unittest.TestCase):
         self.assertEqual(precision.state, "conservative")
         self.assertEqual(precision.content, "exact")
 
-    def test_v2_loader_and_projection_preserve_original_document(self):
-        original = {
-            "schema_version": 2, "engine": "test",
-            "provenance": {"sha256": "a" * 64},
-            "icfg": {"nodes": [], "edges": [], "return_sites": [], "indexes": {}},
-            "narrative_graph": {"blocks": [], "edges": [], "return_sites": []},
-        }
-        self.assertEqual(project_v2(from_dict(original)), original)
-        exported = from_dict(original).to_dict()
-        self.assertEqual(project_v2(from_dict(exported)), original)
+    def test_typed_python_replaces_stale_unknown_and_retains_branch_guards(self):
+        converted = node_ir({"node_id": "n", "kind": "Python", "precision": "partial",
+                             "source": "if enabled:\n    persistent.seen = True\nelse:\n    persistent.seen = False",
+                             "unknown_effect": {"source": "old", "reason": "python-effect", "may_write": "*"}}, "G_x")
+        self.assertEqual([effect.kind for effect in converted.effects], ["assign", "assign"])
+        self.assertEqual(converted.effects[0].target.kind, "persistent")
+        self.assertEqual(converted.effects[0].guard.source, "enabled")
+        self.assertEqual(converted.effects[1].guard.source, "not (enabled)")
+        restored = NodeIR.from_dict(converted.to_dict())
+        self.assertEqual(restored.effects[0].guard.source, "enabled")
+
+    def test_input_string_cleanup_is_pure_but_unknown_methods_stay_explicit(self):
+        result = analyze_ir("name = renpy.input('Name?')\nname = name.strip()\nif not name:\n    name = 'Alex'\npersistent.name = name")
+        self.assertFalse(any(effect.kind == 'unknown' for effect in result['effects']))
+        self.assertEqual(result['effects'][2].guard.source, 'not name')
+        self.assertTrue(any(effect.kind == 'unknown' for effect in analyze_ir("object.strip()\nobject = 'later'")['effects']))
+        self.assertTrue(any(effect.kind == 'unknown' for effect in analyze_ir("name = renpy.input('Name?')\nplugin(name)")['effects']))
+
+    def test_function_declaration_does_not_execute_its_body(self):
+        result = analyze_ir("def callback():\n    plugin()\n    persistent.flag = True")
+        self.assertEqual(result['effects'], ())
+        self.assertEqual(result['precision'], 'exact')
+
+    def test_loader_requires_current_schema(self):
+        with self.assertRaisesRegex(ValueError, "schema v3"):
+            from_dict({"schema_version": 1})
+
+    def test_export_contains_only_current_graph(self):
+        graph = GraphIR(graph_id="G_" + "a" * 64)
+        value = graph.to_dict()
+        self.assertEqual(value["schema_version"], 3)
+        self.assertNotIn("compatibility", value)
+        self.assertEqual(from_dict(value).to_dict(), value)
+
+    def test_compact_and_gzip_json_preserve_values_and_unicode(self):
+        value = {"text": "中文 🌱\n\"quoted\"", "values": [False, 0, None, "", [], {}],
+                 "nested": {"constant_known": True, "constant_value": None}}
+        with tempfile.TemporaryDirectory() as directory:
+            plain = Path(directory) / "剧情.json"
+            compressed = Path(directory) / "剧情.json.gz"
+            write_json(value, plain)
+            write_json(value, compressed)
+            payload = plain.read_bytes()
+            self.assertEqual(read_json(plain), value)
+            self.assertEqual(read_json(compressed), value)
+            self.assertEqual(gzip.decompress(compressed.read_bytes()), payload)
+            self.assertIn("中文".encode("utf-8"), payload)
+            self.assertNotIn(b"\n", payload)
+            self.assertNotIn(b'": ', payload)
+            first = compressed.read_bytes()
+            write_json(value, compressed)
+            self.assertEqual(compressed.read_bytes(), first)
+
+    def test_gzip_graph_round_trip_preserves_typed_semantics(self):
+        effect = EffectIR("assign", SymbolRef.persistent("flag"), "set",
+                          ExprIR("False", constant_known=True, constant_value=False),
+                          value_known=True, value=False)
+        block = BlockIR("B_x", "story_block", source_nodes=("N_x",),
+                        contents=({"kind": "dialogue", "what": "你好\n世界"},),
+                        effects=(effect,), precision=PrecisionSet("partial", "exact", "exact"))
+        graph = GraphIR(graph_id="G_x", blocks=(block,))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "graph.json.gz"
+            exported = dump_graph(graph, path)
+            self.assertEqual(load_graph(path).to_dict(), exported)
+            self.assertEqual(read_json(path), exported)
 
     def test_semantic_view_keeps_v3_canonical_ids(self):
         node = NodeIR(NodeRef("G_" + "a" * 64, "N_" + "1" * 32,
@@ -441,6 +514,28 @@ class IdentityProtocolTests(unittest.TestCase):
 
 
 class ScreenSemanticsTests(unittest.TestCase):
+    def test_initialized_scalar_store_includes_init_python_and_excludes_objects(self):
+        store = SimpleNamespace(counter=0, completed=False, title='name', widget=object(), _private=9)
+        self.assertEqual(initial_scalar_state([], store), {'counter': 0, 'completed': False, 'title': 'name'})
+
+    def test_screen_loop_options_bind_tuple_items_and_dynamic_loops_stay_unknown(self):
+        record = {'name': 'choose', 'parameters': ['options'], 'actions': [
+            {'source': 'Jump(destination)', 'loops': [{'variable': '(caption, destination)', 'expression': 'options'}],
+             'texts': [{'source': 'caption'}]}, {'source': 'Rollback()'}]}
+        outcomes, errors = instantiate_screen(SimpleNamespace(line="call screen choose([('First', 'a'), ('Second', 'b')])"), record, 'SC', 'loop')
+        self.assertEqual(errors, [])
+        self.assertEqual([(item['choice'], item['action'].target) for item in outcomes[:2]], [('First', 'a'), ('Second', 'b')])
+        self.assertEqual(outcomes[2]['action'].kind, 'rollback')
+        self.assertEqual(outcomes[2]['effects'][0].kind, 'rollback')
+        self.assertEqual([item['slot'] for item in outcomes], [0, 1, 2])
+        _, errors = instantiate_screen(SimpleNamespace(line='call screen choose(runtime_options)'), record, 'SC', 'dynamic')
+        self.assertIn('dynamic-screen-loop', errors)
+
+    def test_unexpanded_nested_screen_remains_an_explicit_boundary(self):
+        record = {'name': 'outer', 'uses': ['inner'], 'actions': [{'source': 'Return()'}]}
+        _, errors = instantiate_screen(SimpleNamespace(line='call screen outer'), record, 'SC', 'nested')
+        self.assertEqual(errors, ['nested-screen-use:inner'])
+
     def test_native_actions_and_ordered_lists(self):
         action = analyze_action_source(
             "[SetVariable('score', score + 1), If(flag, Jump('win'), Return('lost'))]",
@@ -470,6 +565,54 @@ class ScreenSemanticsTests(unittest.TestCase):
         self.assertEqual(analysis.screens[0].actions[0].effects[0].target.kind, "persistent")
         loaded = ScreenAnalysis.from_dict(analysis.to_dict())
         self.assertEqual(loaded.screens[0].name, "fixture")
+
+    def test_bound_screen_targets_captions_guards_and_effect_order(self):
+        record = {'name': 'responses', 'parameters': ['text', 'dest'],
+                  'parameter_declarations': [('text', None), ('dest', None)], 'actions': [
+                      {'source': "[Play('sound', 'click.ogg'), SetVariable('score', 2), Jump(dest)]",
+                       'guard': 'enabled', 'texts': [{'source': 'text[0]', 'guard': 'type(text) is list'}]},
+                      {'source': "Return('cancel')", 'texts': [{'source': "'Cancel'"}]},
+                      {'source': "Jump('hover_is_not_a_choice')", 'attribute': 'hovered'}]}
+        node = SimpleNamespace(line="call screen responses(['Agree', 'icon'], 'accepted')")
+        outcomes, unknown = instantiate_screen(node, record, 'SC_x', 'call_a')
+        self.assertEqual(unknown, [])
+        self.assertEqual([item['choice'] for item in outcomes], ['Agree', 'Cancel'])
+        self.assertEqual(outcomes[0]['action'].target, 'accepted')
+        self.assertIn('enabled', outcomes[0]['condition'])
+        self.assertEqual(outcomes[0]['effects'][0].target.display(), 'score')
+        second, _ = instantiate_screen(SimpleNamespace(line="call screen responses('Other', 'different')"), record, 'SC_x', 'call_b')
+        self.assertEqual(second[0]['action'].target, 'different')
+        self.assertNotEqual(outcomes[0]['action'].action_id, second[0]['action'].action_id)
+
+    def test_screen_defaults_keywords_unpacking_and_dynamic_targets(self):
+        record = {'name': 'choose', 'parameter_declarations': [('target', "'default'", 3)],
+                  'actions': [{'source': 'Jump(target)'}]}
+        default, _ = instantiate_screen(SimpleNamespace(line='call screen choose'), record, 'SC', 'default')
+        self.assertEqual(default[0]['action'].target, 'default')
+        args = SimpleNamespace(arguments=[(None, "{'target': 'unpacked'}")], starred_indexes=(), doublestarred_indexes=(0,))
+        expanded, errors = instantiate_screen(SimpleNamespace(parsed=(('call', 'screen'), {'arguments': args})), record, 'SC', 'expanded')
+        self.assertEqual(errors, [])
+        self.assertEqual(expanded[0]['action'].target, 'unpacked')
+        dynamic, errors = instantiate_screen(SimpleNamespace(line='call screen choose(target=chosen_at_runtime)'), record, 'SC', 'dynamic')
+        self.assertIsNone(dynamic[0]['action'].target)
+        self.assertIn('dynamic-action-target', errors)
+
+    def test_screen_parameter_order_is_declaration_order(self):
+        Text = type('Text', (), {})
+        Button = type('Button', (), {})
+        params = OrderedDict((name, SimpleNamespace(name=name, kind=1, default=None, empty=None)) for name in ('reply', 'destination'))
+        ast_root = SimpleNamespace(parameters=SimpleNamespace(parameters=params), children=[SimpleNamespace(
+            displayable=Button, keyword=[('action', 'Jump(destination)')], children=[SimpleNamespace(displayable=Text, positional=['reply'], children=[])])])
+        renpy = SimpleNamespace(config=SimpleNamespace(gamedir=''), display=SimpleNamespace(screen=SimpleNamespace(screens={('choose', None): SimpleNamespace(ast=ast_root)})))
+        record = screen_source_records(renpy)[0]
+        self.assertEqual(record['parameters'], ['reply', 'destination'])
+        self.assertEqual(record['actions'][0]['texts'][0]['source'], 'reply')
+
+    def test_static_substitution_folds_literals_without_running_callbacks(self):
+        self.assertEqual(substitute_source('choice[0]', {'choice': "['Proceed', 'icon']"}), "'Proceed'")
+        self.assertEqual(constant_value("type(['Proceed']) is list"), (True, True))
+        self.assertEqual(constant_value("'' or 'fallback'"), ('fallback', True))
+        self.assertEqual(constant_value('malicious_callback()'), (None, False))
 
     def test_manifest_prefers_source_and_excludes_instrumentation(self):
         with tempfile.TemporaryDirectory() as root:

@@ -1,31 +1,17 @@
 # Semantic regression assets
 
-`baselines/phase0.json` records the phase-0 engine, provenance, artifact hashes,
-and StoryGraph/Shadow Route counts. The four files under the ignored
-`artifacts/phase0-large-game/` directory are retained local large-game evidence.
+StoryGraph uses schema v3 exclusively. The Kernel codec, exporter, validator,
+and offline viewer share the current typed representation.
 
-Compare a rebuilt StoryGraph or route with the frozen evidence using:
+The fixture game under `fixtures/semantic_cases/` covers control flow, calls,
+state, screens, translation, input, and random expressions.
 
-```powershell
-python tests/semantics/baseline_tools.py exact-v2 `
-  tests/semantics/artifacts/phase0-large-game/renpy_story_graph.json `
-  tests/renpy_story_graph.json
-python tests/semantics/baseline_tools.py semantic-route `
-  tests/semantics/artifacts/phase0-large-game/shadow_route_result.json `
-  tests/shadow_route_result.json
-```
-
-The fixture game under `fixtures/semantic_cases/` is intentionally small and
-isolates the phase-0 Ren'Py constructs listed in its README.
-
-Run the repository sequence (fixture lint, unit tests, and the local exact-v2
-and semantic-route artifacts when present; pass `--game` to execute a fixture
-through Ren'Py):
+Run repository source and unit checks:
 
 ```powershell
-python tests/semantics/run_phase_regression.py
+python tests/semantics/run_phase_regression.py --static-only
 ```
 
-StoryGraph commands write schema v3 by default. Existing tools can load it
-through the Kernel codec, and `--schema-version 2` remains available for the
-exact-v2 baseline comparison.
+For runtime acceptance, provide `--renpy-executable` and `--large-game`.
+Current graphs can be compared using `baseline_tools.py story-graph`;
+deterministic routes use `baseline_tools.py semantic-route`.

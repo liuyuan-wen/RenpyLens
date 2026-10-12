@@ -2,7 +2,7 @@
 
 # <img src="assets/icon.png" width="48" align="absmiddle"/> RenpyLens
 
-RenpyLens is a lightweight, real-time AI translation overlay for **Ren'Py** and **RPG Maker MV/MZ** games on Windows.
+RenpyLens is a lightweight, real-time AI translation overlay for **Ren'Py** and **RPG Maker MV/MZ** games on Windows and macOS.
 
 Drop a game executable into the app, choose a translation provider, and RenpyLens captures dialogue, speaker names, and visible choices through engine-native bridges. Translations appear in a movable overlay without replacing the game's original text.
 
@@ -19,7 +19,7 @@ Use these communities for support, feedback, release news, and early feature pre
 
 ## ✨ Highlights
 
-- **Drag-and-drop setup:** Drop the game's `.exe` into RenpyLens and launch it with the translation bridge.
+- **Drag-and-drop setup:** Drop the game's `.exe` or macOS `.app` into RenpyLens and launch it with the translation bridge.
 - **Multiple game engines:** Supports Ren'Py and RPG Maker MV/MZ dialogue, speaker names, and visible choices.
 - **RPGM tools:** Useful tools like text speed, dialogue opacity, dialogue rollback, faster movement, no-clip, battle outcomes and so on.
 - **Flexible AI providers:**
@@ -39,49 +39,19 @@ Use these communities for support, feedback, release news, and early feature pre
 
 ## 🆕 Release Notes
 
-### v1.5.6 `Latest`
+### v1.6.0 `Latest`
 
-- **Retranslate current dialogue:** Right-click the overlay to replace the current translation using your settings and surrounding dialogue as context.
-- **Ren'Py prediction:** Reworked story prediction and improved branch prefetching and text synchronization when selecting routes or rolling back.
-- **Translation and errors:** Reinforced target-language instructions and added localized guidance for timeouts, API key errors, rate limits, and service failures.
+- **macOS support:** Added game `.app` launching, global shortcuts, overlay window handling, and `.app` packaging with layouts adapted for macOS.
+- **Ren'Py translation and prediction:** Improved dialogue and choice extraction, text interpolation, and prediction of Python calls and custom screens.
+- **Startup experience:** Improved repeated-launch handling, game process tracking, and multilingual layouts, and added launch and build scripts for Windows and macOS.
 
-### v1.5.5
+### v1.5.0~v1.5.6
 
-- **Character context and translation:** Added character profiles for dialogue context and improved batch translation, speaker labels, and branch prefetching.
-- **Custom shortcuts:** Added configurable global and RPG Maker shortcuts, including an overlay toggle and synchronized in-game controls.
-- **Compatibility and interface:** Added Windows shortcut (`.lnk`) launching and improved overlay wrapping, settings layout, and menu interactions.
-
-### v1.5.4
-
-- **Smarter translation:** Added branch-aware Ren'Py prediction and adaptive prefetching that prioritizes the selected route; repetitive or excessively long model output is now retried and rejected.
-- **Overlay and RPGM tools:** Added one-click and automatic copying for original text and translations, improved multi-display long-text layout, added dialogue rollback, and refined forced saving and tool persistence.
-- **Compatibility and packaging:** Improved dynamic Ren'Py character extraction, hook prediction coverage, stale-port cleanup, and UPX build validation.
-
-### v1.5.3
-
-- **RPGM save anywhere:** Added an optional save-anywhere tool with an in-game toolbar button and `Ctrl+S`. Saves made during dialogue or choices restore from the current dialogue checkpoint.
-- **Long translation overlay:** Long screen text now uses a scrollable, resizable panel, with a menu action for resetting the overlay position and smoother drag and resize interactions.
-- **Engine compatibility:** Improved Ren'Py screen text, character and choice extraction, legacy text sequence handling, and RPG Maker line-break handling.
-
-### v1.5.2.1
-
-- **RPGM stability:** Prevented blocked forced move routes from permanently locking autorun scenes.
-- **Overlay interaction:** Recovered lost drag and resize release events so the overlay cannot remain stuck in an active pointer state.
-- **Portable packaging:** Included Conda's `libexpat.dll` when required by the bundled `pyexpat` module, fixing startup failures on clean Windows systems.
-
-### v1.5.1
-
-- **RPGM tools:** Added per-game controls for text speed, dialogue opacity, automatic advance, movement, collision, encounters, and battle outcomes.
-- **Faster contextual translation:** Combined visible text with nearby dialogue in the same request to improve context while avoiding duplicate translations.
-- **Interface polish:** Improved model input behavior, workbench window state, localized support information, and RPG Maker tool guidance.
-
-### v1.5.0
-
-- **Complete multilingual UI:** Added English, Simplified Chinese, Traditional Chinese, Japanese, Korean, and Russian interfaces with quick language switching.
-- **Built-in channel improvements:** Updated the China mainland and global routes, enabled strict TLS verification, and added route latency testing.
-- **Expanded API channels:** Redesigned OpenAI-compatible provider settings with presets and user-managed custom channels.
-- **Global community support:** Added Discord and improved localized route names, status messages, and layouts.
-- **Compatibility and stability:** Improved Hook cleanup, text extraction, rate-limit feedback, and legacy configuration migration for Ren'Py and RPG Maker MV/MZ.
+- Added six-language interfaces, refreshed built-in routes and latency testing, expanded custom API channels, and introduced Discord support.
+- Improved contextual translation with character profiles, branch-aware Ren'Py prediction, adaptive prefetching, and current-dialogue retranslation.
+- Added configurable shortcuts, text copying, and scrollable long-text overlays; improved multi-display layout, editing, and pointer interactions.
+- Expanded per-game RPG Maker tools with text speed, dialogue opacity, automatic advance, movement, collision, encounters, battle outcomes, dialogue rollback, and save-anywhere controls.
+- Improved engine text extraction, Hook cleanup, model-output validation, localized API error guidance, Windows shortcut launching, and portable packaging with Expat dependency collection and UPX validation.
 
 ### v1.2.0–v1.3.0
 
@@ -100,13 +70,14 @@ Use these communities for support, feedback, release news, and early feature pre
 ## 🎮 Getting Started
 
 1. **Download RenpyLens**
-   - Download the latest `RenpyLens_v1.5.6.exe` from the repository's **Releases** page.
+   - **Windows:** Download `RenpyLens_v1.6.0.exe` from the repository's **Releases** page.
+   - **macOS:** Download `RenpyLens_v1.6.0_macos_arm64.zip` for Apple Silicon or `RenpyLens_v1.6.0_macos_x86_64.zip` for Intel, then extract and open `RenpyLens_v1.6.0.app`.
    - Alternatively, follow the development instructions below to run it from source.
 2. **Choose a translation provider**
    - For the simplest setup, select **Built-in Channel** and choose **Get Trial API**. If you are not in mainland China, select **Global node** in **Route**.
    - To use your own service, open **Settings → API Settings** and configure a provider, Ollama, or a custom OpenAI-compatible channel.
 1. **Select a game**
-   - Drop the main `.exe` of a Ren'Py, RPG Maker MV/MZ game into the RenpyLens window.
+   - Drop the main `.exe` or macOS `.app` of a Ren'Py or RPG Maker MV/MZ game into the RenpyLens window.
    - If selected an RPG Maker MV/MZ game, you can choose to enable **RPGM tools** and choose the tools you want from the adjacent menu.
 2. **Load the Hook and start**
    - Select **Load Hook and Start Game**. RenpyLens installs the appropriate bridge and launches the game.
@@ -123,7 +94,7 @@ Use these communities for support, feedback, release news, and early feature pre
 
 ### Requirements
 
-- Windows 10 or later recommended
+- Windows 10 or later recommended, or macOS
 - Python 3.10+
 
 ### Clone and install
@@ -137,13 +108,23 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+On macOS, create and activate the environment with:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
 ### Run from source
 
 ```powershell
 python src/main.py
 ```
 
-## 📦 Build a Windows executable
+## 📦 Build Windows and macOS apps
+
+Build on the target operating system.
 
 ```powershell
 # PyInstaller must be installed in the selected Python environment.
@@ -153,11 +134,13 @@ python build.py
 python build.py --python "C:\path\to\venv\python.exe"
 ```
 
-The build output is `RenpyLens_v1.5.6.exe`. If `upx.exe` is present in the project root, the build script uses it for compression by default. If the resulting executable is blocked by antivirus software or fails to start, build it without UPX:
+The build output is `RenpyLens_v1.6.0.exe`. If `upx.exe` is present in the project root, the build script uses it for compression by default. If the resulting executable is blocked by antivirus software or fails to start, build it without UPX:
 
 ```powershell
 python build.py --noupx
 ```
+
+On macOS, `python build.py` produces `RenpyLens_v1.6.0.app` without UPX. The **Build macOS** GitHub Actions workflow builds and archives separate Apple Silicon and Intel packages.
 
 ## 🧩 Project Structure
 

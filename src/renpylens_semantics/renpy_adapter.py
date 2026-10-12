@@ -327,6 +327,32 @@ def graph_id_for(gamedir):
     return script_manifest(gamedir)[1]
 
 
+def initial_scalar_state(nodes, store=None):
+    """Read declarations and the already initialized scalar store.
+
+    Ren'Py has completed initialization before export. Reading its module
+    dictionary also covers literal globals declared in init Python blocks.
+    No expression or user callable is evaluated by this adapter.
+    """
+    from .static_values import constant_value
+    values, ambiguous = {}, set()
+    for node in nodes:
+        if type(node).__name__ not in ("Define", "Default") or getattr(node, "store", "store") != "store":
+            continue
+        name = getattr(node, "varname", "")
+        value, known = constant_value(getattr(getattr(node, "code", None), "source", ""))
+        if not name or not known or type(value) not in (bool, int, float, str, type(None)):
+            continue
+        if name in values and values[name] != value:
+            ambiguous.add(name)
+        values[name] = value
+    result = dict((name, value) for name, value in values.items() if name not in ambiguous)
+    if store is not None:
+        result.update((name, value) for name, value in vars(store).items()
+                      if not name.startswith('_') and type(value) in (bool, int, float, str, type(None)))
+    return result
+
+
 def screen_source_records(renpy):
     """Extract adapter-neutral action records from registered SL AST objects.
 
@@ -359,21 +385,69 @@ def screen_source_records(renpy):
                 result.extend(items)
         return result
 
-    def walk(value, actions, uses, seen, guard=""):
+    def branch_guards(value, guard):
+        earlier = []
+        for condition, body in getattr(value, "entries", ()) or ():
+            condition = source_text(condition)
+            terms = ([guard] if guard else []) + ["not (%s)" % item for item in earlier]
+            if condition:
+                terms.append(condition)
+                earlier.append(condition)
+            yield body, " and ".join("(%s)" % term for term in terms)
+
+    def captions(value, guard=""):
+        result = []
+        displayable = getattr(value, "displayable", None)
+        if getattr(displayable, "__name__", "").lower().lstrip('_') in ("text", "textbutton"):
+            positional = getattr(value, "positional", ()) or ()
+            if positional:
+                result.append({"source": source_text(positional[0]), "guard": guard})
+        for child in children(value):
+            result.extend(captions(child, guard))
+        for body, condition in branch_guards(value, guard):
+            result.extend(captions(body, condition))
+        return result
+
+    def add_action(value, source, attribute, guard, actions, loops):
+        record = {"source": source, "attribute": attribute, "guard": guard,
+                  "texts": captions(value, guard)}
+        if loops:
+            record["loops"] = list(loops)
+        location = getattr(value, "location", ()) or ()
+        if location:
+            record["location"] = {"path": canonical_path(location[0], getattr(renpy.config, "gamedir", "")),
+                                  "line": location[1] if len(location) > 1 else None}
+        if record not in actions:
+            actions.append(record)
+
+    def walk(value, actions, uses, seen, guard="", loops=()):
         if value is None or id(value) in seen:
             return
         seen.add(id(value))
+        if type(value).__name__ == "SLFor":
+            variable = source_text(getattr(value, "variable", ""))
+            # Ren'Py lowers tuple loop targets into a temporary plus an
+            # initial unpacking assignment. Recover that declared target.
+            nested = children(value)
+            if nested and type(nested[0]).__name__ == "SLPython":
+                import ast
+                code = source_text(getattr(nested[0], "code", None))
+                body = ast.parse(code).body
+                if len(body) == 1 and isinstance(body[0], ast.Assign) and isinstance(body[0].value, ast.Name) and body[0].value.id == variable:
+                    variable = ast.unparse(body[0].targets[0])
+            loops = loops + ({"variable": variable,
+                              "expression": source_text(getattr(value, "expression", ""))},)
         for attr in ("action", "alternate", "hovered", "unhovered"):
             text = source_text(getattr(value, attr, None))
             if text:
-                actions.append({"source": text, "attribute": attr, "guard": guard})
+                add_action(value, text, attr, guard, actions, loops)
         keywords = getattr(value, "keywords", None)
         if hasattr(keywords, "items"):
             for key, item in keywords.items():
                 if str(key) in ("action", "alternate", "hovered", "unhovered"):
                     text = source_text(item)
                     if text:
-                        actions.append({"source": text, "attribute": str(key), "guard": guard})
+                        add_action(value, text, str(key), guard, actions, loops)
         keyword_list = getattr(value, "keyword", None)
         if isinstance(keyword_list, (list, tuple)):
             for entry in keyword_list:
@@ -383,7 +457,7 @@ def screen_source_records(renpy):
                 if str(key) in ("action", "alternate", "hovered", "unhovered"):
                     text = source_text(item)
                     if text:
-                        actions.append({"source": text, "attribute": str(key), "guard": guard})
+                        add_action(value, text, str(key), guard, actions, loops)
         if type(value).__name__.lower().endswith("use"):
             used = getattr(value, "target", None) or getattr(value, "screen", None)
             if isinstance(used, string_types):
@@ -407,11 +481,11 @@ def screen_source_records(renpy):
                     branch_guard = "(%s) and (%s)" % (guard, branch_guard)
                 elif guard:
                     branch_guard = guard
-                walk(entry[1], actions, uses, seen, branch_guard)
+                walk(entry[1], actions, uses, seen, branch_guard, loops)
                 if condition:
                     earlier.append(condition)
         for child in children(value):
-            walk(child, actions, uses, seen, guard)
+            walk(child, actions, uses, seen, guard, loops)
 
     records = []
     for key, registered in registry.items():
@@ -425,8 +499,17 @@ def screen_source_records(renpy):
         actions = []
         uses = []
         walk(ast_root, actions, uses, set())
-        parameters = parameter_names(getattr(ast_root, "parameters", None)
-                                     or getattr(registered, "parameters", None))
+        parameter_info = getattr(ast_root, "parameters", None) or getattr(registered, "parameters", None)
+        values = getattr(parameter_info, "parameters", None)
+        if isinstance(values, dict):
+            values = list(values.values())
+            if all(getattr(item, "position", None) is not None for item in values): values.sort(key=lambda item: item.position)
+            declarations = [(item.name, None if item.default is item.empty else item.default, int(item.kind)) for item in values]
+        else:
+            declarations = [(name, default, 1) for name, default in (values or getattr(parameter_info, "positional", ()) or ())]
+            for attr, kind in (("extrapos", 2), ("extrakw", 4)):
+                if getattr(parameter_info, attr, None): declarations.append((getattr(parameter_info, attr), None, kind))
+        parameters = [item[0] for item in declarations] or parameter_names(parameter_info)
         location = getattr(ast_root, "location", None) or getattr(ast_root, "loc", None)
         location_path = getattr(ast_root, "filename", "")
         location_line = getattr(ast_root, "linenumber", None)
@@ -438,6 +521,7 @@ def screen_source_records(renpy):
         records.append({
             "name": str(name or ""), "variant": str(variant or ""),
             "parameters": list(parameters or ()), "actions": actions, "uses": uses,
+            "parameter_declarations": [[name, str(default) if default is not None else None, kind] for name, default, kind in declarations],
             "location": {
                 "path": canonical_path(location_path,
                                        getattr(getattr(renpy, "config", None), "gamedir", "")),

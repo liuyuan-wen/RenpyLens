@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Callable
 
 from injector import inject_hook as inject_renpy_hook
-from injector import is_renpy_game, remove_hook as remove_renpy_hook
+from injector import remove_hook as remove_renpy_hook
+from game_package import find_renpy_layout
+from application_paths import application_data_dir
 
 
 ENGINE_RENPY = "renpy"
@@ -51,6 +53,7 @@ class GameTarget:
     title: str
     cache_id: str
     capabilities: EngineCapabilities
+    bundle_path: str = ""
 
     @property
     def engine_label(self) -> str:
@@ -110,21 +113,23 @@ def _game_title(content_dir: Path, exe_path: str) -> str:
 
 
 def detect_game(exe_path: str) -> GameTarget | None:
-    if not exe_path or not os.path.isfile(exe_path):
+    if not exe_path:
         return None
-
-    if is_renpy_game(exe_path):
-        root = str(Path(exe_path).resolve().parent)
+    layout = find_renpy_layout(exe_path)
+    if layout and os.path.isfile(layout.executable):
         return GameTarget(
-            exe_path=str(Path(exe_path).resolve()),
-            root_dir=root,
-            content_dir=str(Path(root) / "game"),
+            exe_path=layout.executable,
+            root_dir=layout.root_dir,
+            content_dir=layout.content_dir,
             engine=ENGINE_RENPY,
             engine_version="",
-            title=Path(exe_path).stem,
-            cache_id=_cache_id(ENGINE_RENPY, exe_path),
+            title=layout.title,
+            cache_id=_cache_id(ENGINE_RENPY, layout.executable),
             capabilities=EngineCapabilities(runtime_scan=True),
+            bundle_path=layout.bundle_path,
         )
+    if not os.path.isfile(exe_path):
+        return None
 
     content_dir, engine = _rpgmaker_content_dir(exe_path)
     if content_dir is None or engine is None:
@@ -334,6 +339,24 @@ def _uninstall_rpgmaker_bridge(target: GameTarget) -> tuple[bool, str]:
         return False, f"Failed to remove RPG Maker bridge: {exc}"
 
 
+def renpy_hook_directory(target: GameTarget) -> str:
+    if target.bundle_path:
+        identity = hashlib.sha256(target.cache_id.encode("utf-8")).hexdigest()[:24]
+        return os.path.join(application_data_dir(), "bridges", identity)
+    return target.content_dir
+
+
+def game_launch_environment(target: GameTarget) -> dict[str, str] | None:
+    if target.engine != ENGINE_RENPY or not target.bundle_path:
+        return None
+    directory = renpy_hook_directory(target)
+    environment = os.environ.copy()
+    previous = environment.get("RENPY_SEARCHPATH", "")
+    environment["RENPY_SEARCHPATH"] = "::".join(filter(None, (previous, directory)))
+    environment["RENPYLENS_KERNEL_PATH"] = os.path.join(directory, "_renpylens_semantics.zip")
+    return environment
+
+
 def install_hook(
     target: GameTarget,
     renpy_hook_source: str,
@@ -346,6 +369,9 @@ def install_hook(
     shortcuts: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     if target.engine == ENGINE_RENPY:
+        if target.bundle_path:
+            return inject_renpy_hook(target.exe_path, renpy_hook_source, socket_port,
+                                     install_dir=renpy_hook_directory(target))
         return inject_renpy_hook(target.exe_path, renpy_hook_source, socket_port)
     session_id = session_id or uuid.uuid4().hex
     return _install_rpgmaker_bridge(
@@ -362,6 +388,8 @@ def install_hook(
 
 def uninstall_hook(target: GameTarget) -> tuple[bool, str]:
     if target.engine == ENGINE_RENPY:
+        if target.bundle_path:
+            return remove_renpy_hook(target.exe_path, install_dir=renpy_hook_directory(target))
         return remove_renpy_hook(target.exe_path)
     return _uninstall_rpgmaker_bridge(target)
 

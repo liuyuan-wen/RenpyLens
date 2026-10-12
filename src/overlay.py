@@ -34,8 +34,9 @@ from PyQt5.QtGui import (
     QTextLayout,
     QTextOption,
 )
-import win32con
-import win32gui
+from ui_theme import ui_font_px, ui_px, ui_style
+from native_window import configure_pointer_tracking, enforce_topmost
+from application_paths import DEFAULT_FONT_FAMILY
 from i18n import manager as i18n_manager, tr
 
 
@@ -64,7 +65,7 @@ class OutlinedLabel(QLabel):
         super().__init__(text, parent)
         self._outline_width = 2
         self._font_size = 22
-        self._font_family = "Microsoft YaHei"
+        self._font_family = DEFAULT_FONT_FAMILY
         self._font_bold = True
         self._text_color = QColor(255, 255, 255)
         self._outline_color = QColor(0, 0, 0)
@@ -339,7 +340,9 @@ class TranslationOverlay(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)
         self.setMouseTracking(True)
+        self.setCursor(Qt.OpenHandCursor)
 
         # Some games enter fullscreen after this window is first shown, which
         # can move their render window above an existing TOPMOST window. Keep
@@ -360,13 +363,14 @@ class TranslationOverlay(QWidget):
         self.read_container = QWidget(self)
         self.read_container.setObjectName("readContainer")
         self.read_container.setCursor(Qt.OpenHandCursor)
+        self.read_container.setMouseTracking(True)
         read_layout = QHBoxLayout(self.read_container)
         read_layout.setContentsMargins(0, 0, 0, 0)
         read_layout.setSpacing(0)
         self._read_layout = read_layout
 
         self.label = OutlinedLabel(tr("overlay.waiting"), self.read_container)
-        self.label.set_font_family(config.get("font_family", "Microsoft YaHei"))
+        self.label.set_font_family(config.get("font_family", DEFAULT_FONT_FAMILY))
         self.label.set_font_size(config.get("font_size", 22))
         self.label.set_font_bold(config.get("font_bold", True))
         self.label.set_text_color(config.get("font_color", "#FFFFFF"))
@@ -410,7 +414,7 @@ class TranslationOverlay(QWidget):
         self.editor_container = QWidget(self)
         self.editor_container.setObjectName("editorContainer")
         self.editor_container.setStyleSheet(
-            """
+            ui_style("""
             QWidget#editorContainer {
                 background-color: rgba(12, 17, 29, 244);
                 border: 1px solid rgba(79, 108, 160, 196);
@@ -472,15 +476,15 @@ class TranslationOverlay(QWidget):
                 background: transparent;
                 padding: 0px;
             }
-            """
+            """)
         )
         editor_layout = QVBoxLayout(self.editor_container)
-        editor_layout.setContentsMargins(8, 8, 8, 8)
-        editor_layout.setSpacing(6)
+        editor_layout.setContentsMargins(ui_px(8), ui_px(8), ui_px(8), ui_px(8))
+        editor_layout.setSpacing(ui_px(6))
 
         self.edit_text = QTextEdit()
         self.edit_text.setAcceptRichText(False)
-        self.edit_text.setMinimumHeight(88)
+        self.edit_text.setMinimumHeight(ui_px(88))
         self.edit_text.textChanged.connect(self._on_edit_text_changed)
         self.edit_text.setPlaceholderText(tr("overlay.edit_placeholder"))
         editor_layout.addWidget(self.edit_text, 1)
@@ -488,10 +492,11 @@ class TranslationOverlay(QWidget):
         self.editor_footer = QWidget(self.editor_container)
         self.editor_footer.setObjectName("editorFooter")
         self.editor_footer.setCursor(Qt.OpenHandCursor)
+        self.editor_footer.setMouseTracking(True)
         self.editor_footer.setToolTip(tr("overlay.drag_footer"))
         btn_row = QHBoxLayout(self.editor_footer)
-        btn_row.setContentsMargins(0, 0, 34, 0)
-        btn_row.setSpacing(6)
+        btn_row.setContentsMargins(0, 0, ui_px(34), 0)
+        btn_row.setSpacing(ui_px(6))
         btn_row.addStretch()
 
         self.btn_cancel_edit = QPushButton(tr("common.cancel"))
@@ -511,7 +516,7 @@ class TranslationOverlay(QWidget):
         self.resize_handle.setAlignment(Qt.AlignCenter)
         self.resize_handle.setCursor(Qt.SizeFDiagCursor)
         self.resize_handle.setToolTip(tr("overlay.resize_tip"))
-        self.resize_handle.setFixedSize(26, 26)
+        self.resize_handle.setFixedSize(ui_px(26), ui_px(26))
 
         editor_layout.addWidget(self.editor_footer)
 
@@ -557,6 +562,7 @@ class TranslationOverlay(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        configure_pointer_tracking(self)
         self._sync_topmost_timer()
         QTimer.singleShot(0, self._enforce_topmost)
         self.visibility_changed.emit(True)
@@ -614,16 +620,16 @@ class TranslationOverlay(QWidget):
         )
 
     def _apply_editor_fonts(self):
-        family = self.config.get("font_family", "Microsoft YaHei")
+        family = self.config.get("font_family", DEFAULT_FONT_FAMILY)
         base_size = int(self.config.get("font_size", 22))
-        editor_text_px = max(24, min(base_size + 2, 28))
-        button_px = max(17, min(editor_text_px - 6, 18))
+        editor_text_px = ui_font_px(max(24, min(base_size + 2, 28)))
+        button_px = ui_font_px(18)
 
         editor_font = QFont(family)
         editor_font.setPixelSize(editor_text_px)
         editor_font.setBold(False)
         self.edit_text.setFont(editor_font)
-        self.edit_text.setMinimumHeight(max(88, editor_text_px * 4))
+        self.edit_text.setMinimumHeight(max(ui_px(88), editor_text_px * 4))
 
         button_font = QFont(family)
         button_font.setPixelSize(button_px)
@@ -632,7 +638,7 @@ class TranslationOverlay(QWidget):
         self.btn_save_edit.setFont(button_font)
 
         handle_font = QFont(family)
-        handle_font.setPixelSize(20)
+        handle_font.setPixelSize(ui_px(20))
         handle_font.setBold(True)
         self.resize_handle.setFont(handle_font)
 
@@ -945,16 +951,7 @@ class TranslationOverlay(QWidget):
         if not self.isVisible() or not self.config.get("force_topmost", False):
             return
         try:
-            hwnd = int(self.winId())
-            win32gui.SetWindowPos(
-                hwnd,
-                win32con.HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE,
-            )
+            enforce_topmost(self)
         except Exception as e:
             print(f"[Overlay] Failed to enforce topmost: {e}")
 
@@ -968,7 +965,7 @@ class TranslationOverlay(QWidget):
 
     def update_config(self, new_config: dict):
         self.config = new_config
-        self.label.set_font_family(self.config.get("font_family", "Microsoft YaHei"))
+        self.label.set_font_family(self.config.get("font_family", DEFAULT_FONT_FAMILY))
         self.label.set_font_size(self.config.get("font_size", 22))
         self.label.set_font_bold(self.config.get("font_bold", True))
         self.label.set_text_color(self.config.get("font_color", "#FFFFFF"))
@@ -1083,12 +1080,13 @@ class TranslationOverlay(QWidget):
         layout.setContentsMargins(0, 0, 12, 0)
         button = QPushButton(title, row)
         button.setFont(row_font)
-        button.setFixedWidth(button_width)
         button.setStyleSheet(
             "QPushButton { color: white; background: transparent; border: none; "
             "text-align: left; padding: 5px 20px; }"
             "QPushButton:hover, QPushButton:focus { background: #4a9eff; }"
         )
+        button.ensurePolished()
+        button.setFixedWidth(max(button_width, button.sizeHint().width()))
         checkbox = AutoCopyCheckBox(tr("overlay.auto_copy"), row)
         checkbox.setFont(row_font)
         checkbox.setStyleSheet("QCheckBox { color: white; spacing: 6px; }")
@@ -1446,15 +1444,12 @@ class TranslationOverlay(QWidget):
             act.triggered.connect(lambda checked=False, value=size: self.set_font_size(value))
 
         family_menu = menu.addMenu(tr("overlay.font"))
-        families = [
-            ("Microsoft YaHei", "Microsoft YaHei"),
-            ("DengXian", "DengXian"),
-            ("SimHei", "SimHei"),
-            ("SimSun", "SimSun"),
-            ("KaiTi", "KaiTi"),
-            ("FangSong", "FangSong"),
-        ]
-        current_family = self.config.get("font_family", "Microsoft YaHei")
+        from PyQt5.QtGui import QFontDatabase
+        available = set(QFontDatabase().families())
+        preferred = [DEFAULT_FONT_FAMILY, "PingFang SC", "Hiragino Sans GB", "Songti SC",
+                     "Microsoft YaHei", "DengXian", "SimHei", "SimSun", "KaiTi", "FangSong"]
+        families = [(name, name) for name in dict.fromkeys(preferred) if name in available]
+        current_family = self.config.get("font_family", DEFAULT_FONT_FAMILY)
         for name, family in families:
             act = family_menu.addAction(name + (" ✓" if family == current_family else ""))
             act.triggered.connect(lambda checked=False, value=family: self.set_font_family(value))

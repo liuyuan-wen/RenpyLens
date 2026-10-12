@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from ui_theme import ui_px, ui_style, fit_window_to_screen, refresh_ui_font
 from i18n import manager as i18n_manager, tr
 from character_panel import CharacterPanel
 
@@ -139,14 +140,14 @@ class TranslationWorkbench(QWidget):
             self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
         self.setStyleSheet(
-            """
+            ui_style("""
             QWidget {
                 background-color: #141827;
                 color: #eee;
                 font-family: "Microsoft YaHei", "Segoe UI";
                 font-size: 20px;
             }
-            QListWidget {
+            QListWidget, QTreeWidget {
                 background-color: #111525;
                 border: 1px solid #333a52;
                 border-radius: 6px;
@@ -157,9 +158,15 @@ class TranslationWorkbench(QWidget):
                 border-bottom: 1px solid #232a3f;
                 padding: 10px 8px;
             }
-            QListWidget::item:selected {
+            QListWidget::item:selected, QTreeWidget::item:selected {
                 background-color: #22314f;
                 color: white;
+            }
+            QHeaderView::section {
+                background-color: #202538;
+                color: #d7def4;
+                border: 1px solid #333a52;
+                padding: 6px 8px;
             }
             QListWidget QScrollBar:vertical {
                 background: #1a1a2e;
@@ -287,16 +294,16 @@ class TranslationWorkbench(QWidget):
                 background-color: #2f8dff;
                 border-radius: 5px;
             }
-            """
+            """)
         )
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 8, 12, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(ui_px(12), ui_px(8), ui_px(12), ui_px(12))
+        root.setSpacing(ui_px(10))
 
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(0, 0, 0, 0)
-        toolbar.setSpacing(12)
+        toolbar.setSpacing(ui_px(12))
         toolbar_btn_style = """
             QPushButton {
                 background-color: transparent;
@@ -320,10 +327,10 @@ class TranslationWorkbench(QWidget):
         bulk_container = QWidget()
         bulk_layout = QHBoxLayout(bulk_container)
         bulk_layout.setContentsMargins(0, 0, 0, 0)
-        bulk_layout.setSpacing(8)
+        bulk_layout.setSpacing(ui_px(8))
 
         self.bulk_stack = QStackedWidget()
-        self.bulk_stack.setMinimumWidth(360)
+        self.bulk_stack.setMinimumWidth(ui_px(360))
         bulk_layout.addWidget(self.bulk_stack, 1)
 
         self.bulk_idle_page = QWidget()
@@ -333,7 +340,7 @@ class TranslationWorkbench(QWidget):
         self.btn_bulk_translate.setCursor(Qt.PointingHandCursor)
         self.btn_bulk_translate.setToolTip(tr("workbench.bulk_tip"))
         self.btn_bulk_translate.setStyleSheet(
-            """
+            ui_style("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2b7cff, stop:1 #1f6feb);
                 color: white;
@@ -352,7 +359,7 @@ class TranslationWorkbench(QWidget):
                 color: #7a8498;
                 border-color: #364055;
             }
-            """
+            """)
         )
         self.btn_bulk_translate.clicked.connect(self.bulk_translate_requested.emit)
         bulk_idle_layout.addWidget(self.btn_bulk_translate)
@@ -373,9 +380,9 @@ class TranslationWorkbench(QWidget):
         bulk_result_layout.setContentsMargins(0, 0, 0, 0)
         self.bulk_result_label = QLabel("")
         self.bulk_result_label.setAlignment(Qt.AlignCenter)
-        self.bulk_result_label.setMinimumHeight(38)
+        self.bulk_result_label.setMinimumHeight(ui_px(38))
         self.bulk_result_label.setStyleSheet(
-            """
+            ui_style("""
             QLabel {
                 border: 1px solid #43506d;
                 border-radius: 7px;
@@ -384,7 +391,7 @@ class TranslationWorkbench(QWidget):
                 font-size: 17px;
                 font-weight: bold;
             }
-            """
+            """)
         )
         bulk_result_layout.addWidget(self.bulk_result_label)
         self.bulk_stack.addWidget(self.bulk_result_page)
@@ -393,7 +400,7 @@ class TranslationWorkbench(QWidget):
         self.btn_bulk_cancel.setVisible(False)
         self.btn_bulk_cancel.setCursor(Qt.PointingHandCursor)
         self.btn_bulk_cancel.setStyleSheet(
-            """
+            ui_style("""
             QPushButton {
                 background-color: transparent;
                 color: #f6c178;
@@ -405,7 +412,7 @@ class TranslationWorkbench(QWidget):
             }
             QPushButton:hover { color: #ffd9a0; border-color: #d39b4c; }
             QPushButton:disabled { color: #7d6a4f; border-color: #5a4d3d; }
-            """
+            """)
         )
         self.btn_bulk_cancel.clicked.connect(self.bulk_cancel_requested.emit)
         bulk_layout.addWidget(self.btn_bulk_cancel)
@@ -414,7 +421,7 @@ class TranslationWorkbench(QWidget):
         self.btn_pin = QPushButton(tr("common.pin"))
         self.btn_pin.setCheckable(True)
         self.btn_pin.setChecked(self._is_pinned)
-        self.btn_pin.setStyleSheet(toolbar_btn_style)
+        self.btn_pin.setStyleSheet(ui_style(toolbar_btn_style))
         self.btn_pin.clicked.connect(self._toggle_pin)
         toolbar.addWidget(self.btn_pin)
         root.addLayout(toolbar)
@@ -423,14 +430,14 @@ class TranslationWorkbench(QWidget):
         root.addWidget(self.tabs, 1)
         translation_page = QWidget()
         translation_layout = QVBoxLayout(translation_page)
-        translation_layout.setContentsMargins(0, 8, 0, 0)
+        translation_layout.setContentsMargins(0, ui_px(8), 0, 0)
         self.tabs.addTab(translation_page, tr("characters.translation_tab"))
         self.character_panel = CharacterPanel()
         self.character_panel.save_requested.connect(self.character_save_requested.emit)
         self.tabs.addTab(self.character_panel, tr("characters.title"))
 
         self.recent_title = QLabel(tr("workbench.recent"))
-        self.recent_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #7aa2ff;")
+        self.recent_title.setStyleSheet(ui_style("font-size: 20px; font-weight: bold; color: #7aa2ff;"))
         translation_layout.addWidget(self.recent_title)
 
         self.main_splitter = QSplitter(Qt.Horizontal)
@@ -447,14 +454,14 @@ class TranslationWorkbench(QWidget):
         detail = QWidget()
         self.detail_panel = detail
         detail_layout = QVBoxLayout(detail)
-        detail_layout.setContentsMargins(8, 0, 0, 0)
-        detail_layout.setSpacing(10)
+        detail_layout.setContentsMargins(ui_px(8), 0, 0, 0)
+        detail_layout.setSpacing(ui_px(10))
         self.main_splitter.addWidget(detail)
         self.main_splitter.setStretchFactor(0, 1)
         self.main_splitter.setStretchFactor(1, 1)
 
         meta_row = QHBoxLayout()
-        meta_row.setSpacing(16)
+        meta_row.setSpacing(ui_px(16))
         detail_layout.addLayout(meta_row)
 
         self.type_label = QLabel(tr("workbench.type_empty"))
@@ -477,7 +484,7 @@ class TranslationWorkbench(QWidget):
         self.source_view = QTextEdit()
         self.source_view.setReadOnly(True)
         self.source_view.setAcceptRichText(False)
-        self.source_view.setMinimumHeight(160)
+        self.source_view.setMinimumHeight(ui_px(160))
         detail_layout.addWidget(self.source_view)
 
         self.translation_title = QLabel(tr("workbench.translation"))
@@ -491,13 +498,13 @@ class TranslationWorkbench(QWidget):
 
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.setSpacing(10)
+        btn_row.setSpacing(ui_px(10))
         self.btn_open_config = QPushButton(tr("common.open_config"))
         self.btn_open_config.setObjectName("open_config_btn")
         self.btn_open_config.setCursor(Qt.PointingHandCursor)
         self.btn_open_config.setToolTip(tr("common.open_config_tip"))
         self.btn_open_config.setStyleSheet(
-            """
+            ui_style("""
             QPushButton {
                 background-color: transparent;
                 color: #888;
@@ -517,7 +524,7 @@ class TranslationWorkbench(QWidget):
                 color: #666;
                 border-color: #3b4252;
             }
-            """
+            """)
         )
         self.btn_open_config.clicked.connect(self._on_open_config_dir)
         btn_row.addWidget(self.btn_open_config)
@@ -539,6 +546,7 @@ class TranslationWorkbench(QWidget):
         self._update_footer_button_widths()
 
         self._set_empty_state()
+        fit_window_to_screen(self)
         self.set_bulk_idle()
         i18n_manager().language_changed.connect(self.retranslate_ui)
 
@@ -546,6 +554,7 @@ class TranslationWorkbench(QWidget):
         self.character_panel.set_characters(game_id, profiles)
 
     def retranslate_ui(self, *_):
+        refresh_ui_font(self)
         self.tabs.setTabText(0, tr("characters.translation_tab"))
         self.tabs.setTabText(1, tr("characters.title"))
         self.character_panel.retranslate_ui()
@@ -595,9 +604,9 @@ class TranslationWorkbench(QWidget):
             # polished.  This matters on the first launch in a non-CJK locale.
             button.ensurePolished()
             text_width = button.fontMetrics().horizontalAdvance(button.text())
-            button.setMinimumWidth(max(base_width, text_width + horizontal_chrome))
-        footer_width = sum(button.minimumWidth() for button, _, _ in button_specs) + 20
-        self.detail_panel.setMinimumWidth(footer_width + 8)
+            button.setMinimumWidth(max(ui_px(base_width), text_width + ui_px(horizontal_chrome)))
+        footer_width = sum(button.minimumWidth() for button, _, _ in button_specs) + ui_px(20)
+        self.detail_panel.setMinimumWidth(footer_width + ui_px(8))
 
     def set_game_title(self, game_title: str):
         game_title = str(game_title or "").strip()
@@ -660,7 +669,7 @@ class TranslationWorkbench(QWidget):
         }
         fg, border = color_map.get(level, color_map["info"])
         self.bulk_result_label.setStyleSheet(
-            f"""
+            ui_style(f"""
             QLabel {{
                 color: {fg};
                 border: 1px solid {border};
@@ -670,7 +679,7 @@ class TranslationWorkbench(QWidget):
                 font-size: 17px;
                 font-weight: bold;
             }}
-            """
+            """)
         )
         self.bulk_result_label.setText(str(text or ""))
         if auto_reset_ms > 0:
@@ -749,9 +758,9 @@ class TranslationWorkbench(QWidget):
         dialog = QDialog(parent or self)
         dialog.setWindowTitle(tr("workbench.unsaved_title"))
         dialog.setWindowModality(Qt.WindowModal)
-        dialog.setMinimumWidth(470)
+        dialog.setMinimumWidth(ui_px(470))
         dialog.setStyleSheet(
-            """
+            ui_style("""
             QDialog {
                 background-color: #101626;
                 color: #edf2ff;
@@ -792,12 +801,12 @@ class TranslationWorkbench(QWidget):
                 border-color: #7482a2;
                 background-color: rgba(255, 255, 255, 0.04);
             }
-            """
+            """)
         )
 
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(22, 18, 22, 18)
-        layout.setSpacing(18)
+        layout.setContentsMargins(ui_px(22), ui_px(18), ui_px(22), ui_px(18))
+        layout.setSpacing(ui_px(18))
 
         message = QLabel(tr("workbench.unsaved_message"))
         message.setObjectName("unsaved_message")

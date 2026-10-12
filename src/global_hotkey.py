@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Windows low-level keyboard listener for the overlay shortcut."""
+"""Desktop global shortcut facade with native Windows and macOS listeners."""
 
 from __future__ import annotations
 
 import ctypes
 import os
+import sys
 import threading
 from ctypes import wintypes
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from shortcuts import normalize_shortcut
+from process_runtime import process_executable_path, process_ancestry
 
 
 _MODIFIER_VKS = {0x10, 0x11, 0x12, 0x5B, 0x5C}
@@ -54,6 +56,9 @@ class OverlayHotkeyListener(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._shortcut = None
+        self._mac = None
+        self._started = False
+        self._shortcut_text = ""
         self._enabled = True
         self._stop_event = threading.Event()
         self._thread = None
@@ -61,12 +66,22 @@ class OverlayHotkeyListener(QObject):
         self._callback = None
 
     def configure(self, value: object):
+        self._shortcut_text = normalize_shortcut(value)
         self._shortcut = parse_windows_shortcut(value)
+        if self._mac is not None and self._started:
+            self._mac.configure(self._shortcut_text)
 
     def set_enabled(self, enabled: bool):
         self._enabled = bool(enabled)
 
     def start(self):
+        if sys.platform == "darwin" and os.environ.get("QT_QPA_PLATFORM", "").casefold() != "offscreen":
+            from macos_hotkey import MacHotkey
+            if self._mac is None:
+                self._mac = MacHotkey(lambda: self.activated.emit() if self._enabled else None)
+            self._started = True
+            self._mac.configure(self._shortcut_text)
+            return
         if (
             os.name != "nt"
             or os.environ.get("QT_QPA_PLATFORM", "").casefold() == "offscreen"
@@ -78,6 +93,9 @@ class OverlayHotkeyListener(QObject):
         self._thread.start()
 
     def stop(self):
+        self._started = False
+        if self._mac is not None:
+            self._mac.stop()
         self._stop_event.set()
         if os.name == "nt" and self._thread_id:
             ctypes.windll.user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)
@@ -133,65 +151,13 @@ class OverlayHotkeyListener(QObject):
 
 
 def foreground_process_id() -> int:
+    if sys.platform == "darwin":
+        from AppKit import NSWorkspace
+        application = NSWorkspace.sharedWorkspace().frontmostApplication()
+        return int(application.processIdentifier()) if application else 0
     if os.name != "nt":
         return 0
     hwnd = ctypes.windll.user32.GetForegroundWindow()
     process_id = wintypes.DWORD()
     ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
     return int(process_id.value)
-
-
-def process_executable_path(process_id: int) -> str:
-    if os.name != "nt" or not process_id:
-        return ""
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    kernel32 = ctypes.windll.kernel32
-    kernel32.OpenProcess.restype = ctypes.c_void_p
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, process_id)
-    if not handle:
-        return ""
-    try:
-        size = wintypes.DWORD(32768)
-        buffer = ctypes.create_unicode_buffer(size.value)
-        if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-            return os.path.normcase(os.path.abspath(buffer.value))
-    finally:
-        kernel32.CloseHandle(handle)
-    return ""
-
-
-def process_ancestry(process_id: int) -> set[int]:
-    """Return the process and its ancestors using the Windows process snapshot."""
-    if os.name != "nt" or not process_id:
-        return set()
-    TH32CS_SNAPPROCESS = 0x00000002
-    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-
-    class PROCESSENTRY32W(ctypes.Structure):
-        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
-                    ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_void_p),
-                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
-                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
-                    ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260)]
-
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
-    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if snapshot == INVALID_HANDLE_VALUE:
-        return {process_id}
-    parents = {}
-    entry = PROCESSENTRY32W()
-    entry.dwSize = ctypes.sizeof(entry)
-    try:
-        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
-        while ok:
-            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
-            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-    finally:
-        kernel32.CloseHandle(snapshot)
-    result = set()
-    current = process_id
-    while current and current not in result:
-        result.add(current)
-        current = parents.get(current, 0)
-    return result

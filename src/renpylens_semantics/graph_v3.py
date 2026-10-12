@@ -1,4 +1,4 @@
-"""v3 StoryGraph assembly over the existing v2 control-flow builder."""
+"""Typed StoryGraph v3 assembly from Ren'Py control-flow records."""
 
 from .audit import validate
 from .expressions import parse_expression_ir
@@ -6,10 +6,10 @@ from .call_semantics import formal_entries, label_parameter_names, plan_call
 from .model import (BlockIR, EdgeIR, EdgeRef, EffectIR, GraphIR, NodeRef, PrecisionSet, SourceLocation,
                     SymbolRef,
                     merge_precision, stable_digest)
-from .renpy_adapter import (IdentityIndex, node_source_path, screen_source_records,
+from .renpy_adapter import (IdentityIndex, initial_scalar_state, node_source_path, screen_source_records,
                             script_manifest)
-from .screen_semantics import analyze_screen_sources, call_screen
-from .serialization import _block_from_v2, _edge_from_v2, _node_from_v2
+from .screen_semantics import analyze_screen_sources, call_screen, instantiate_screen
+from .assembly_records import block_ir, edge_ir, node_ir
 
 
 def _node_expression_sources(node):
@@ -39,7 +39,7 @@ def _node_expression_sources(node):
 
 
 def _apply_expression_semantics(converted, node, local_names=(), local_owner=""):
-    """Attach typed expression evidence while retaining the v2 projection."""
+    """Attach typed expression dependencies and precision."""
     parsed_items = []
     for source in _node_expression_sources(node):
         parsed_items.append(parse_expression_ir(source, local_names, local_owner))
@@ -58,7 +58,8 @@ def _apply_expression_semantics(converted, node, local_names=(), local_owner="")
     setattr(converted, target, tuple(current))
     converted.extra["expression_ir"] = [item.to_dict() for item in parsed_items]
     if any(item.precision == "unknown" for item in parsed_items):
-        converted.precision = PrecisionSet(converted.precision.topology, "unknown",
+        state = "unknown" if any(item.parse_error for item in parsed_items) else "partial"
+        converted.precision = PrecisionSet(converted.precision.topology, merge_precision((converted.precision.state, state)),
                                            converted.precision.content)
 
 
@@ -77,7 +78,7 @@ def _canonical_indexes(indexes, node_map, edge_map):
 
 
 def _typed_indexes(indexes, nodes, edges, node_map, edge_map):
-    """Add typed symbol access records without changing v2 index spelling."""
+    """Index typed symbol access records by role."""
     result = _canonical_indexes(indexes, node_map, edge_map)
     symbols = {}
 
@@ -155,31 +156,32 @@ def _block_precision(members, fallback="exact"):
     )
 
 
-def build(legacy_builder, settings):
-    """Build v3 while preserving the exact v2 builder as the semantic source."""
-    renpy = legacy_builder.renpy
-    nodes = legacy_builder._all_nodes()
-    legacy_ids = legacy_builder._node_ids(nodes)
-    old_by_id = dict((value, node) for node, value in ((node, legacy_ids[id(node)]) for node in nodes))
+def build(builder, settings):
+    """Build typed nodes, calls, Screen actions, and narrative blocks."""
+    renpy = builder.renpy
+    nodes = builder._all_nodes()
     manifest, graph_id = script_manifest(getattr(renpy.config, "gamedir", ""))
-    screen_analysis = analyze_screen_sources(screen_source_records(renpy))
+    screen_records = screen_source_records(renpy)
+    screen_analysis = analyze_screen_sources(screen_records)
     identity = IdentityIndex(graph_id, nodes, getattr(renpy.config, "gamedir", ""))
+    source_ids = dict((id(node), identity.ref_for(node).node_id) for node in nodes)
+    ast_by_id = dict((source_ids[id(node)], node) for node in nodes)
     entry_nodes = dict(
-        (name, legacy_builder._lookup(name))
+        (name, builder._lookup(name))
         for name in settings.get("entry_points", ["start"])
-        if legacy_builder._lookup(name) is not None
+        if builder._lookup(name) is not None
     )
-    raw_nodes, raw_edges, return_sites = legacy_builder._build_icfg(
-        nodes, legacy_ids, legacy_builder._screen_jump_actions()
+    raw_nodes, raw_edges, return_sites = builder._build_icfg(
+        nodes, source_ids, builder._screen_jump_actions()
     )
-    raw_nodes, raw_edges, return_sites, coverage = legacy_builder._game_reachable(
+    raw_nodes, raw_edges, return_sites, coverage = builder._game_reachable(
         raw_nodes, raw_edges, return_sites,
-        [legacy_ids.get(id(node)) for node in entry_nodes.values()],
+        [source_ids.get(id(node)) for node in entry_nodes.values()],
     )
-    old_blocks, old_block_edges, node_blocks = legacy_builder._build_narrative_blocks(
+    raw_blocks, raw_block_edges, node_blocks = builder._build_narrative_blocks(
         raw_nodes, raw_edges, return_sites
     )
-    old_block_return_sites = [
+    raw_block_return_sites = [
         {
             "kind": "RETURN_SITE",
             "call_block": node_blocks.get(site["call_node"]),
@@ -188,60 +190,17 @@ def build(legacy_builder, settings):
         }
         for site in return_sites
     ]
-    indexes = legacy_builder._variable_indexes(raw_nodes, raw_edges)
-    old_audit = legacy_builder._audit_graph(
-        raw_nodes, raw_edges, return_sites, old_blocks, old_block_edges,
-        node_blocks, coverage,
-    )
-    legacy_value = {
-        "status": "completed",
-        "engine": getattr(renpy, "version", ""),
-        "schema_version": 2,
-        "error": None,
-        "provenance": legacy_builder._script_manifest(),
-        "coverage": coverage,
-        "audit": old_audit,
-        "entry_points": dict((name, legacy_ids.get(id(node)))
-                              for name, node in entry_nodes.items()),
-        "model": {
-            "raw": "semantic-icfg",
-            "call_semantics": "pushdown",
-            "return_rule": "pop continuation from call stack",
-            "compressed": "narrative-basic-block-graph",
-            "node_id": "sha1(source identity), 80-bit prefix",
-        },
-        "icfg": {
-            "nodes": raw_nodes,
-            "edges": raw_edges,
-            "return_sites": return_sites,
-            "indexes": indexes,
-        },
-        "narrative_graph": {
-            "blocks": old_blocks,
-            "edges": old_block_edges,
-            "return_sites": old_block_return_sites,
-        },
-        "summary": {
-            "raw_nodes": len(raw_nodes), "raw_edges": len(raw_edges),
-            "call_sites": len(return_sites), "story_blocks": len(old_blocks),
-            "block_edges": len(old_block_edges),
-            "unknown_nodes": sum(1 for node in raw_nodes if node.get("precision") == "unknown"),
-            "partial_nodes": sum(1 for node in raw_nodes if node.get("precision") == "partial"),
-            "game_label_roots": coverage.get("game_label_roots", 0),
-            "read_variables": len(indexes.get("reads", {})),
-            "written_variables": len(indexes.get("writes", {})),
-            "control_variables": len(set(indexes.get("controls", {})) | set(indexes.get("edge_controls", {}))),
-        },
-    }
+    indexes = builder._variable_indexes(raw_nodes, raw_edges)
     node_map = {}
     v3_nodes = []
+    ir_by_source = {}
     fallback_ids = set(identity.fallback_nodes)
     ambiguous_ids = set(identity.ambiguous_nodes)
     for record in raw_nodes:
-        old_id = record["node_id"]
-        node = old_by_id.get(old_id)
+        source_id = record["node_id"]
+        node = ast_by_id.get(source_id)
         local_names, local_owner = identity.scope_for(node)
-        converted = _node_from_v2(record, graph_id, local_names, local_owner)
+        converted = node_ir(record, graph_id, local_names, local_owner)
         converted.location = SourceLocation(
             node_source_path(node, getattr(renpy.config, "gamedir", "")),
             converted.location.line, converted.location.column,
@@ -251,7 +210,7 @@ def build(legacy_builder, settings):
         if ref is None:
             fallback = stable_digest({
                 "version": 1, "kind": record.get("kind", ""),
-                "location": record.get("location", {}), "legacy_id": old_id,
+                "location": record.get("location", {}), "source_id": source_id,
             }, "S_")
             ref = NodeRef(
                 graph_id, "N_" + fallback[2:], fallback,
@@ -259,12 +218,12 @@ def build(legacy_builder, settings):
                                "contents": record.get("contents", [])}, "C_", 64),
             )
         converted.ref = ref
-        converted.extra["legacy_node_id"] = old_id
+        ir_by_source[source_id] = converted
         if id(node) in fallback_ids:
             converted.extra["identity_fallback"] = True
         if id(node) in ambiguous_ids:
             converted.extra["identity_ambiguous"] = True
-        node_map[old_id] = converted.ref.node_id
+        node_map[source_id] = converted.ref.node_id
         v3_nodes.append(converted)
 
     edge_map = {}
@@ -272,12 +231,12 @@ def build(legacy_builder, settings):
     candidate_edges = []
     edge_ordinals = {}
     for record in raw_edges:
-        old_source = record.get("from")
-        old_target = record.get("to")
-        source_node = old_by_id.get(old_source)
-        target_node = old_by_id.get(old_target)
+        source_id = record.get("from")
+        target_id = record.get("to")
+        source_node = ast_by_id.get(source_id)
+        target_node = ast_by_id.get(target_id)
         slot = record.get("choice_index", record.get("branch_index", ""))
-        key = (old_source, old_target, record.get("kind", ""))
+        key = (source_id, target_id, record.get("kind", ""))
         ordinal = edge_ordinals.get(key, 0)
         edge_ordinals[key] = ordinal + 1
         # Menu choices already have a stable branch slot (the item index),
@@ -286,56 +245,79 @@ def build(legacy_builder, settings):
         edge_slot = slot
         if edge_slot in (None, ""):
             edge_slot = "occurrence:%d" % ordinal
-        edge_id = identity.edge_id(source_node or old_source, target_node or old_target,
+        edge_id = identity.edge_id(source_node or source_id, target_node or target_id,
                                    record.get("kind", ""), str(edge_slot))
-        converted = _edge_from_v2(record, graph_id)
-        converted.ref = EdgeRef(graph_id, edge_id, node_map.get(old_source, old_source),
-                                node_map.get(old_target, old_target) if old_target is not None else None)
+        converted = edge_ir(record, graph_id)
+        converted.ref = EdgeRef(graph_id, edge_id, node_map.get(source_id, source_id),
+                                node_map.get(target_id, target_id) if target_id is not None else None)
         is_candidate = record.get("derivation") in (
             "screen-source-scan", "literal-screen-argument", "call-screen-return-model"
         )
         if is_candidate:
             converted.metadata["candidate_edge"] = True
-        converted.metadata["legacy_edge_id"] = record.get("edge_id", "")
         edge_map[record.get("edge_id", "")] = edge_id
         (candidate_edges if is_candidate else v3_edges).append(converted)
 
     # Parsed Screen Language actions are authoritative v3 evidence.  Source
     # scan guesses stay in candidate_edges and never enter determined CFG.
-    screens_by_name = dict((screen.name, screen) for screen in screen_analysis.screens)
+    variant_order = [str(item or '') for item in getattr(renpy.config, "variants", (None,))]
+    records_by_name = {}
+    for record in screen_records:
+        if record["variant"] not in variant_order:
+            continue
+        previous = records_by_name.get(record["name"])
+        if previous is None or variant_order.index(record["variant"]) < variant_order.index(previous["variant"]):
+            records_by_name[record["name"]] = record
+    screens_by_variant = dict(((screen.name, screen.variant), screen) for screen in screen_analysis.screens)
+    screens_by_name = dict((name, screens_by_variant[(name, record["variant"])]) for name, record in records_by_name.items())
     labels_by_name = dict((item.engine_name, item) for item in v3_nodes
                           if item.kind == "Label" and item.engine_name)
 
-    def action_leaves(actions):
-        for action in actions:
-            if action.kind == "list":
-                for child in action_leaves(action.children):
-                    yield child
-                    if child.kind in ("jump", "call", "return"):
-                        break
-            elif action.kind == "if":
-                for child in action_leaves(action.children):
-                    yield child
-            else:
-                yield action
-
-    for old_id, source_ir in dict((item.extra.get("legacy_node_id"), item)
-                                  for item in v3_nodes).items():
-        source_node = old_by_id.get(old_id)
+    for source_id, source_ir in ir_by_source.items():
+        source_node = ast_by_id.get(source_id)
         if source_node is None or type(source_node).__name__ != "UserStatement":
             continue
         screen_name, _guessed_labels = call_screen(source_node)
         screen = screens_by_name.get(screen_name)
         if screen is None:
             continue
-        for action in action_leaves(screen.actions):
+        outcomes, unknown = instantiate_screen(source_node, records_by_name[screen_name], screen.screen_id, source_id)
+        source_ir.story_relevance = "control"
+        source_ir.extra["screen_name"] = screen_name
+        source_ir.extra["screen_choice"] = len(outcomes) >= 2 and all(
+            item["choice"] and item["action"].kind in ("jump", "call", "return", "end", "rollback") for item in outcomes)
+        source_ir.extra["screen_unknown_reasons"] = unknown
+        if not unknown:
+            source_ir.effects = tuple(effect for effect in source_ir.effects if effect.reason != "user-statement")
+            source_ir.reads = tuple(symbol for symbol in source_ir.reads if symbol.kind != "unknown")
+            source_ir.precision = PrecisionSet("exact", merge_precision(
+                [item["action"].precision.state for item in outcomes] +
+                [effect.precision for item in outcomes for effect in item["effects"]]), "exact")
+        if outcomes and all(item["action"].kind == "end" for item in outcomes):
+            source_ir.extra["terminal"] = "screen-exit"
+        if outcomes and all(item["action"].kind == "rollback" for item in outcomes):
+            source_ir.extra["terminal"] = "screen-rollback"
+        for item in outcomes:
+            action = item["action"]
+            if action.kind in ("end", "rollback"):
+                edge_id = identity.edge_id(source_node, None, "SCREEN_%s" % action.kind.upper(), action.action_id)
+                v3_edges.append(EdgeIR(
+                    EdgeRef(graph_id, edge_id, source_ir.ref.node_id, None),
+                    "SCREEN_%s" % action.kind.upper(), action.precision, "screen-sl-ast",
+                    {"screen_id": screen.screen_id, "action": action.to_dict(),
+                     "target_resolution": "terminal", "terminal": action.kind,
+                     "choice": item["choice"], "condition": item["condition"], "choice_index": item["slot"],
+                     "effects": [effect.to_dict() for effect in item["effects"]]},
+                ))
+                continue
             target_ir = labels_by_name.get(action.target) if action.kind in ("jump", "call") else None
             if action.kind == "return":
-                target_ir = next((item for item in v3_nodes
-                                  if item.extra.get("legacy_node_id") == legacy_ids.get(
-                                      id(getattr(source_node, "next", None)))), None)
+                target_ir = ir_by_source.get(source_ids.get(id(getattr(source_node, "next", None))))
             if target_ir is None:
                 if action.kind in ("jump", "call"):
+                    source_ir.extra["screen_unknown_reasons"].append(
+                        "dynamic-screen-target" if action.target is None else "missing-screen-label:%s" % action.target)
+                    source_ir.precision = PrecisionSet("unknown", source_ir.precision.state, "exact")
                     candidate_edges.append(EdgeIR(
                         EdgeRef(graph_id, identity.edge_id(source_node, action.target,
                                                            "SCREEN_%s" % action.kind.upper(),
@@ -349,33 +331,27 @@ def build(legacy_builder, settings):
                     ))
                 continue
             edge_kind = "SCREEN_%s" % action.kind.upper()
-            edge_id = identity.edge_id(source_node, old_by_id.get(
-                target_ir.extra.get("legacy_node_id")), edge_kind, action.action_id)
+            edge_id = identity.edge_id(source_node, ast_by_id.get(target_ir.ref.node_id), edge_kind, action.action_id)
             v3_edges.append(EdgeIR(
                 EdgeRef(graph_id, edge_id, source_ir.ref.node_id, target_ir.ref.node_id),
                 edge_kind, action.precision, "screen-sl-ast",
                 {"screen_id": screen.screen_id, "action": action.to_dict(),
-                 "target_resolution": "resolved"},
+                 "target_resolution": "resolved", "choice": item["choice"],
+                 "condition": item["condition"], "choice_index": item["slot"],
+                 "effects": [effect.to_dict() for effect in item["effects"]]},
             ))
 
-    # Stage 4: control-flow topology is still supplied by the stable legacy
-    # builder, while Call/Return state semantics come from the shared Kernel
-    # planner rather than its conservative v2 placeholders.
-    v3_by_legacy = dict((item.extra.get("legacy_node_id"), item) for item in v3_nodes)
+    # Calls evaluate arguments in caller scope and bind callee-local parameters.
     call_edges = dict((edge.ref.source_node_id, edge)
                       for edge in v3_edges if edge.kind == "CALL_EDGE")
     return_by_call = dict((site.get("call_node"), site.get("continuation"))
                           for site in return_sites)
-    for old_id, converted in v3_by_legacy.items():
-        node = old_by_id.get(old_id)
+    for source_id, converted in ir_by_source.items():
+        node = ast_by_id.get(source_id)
         if node is None:
             continue
         kind = type(node).__name__
         if kind == "Label" and getattr(node, "parameters", None) is not None:
-            converted.effects = tuple(
-                effect for effect in converted.effects
-                if effect.reason != "label-parameter-binding"
-            )
             if not any(effect.precision == "unknown" for effect in converted.effects):
                 converted.reads = tuple(symbol for symbol in converted.reads
                                         if symbol.kind != "unknown")
@@ -405,13 +381,13 @@ def build(legacy_builder, settings):
         if kind != "Call":
             continue
         edge = call_edges.get(converted.ref.node_id)
-        old_target = next((record.get("to") for record in raw_edges
-                           if record.get("kind") == "CALL_EDGE" and record.get("from") == old_id), None)
-        target_node = old_by_id.get(old_target)
-        target_converted = v3_by_legacy.get(old_target)
+        target_id = next((record.get("to") for record in raw_edges
+                           if record.get("kind") == "CALL_EDGE" and record.get("from") == source_id), None)
+        target_node = ast_by_id.get(target_id)
+        target_converted = ir_by_source.get(target_id)
         caller_names, caller_owner = identity.scope_for(node)
         callee_names, callee_owner = identity.scope_for(target_node)
-        continuation = v3_by_legacy.get(return_by_call.get(old_id))
+        continuation = ir_by_source.get(return_by_call.get(source_id))
         dynamic = bool(getattr(node, "expression", False) or target_node is None)
         call_site = plan_call(
             getattr(node, "arguments", None),
@@ -435,8 +411,6 @@ def build(legacy_builder, settings):
                     call_reads.append(symbol)
         if call_reads:
             converted.reads = tuple(list(converted.reads) + call_reads)
-        converted.effects = tuple(effect for effect in converted.effects
-                                  if effect.reason != "call-argument-binding")
         if not any(argument.precision == "unknown" for argument in call_site.arguments):
             converted.reads = tuple(symbol for symbol in converted.reads
                                     if symbol.kind != "unknown")
@@ -452,19 +426,18 @@ def build(legacy_builder, settings):
 
     block_map = {}
     v3_blocks = []
-    node_by_legacy = dict((node.extra.get("legacy_node_id"), node) for node in v3_nodes)
-    for record in old_blocks:
+    for record in raw_blocks:
         source_nodes = [node_map.get(item, item) for item in record.get("source_nodes", [])]
         entry = node_map.get(record.get("entry_node"), record.get("entry_node"))
         block_id = stable_digest({"version": 1, "entry": entry,
                                   "source_nodes": source_nodes,
                                   "control_kind": record.get("control_kind", "")}, "B_")
-        converted = _block_from_v2(record)
+        converted = block_ir(record)
         converted.block_id = block_id
         converted.entry_node = entry
         converted.terminator_node = node_map.get(record.get("terminator_node"), record.get("terminator_node"))
         converted.source_nodes = tuple(source_nodes)
-        members = [node_by_legacy.get(item) for item in record.get("source_nodes", [])]
+        members = [ir_by_source.get(item) for item in record.get("source_nodes", [])]
         members = [node for node in members if node is not None]
         if members:
             converted.effects = tuple(
@@ -476,14 +449,23 @@ def build(legacy_builder, settings):
             converted.story_relevance = tuple(sorted(set(
                 item for node in members for item in (node.story_relevance,)
             )))
-        converted.metadata["legacy_block_id"] = record.get("block_id", "")
+            screen_member = next((node for node in members if node.extra.get("screen_name")), None)
+            if screen_member is not None:
+                converted.metadata["screen_name"] = screen_member.extra["screen_name"]
+                converted.metadata["screen_unknown_reasons"] = screen_member.extra["screen_unknown_reasons"]
+                if screen_member.extra.get("screen_choice"):
+                    converted.control_kind = "ScreenChoice"
+                elif screen_member.extra.get("terminal") == "screen-exit":
+                    converted.control_kind = "End"
+                elif screen_member.extra.get("terminal") == "screen-rollback":
+                    converted.control_kind = "Rollback"
         block_map[record.get("block_id", "")] = block_id
         v3_blocks.append(converted)
 
     v3_block_edges = []
     edge_by_id = dict((edge.ref.edge_id, edge) for edge in v3_edges + candidate_edges)
-    for record in old_block_edges:
-        converted = _edge_from_v2(record, graph_id)
+    for record in raw_block_edges:
+        converted = edge_ir(record, graph_id)
         source = block_map.get(record.get("from"), record.get("from"))
         target = block_map.get(record.get("to"), record.get("to")) if record.get("to") is not None else None
         edge_id = stable_digest({"version": 1, "from": source, "to": target,
@@ -497,26 +479,32 @@ def build(legacy_builder, settings):
             source_edge = edge_by_id.get(converted.metadata["source_edge"])
             if source_edge is not None and source_edge.metadata.get("candidate_edge"):
                 converted.metadata["candidate_edge"] = True
-        converted.metadata["legacy_edge_id"] = record.get("edge_id", "")
         if not converted.metadata.get("candidate_edge"):
             v3_block_edges.append(converted)
 
-    canonical_to_legacy = dict((value, key) for key, value in node_map.items())
+    canonical_to_source = dict((value, key) for key, value in node_map.items())
     for source_edge in [edge for edge in v3_edges if edge.derivation == "screen-sl-ast"]:
-        source_old = canonical_to_legacy.get(source_edge.ref.source_node_id)
-        target_old = canonical_to_legacy.get(source_edge.ref.target_node_id)
-        source_block = block_map.get(node_blocks.get(source_old))
-        target_block = block_map.get(node_blocks.get(target_old))
-        if source_block is None or target_block is None:
+        source_record = canonical_to_source.get(source_edge.ref.source_node_id)
+        target_record = canonical_to_source.get(source_edge.ref.target_node_id)
+        source_block = block_map.get(node_blocks.get(source_record))
+        target_block = block_map.get(node_blocks.get(target_record))
+        if source_block is None or target_block is None and not source_edge.metadata.get("terminal"):
             continue
         edge_id = stable_digest({"version": 1, "from": source_block, "to": target_block,
                                  "kind": source_edge.kind,
                                  "source_edge": source_edge.ref.edge_id}, "BE_")
+        source_ir = ir_by_source[source_record]
+        kind = "MENU_CHOICE" if source_ir.extra.get("screen_choice") else source_edge.kind
         v3_block_edges.append(EdgeIR(
-            EdgeRef(graph_id, edge_id, source_block, target_block), source_edge.kind,
+            EdgeRef(graph_id, edge_id, source_block, target_block), kind,
             source_edge.precision, source_edge.derivation,
-            {"source_edge": source_edge.ref.edge_id, "target_resolution": "resolved",
-             "screen_id": source_edge.metadata.get("screen_id", "")},
+            {"source_edge": source_edge.ref.edge_id, "target_resolution": source_edge.metadata["target_resolution"],
+             "terminal": source_edge.metadata.get("terminal", ""),
+             "screen_id": source_edge.metadata.get("screen_id", ""),
+             "choice": source_edge.metadata.get("choice", ""),
+             "condition": source_edge.metadata.get("condition", "True"),
+             "choice_index": source_edge.metadata.get("choice_index", 0),
+             "effects": source_edge.metadata.get("effects", [])},
         ))
 
     # Block topology also includes the precision of the connecting control
@@ -550,7 +538,7 @@ def build(legacy_builder, settings):
              call_block=block_map.get(site.get("call_block"), site.get("call_block")),
              continuation_block=block_map.get(site.get("continuation_block"), site.get("continuation_block")),
              source_call_node=node_map.get(site.get("source_call_node"), site.get("source_call_node")))
-        for site in old_block_return_sites
+        for site in raw_block_return_sites
     ]
     v3_indexes = _typed_indexes(indexes, v3_nodes, v3_edges, node_map, edge_map)
     graph = GraphIR(
@@ -559,7 +547,7 @@ def build(legacy_builder, settings):
         provenance=manifest,
         coverage=coverage,
         audit={},
-        entry_points=dict((name, node_map.get(legacy_ids.get(id(node)))) for name, node in entry_nodes.items()),
+        entry_points=dict((name, node_map.get(source_ids.get(id(node)))) for name, node in entry_nodes.items()),
         nodes=v3_nodes,
         edges=v3_edges,
         return_sites=v3_return_sites,
@@ -571,11 +559,10 @@ def build(legacy_builder, settings):
             "raw_nodes": len(v3_nodes), "raw_edges": len(v3_edges),
             "call_sites": len(v3_return_sites), "story_blocks": len(v3_blocks),
             "block_edges": len(v3_block_edges),
-            "legacy_audit": old_audit,
         },
         model={"raw": "semantic-icfg", "schema": "storygraph-ir-v3",
-               "identity": "structural-path-v1", "call_semantics": "pushdown"},
-        legacy=legacy_value,
+               "identity": "structural-path-v1", "call_semantics": "pushdown",
+               "initial_state": initial_scalar_state(nodes, getattr(renpy, "store", None))},
         screens=screen_analysis.screens,
         candidate_edges=candidate_edges,
     )

@@ -1,8 +1,4 @@
-"""Ren'Py-side semantic ICFG and narrative basic-block graph extractor.
-
-This is the stage-1 home of the existing StoryGraph v2 implementation.  The
-runtime adapter remains a thin command registration wrapper in ``graph/``.
-"""
+"""Ren'Py control-flow extraction and StoryGraph v3 command entry point."""
 
 import hashlib
 import io
@@ -14,8 +10,6 @@ import traceback
 
 import renpy
 
-from .audit import validate_components as _kernel_validate_components
-from .call_semantics import label_parameter_names as _kernel_parameter_names
 from .expressions import content_reads as _kernel_content_reads
 from .expressions import expression_reads as _kernel_expression_reads
 from .model import merge_precision as _kernel_merge_precision
@@ -38,74 +32,10 @@ def _single_line(value):
 
 
 def _node_ids(nodes):
-    def identity(node):
-        kind = type(node).__name__
-        parts = [
-            str(getattr(node, "filename", "")).replace("\\", "/"),
-            str(int(getattr(node, "linenumber", 0) or 0)),
-            kind,
-            str(getattr(node, "name", "")),
-        ]
-        if kind == "Python":
-            parts.append(str(getattr(getattr(node, "code", None), "source", "")))
-        elif kind in ("Say", "TranslateSay"):
-            parts.extend((str(getattr(node, "who", "") or ""),
-                          str(getattr(node, "what", "") or "")))
-        elif kind == "UserStatement":
-            parts.append(str(getattr(node, "line", "") or ""))
-        elif kind in ("Jump", "Call"):
-            parts.extend((str(getattr(node, "target" if kind == "Jump" else "label", "")),
-                          str(bool(getattr(node, "expression", False)))))
-        elif kind == "Return":
-            parts.append(str(getattr(node, "expression", "") or ""))
-        return "\x1f".join(parts)
-
-    groups = {}
-    for node in nodes:
-        groups.setdefault(identity(node), []).append(node)
-    result = {}
-    for payload in sorted(groups):
-        digest = hashlib.sha1(payload.encode("utf-8", "surrogatepass")).hexdigest()[:20]
-        group = groups[payload]
-        for index, node in enumerate(group):
-            suffix = "_%d" % (index + 1) if len(group) > 1 else ""
-            result[id(node)] = "N_" + digest + suffix
-    return result
-
-
-def _script_manifest():
-    files = []
-    digest = hashlib.sha256()
-    root = renpy.config.gamedir
-    for directory, _dirs, filenames in os.walk(root):
-        for filename in filenames:
-            lowered = filename.lower()
-            if not lowered.endswith((".rpy", ".rpyc")):
-                continue
-            if lowered.startswith("zz_renpylens_"):
-                continue
-            path = os.path.join(directory, filename)
-            relative = os.path.relpath(path, root).replace("\\", "/")
-            file_digest = hashlib.sha256()
-            try:
-                with open(path, "rb") as stream:
-                    while True:
-                        chunk = stream.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        file_digest.update(chunk)
-            except OSError:
-                continue
-            value = file_digest.hexdigest()
-            size = os.path.getsize(path)
-            files.append({"path": relative, "size": size, "sha256": value})
-    files.sort(key=lambda item: item["path"].lower())
-    for item in files:
-        digest.update(item["path"].encode("utf-8", "surrogatepass"))
-        digest.update(b"\0")
-        digest.update(item["sha256"].encode("ascii"))
-        digest.update(b"\n")
-    return {"sha256": digest.hexdigest(), "script_files": files}
+    from .renpy_adapter import IdentityIndex
+    gamedir = getattr(getattr(renpy, "config", None), "gamedir", "")
+    identity = IdentityIndex("", nodes, gamedir)
+    return dict((id(node), identity.ref_for(node).node_id) for node in nodes)
 
 
 def _static_target(node, attribute):
@@ -213,19 +143,13 @@ def _node_semantics(node, node_id):
                 "may_read": "*", "may_write": "*", "source": source,
                 "reason": "user-statement",
             }
-    elif kind == "Call":
-        if getattr(node, "arguments", None) is not None:
-            result["precision"] = "conservative"
-            result["unknown_effect"] = {"may_read": "*", "may_write": [],
-                                        "reason": "call-argument-binding"}
-    elif kind == "Label":
-        parameters = getattr(node, "parameters", None)
-        if parameters is not None:
-            names = _parameter_names(parameters)
-            result["precision"] = "unknown"
-            result["unknown_effect"] = {"may_read": [], "may_write": names or "*",
-                                        "reason": "label-parameter-binding"}
-    elif kind not in ("Show", "Hide", "With", "Scene", "Pass", "Init", "Jump"):
+    elif kind in ("Define", "Default"):
+        expression = str(getattr(getattr(node, "code", None), "source", "") or "")
+        result["reads"] = _expression_reads(expression)
+        result["writes"] = [{"var": str(getattr(node, "varname", "")), "op": "set", "expr": expression}]
+    elif kind in ("Style", "Screen", "Image", "Transform"):
+        pass
+    elif kind not in ("Show", "Hide", "With", "Scene", "Pass", "Init", "Jump", "Call", "Label"):
         result["precision"] = "unknown"
         result["unknown_effect"] = {
             "may_read": "*", "may_write": "*",
@@ -257,9 +181,9 @@ def _build_icfg(nodes, ids, screen_actions):
             sort_keys=True, ensure_ascii=False, separators=(",", ":"),
         )
         record = {
-            "edge_id": "E_" + hashlib.sha1(
+            "edge_id": "E_" + hashlib.sha256(
                 identity.encode("utf-8", "surrogatepass")
-            ).hexdigest()[:20],
+            ).hexdigest()[:32],
             "from": source_id,
             "to": target_id,
             "kind": kind,
@@ -330,7 +254,7 @@ def _build_icfg(nodes, ids, screen_actions):
                     node, continuation, "MENU_FALLTHROUGH",
                     condition="no-visible-choice", control_reads=sorted(set(
                         name for condition in conditions for name in _expression_reads(condition)
-                    )), precision="conservative",
+                    )), precision="exact",
                 )
             else:
                 mark_terminal(node, "menu-without-fallthrough")
@@ -630,9 +554,9 @@ def _build_narrative_blocks(node_records, edges, return_sites=()):
             sort_keys=True, ensure_ascii=False, separators=(",", ":"),
         )
         block_edges.append(dict({
-            "edge_id": "BE_" + hashlib.sha1(
+            "edge_id": "BE_" + hashlib.sha256(
                 identity.encode("utf-8", "surrogatepass")
-            ).hexdigest()[:20],
+            ).hexdigest()[:32],
             "from": source,
             "to": target,
             "source_edge": edge["edge_id"],
@@ -679,126 +603,28 @@ def run():
         settings = json.load(stream)
     clock = getattr(time, "perf_counter", time.time)
     started = clock()
-    if int(settings.get("schema_version", 3) or 3) == 3:
-        try:
-            from .graph_v3 import build as build_v3
-            result = build_v3(__import__(__name__, fromlist=["*"]), settings)
-            if hasattr(result, "to_dict"):
-                result = result.to_dict()
-        except Exception:
-            result = {
-                "status": "crashed",
-                "engine": renpy.version,
-                "schema_version": 3,
-                "error": traceback.format_exc(),
-            }
-        result["elapsed_seconds"] = round(clock() - started, 3)
-        with io.open(settings["output"], "w", encoding="utf-8") as stream:
-            stream.write(json.dumps(result, ensure_ascii=False, indent=2))
-        return False
-    result = {"status": "running", "engine": renpy.version, "error": None}
     try:
-        provenance = _script_manifest()
-        nodes = _all_nodes()
-        ids = _node_ids(nodes)
-        entry_nodes = dict(
-            (name, _lookup(name)) for name in settings.get("entry_points", ["start"])
-            if _lookup(name) is not None
-        )
-        raw_nodes, raw_edges, return_sites = _build_icfg(
-            nodes, ids, _screen_jump_actions()
-        )
-        raw_nodes, raw_edges, return_sites, coverage = _game_reachable(
-            raw_nodes, raw_edges, return_sites,
-            [ids.get(id(node)) for node in entry_nodes.values()],
-        )
-        blocks, block_edges, node_blocks = _build_narrative_blocks(raw_nodes, raw_edges, return_sites)
-        block_return_sites = [
-            {
-                "kind": "RETURN_SITE",
-                "call_block": node_blocks.get(site["call_node"]),
-                "continuation_block": node_blocks.get(site["continuation"]),
-                "source_call_node": site["call_node"],
-            }
-            for site in return_sites
-        ]
-        indexes = _variable_indexes(raw_nodes, raw_edges)
-        audit = _audit_graph(
-            raw_nodes, raw_edges, return_sites, blocks, block_edges,
-            node_blocks, coverage,
-        )
-        result.update({
-            "status": "completed",
-            "schema_version": 2,
-            "provenance": provenance,
-            "coverage": coverage,
-            "audit": audit,
-            "model": {
-                "raw": "semantic-icfg",
-                "call_semantics": "pushdown",
-                "return_rule": "pop continuation from call stack",
-                "compressed": "narrative-basic-block-graph",
-                "node_id": "sha1(source identity), 80-bit prefix",
-            },
-            "entry_points": dict(
-                (name, ids.get(id(node))) for name, node in entry_nodes.items()
-            ),
-            "icfg": {
-                "nodes": raw_nodes,
-                "edges": raw_edges,
-                "return_sites": return_sites,
-                "indexes": indexes,
-            },
-            "narrative_graph": {
-                "blocks": blocks,
-                "edges": block_edges,
-                "return_sites": block_return_sites,
-            },
-            "summary": {
-                "raw_nodes": len(raw_nodes),
-                "raw_edges": len(raw_edges),
-                "call_sites": len(return_sites),
-                "unknown_nodes": sum(1 for node in raw_nodes if node["precision"] == "unknown"),
-                "partial_nodes": sum(1 for node in raw_nodes if node["precision"] == "partial"),
-                "story_blocks": len(blocks),
-                "block_edges": len(block_edges),
-                "game_label_roots": coverage["game_label_roots"],
-                "read_variables": len(indexes["reads"]),
-                "written_variables": len(indexes["writes"]),
-                "control_variables": len(set(indexes["controls"]) | set(indexes["edge_controls"])),
-            },
-        })
-        if not audit["valid"]:
-            result["status"] = "invalid"
-            result["error"] = "Structural graph audit failed: " + ", ".join(audit["errors"])
+        from .graph_v3 import build
+        result = build(__import__(__name__, fromlist=["*"]), settings).to_dict()
+        if settings.get("narrative_only"):
+            result.pop("icfg")
     except Exception:
-        result["status"] = "crashed"
-        result["error"] = traceback.format_exc()
+        result = {"status": "crashed", "engine": renpy.version,
+                  "schema_version": 3, "error": traceback.format_exc()}
     result["elapsed_seconds"] = round(clock() - started, 3)
-    with io.open(settings["output"], "w", encoding="utf-8") as stream:
-        stream.write(json.dumps(result, ensure_ascii=False, indent=2))
+    from .serialization import write_json
+    write_json(result, settings["output"])
     return False
 
 
-# The aliases below make the extracted modules the production implementations.
-# Legacy runner imports continue to resolve through these compatibility names.
 _merge_precision = _kernel_merge_precision
 _python_semantics = _kernel_python_semantics
 _expression_reads = _kernel_expression_reads
 _content_reads = _kernel_content_reads
-_parameter_names = _kernel_parameter_names
 _all_nodes = lambda: _kernel_all_nodes(renpy)
 _screen_jump_actions = lambda: _kernel_screen_jump_actions(renpy)
 _lookup = lambda label: _kernel_lookup(renpy, label)
 
 
 def _call_screen(node):
-    """Compatibility adapter for the shared Screen fallback service."""
     return _kernel_call_screen(node, _lookup)
-
-# Public names used by the thin v2 compatibility wrappers and migration tests.
-python_semantics = _python_semantics
-screen_jump_actions = _screen_jump_actions
-_audit_graph = _kernel_validate_components
-audit_graph = _audit_graph
-build = run

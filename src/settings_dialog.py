@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QPointF
 from PyQt5.QtGui import QKeySequence, QPainter, QPolygonF, QColor
+from ui_theme import ui_px, ui_style, ui_rich_text, fit_window_to_screen
 from i18n import LANGUAGE_OPTIONS, manager as i18n_manager, tr
 from provider_registry import (
     get_provider_spec,
@@ -32,7 +33,7 @@ _DARK_STYLE = """
     QDialog {
         background-color: #1a1a2e;
         color: #eee;
-        font-family: "Microsoft YaHei", "Segoe UI";
+        font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI";
         font-size: 18px;
     }
     QTabWidget::pane {
@@ -185,6 +186,7 @@ _DARK_STYLE = """
         border: none; border-radius: 6px;
         padding: 10px 28px; font-size: 18px; font-weight: bold;
     }
+    QPushButton#primaryAction { font-weight: bold; }
     QPushButton:hover { background-color: #ff6b81; }
     QPushButton#cancel_btn, QPushButton#open_config_btn {
         background-color: transparent; color: #888;
@@ -308,12 +310,12 @@ class SettingsDialog(QDialog):
 
         self.setWindowTitle(tr("settings.title"))
         # Keep pages compact; only the tab bar may widen the initial window.
-        self.resize(840, 680)
-        self.setStyleSheet(_DARK_STYLE)
+        self.resize(ui_px(840), ui_px(680))
+        self.setStyleSheet(ui_style(_DARK_STYLE))
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(ui_px(12))
+        layout.setContentsMargins(ui_px(16), ui_px(16), ui_px(16), ui_px(16))
 
         # 标签页
         self.tabs = QTabWidget()
@@ -338,6 +340,7 @@ class SettingsDialog(QDialog):
         self.btn_cancel.clicked.connect(self.reject)
         btn_layout.addWidget(self.btn_cancel)
         self.btn_save = QPushButton(tr("settings.save"))
+        self.btn_save.setObjectName("primaryAction")
         self.btn_save.clicked.connect(self._on_save)
         btn_layout.addWidget(self.btn_save)
         layout.addLayout(btn_layout)
@@ -345,31 +348,32 @@ class SettingsDialog(QDialog):
         self.ensurePolished()
         margins = layout.contentsMargins()
         tab_width = self.tabs.tabBar().sizeHint().width()
-        self.setMinimumSize(max(840, tab_width + margins.left() + margins.right()), 680)
+        self.setMinimumSize(max(ui_px(840), tab_width + margins.left() + margins.right()), ui_px(680))
         saved_size = config.get("settings_window_size")
         if (isinstance(saved_size, (list, tuple)) and len(saved_size) == 2
                 and all(isinstance(value, int) and value > 0 for value in saved_size)):
             self.resize(*saved_size)
         else:
             self.resize(self.minimumSize())
+        fit_window_to_screen(self)
 
     # ── 标签页 1: 翻译设置 ──────────────────────────
 
     def _create_translation_tab(self) -> QWidget:
         tab = QWidget()
         vbox = QVBoxLayout(tab)
-        vbox.setSpacing(10)
-        vbox.setContentsMargins(20, 20, 20, 20)
+        vbox.setSpacing(ui_px(10))
+        vbox.setContentsMargins(ui_px(20), ui_px(20), ui_px(20), ui_px(20))
 
         # 提示（顶部，占满整行宽度）
         hint = QLabel(tr("settings.translation_hint"))
-        hint.setStyleSheet("color: #666; font-size: 18px;")
+        hint.setStyleSheet(ui_style("color: #666; font-size: 18px;"))
         hint.setWordWrap(True)
         vbox.addWidget(hint)
 
         # 语言设置表单
         form = QFormLayout()
-        form.setSpacing(14)
+        form.setSpacing(ui_px(14))
         form.setLabelAlignment(Qt.AlignRight)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
@@ -433,14 +437,14 @@ class SettingsDialog(QDialog):
         content = QWidget()
         content.setObjectName("api_content")
         layout = QVBoxLayout(content)
-        layout.setSpacing(8)
-        layout.setContentsMargins(20, 12, 20, 20)
+        layout.setSpacing(ui_px(8))
+        layout.setContentsMargins(ui_px(20), ui_px(12), ui_px(20), ui_px(20))
         
         # Helper to create group box
         def create_api_group(title, key_prefix, default_url, key_placeholder):
             group = QGroupBox(title)
             form = QFormLayout(group)
-            form.setSpacing(10)
+            form.setSpacing(ui_px(10))
             url_input = QLineEdit(self.config.get(f"{key_prefix}_url", default_url))
             url_input.setPlaceholderText(tr("settings.default_url", url=default_url))
             form.addRow("API URL:", url_input)
@@ -475,7 +479,7 @@ class SettingsDialog(QDialog):
         # 内置通道
         builtin_group = QGroupBox(tr("settings.builtin_channel"))
         builtin_form = QFormLayout(builtin_group)
-        builtin_form.setSpacing(10)
+        builtin_form.setSpacing(ui_px(10))
         builtin_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         builtin_row, self.builtin_key_input = self._create_key_input(
             self.config.get("builtin_api_key", ""),
@@ -493,7 +497,7 @@ class SettingsDialog(QDialog):
     def _create_openai_channel_group(self) -> QGroupBox:
         group = QGroupBox(tr("settings.group.openai_channels"))
         form = QFormLayout(group)
-        form.setSpacing(10)
+        form.setSpacing(ui_px(10))
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
         self.channel_combo = NoWheelComboBox()
@@ -514,14 +518,14 @@ class SettingsDialog(QDialog):
         actions = QWidget()
         action_layout = QHBoxLayout(actions)
         action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(8)
+        action_layout.setSpacing(ui_px(8))
         self.btn_channel_add = QPushButton(tr("settings.channel_add"))
         self.btn_channel_copy = QPushButton(tr("settings.channel_copy"))
         self.btn_channel_delete = QPushButton(tr("settings.channel_delete"))
         for button in (
             self.btn_channel_add, self.btn_channel_copy, self.btn_channel_delete
         ):
-            button.setStyleSheet("padding: 7px 14px; font-size: 16px;")
+            button.setStyleSheet(ui_style("padding: 7px 14px; font-size: 16px;"))
             action_layout.addWidget(button)
         action_layout.addStretch()
         form.addRow(actions)
@@ -689,7 +693,7 @@ class SettingsDialog(QDialog):
         container = QWidget()
         h = QHBoxLayout(container)
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(6)
+        h.setSpacing(ui_px(6))
 
         edit = QLineEdit()
         edit.setText(value)
@@ -698,17 +702,17 @@ class SettingsDialog(QDialog):
         h.addWidget(edit)
 
         btn = QPushButton("🙈")
-        btn.setFixedSize(36, 36)
+        btn.setFixedSize(ui_px(36), ui_px(36))
         btn.setToolTip(tr("common.show_hide_key"))
         btn.setCursor(Qt.PointingHandCursor)
-        btn.setStyleSheet("""
+        btn.setStyleSheet(ui_style("""
             QPushButton {
                 background-color: #16213e; color: #888;
                 border: 1px solid #444; border-radius: 4px;
                 font-size: 16px; padding: 0;
             }
             QPushButton:hover { color: #4a9eff; border-color: #4a9eff; }
-        """)
+        """))
         def _toggle_echo():
             if edit.echoMode() == QLineEdit.Password:
                 edit.setEchoMode(QLineEdit.Normal)
@@ -733,13 +737,13 @@ class SettingsDialog(QDialog):
         content = QWidget()
         content.setObjectName("advanced_content")
         layout = QVBoxLayout(content)
-        layout.setSpacing(8)
-        layout.setContentsMargins(20, 12, 20, 20)
+        layout.setSpacing(ui_px(8))
+        layout.setContentsMargins(ui_px(20), ui_px(12), ui_px(20), ui_px(20))
 
         # API 请求
         api_group = QGroupBox(tr("settings.group.api_request"))
         api_form = QFormLayout(api_group)
-        api_form.setSpacing(10)
+        api_form.setSpacing(ui_px(10))
 
         self.api_timeout_spin = NoWheelSpinBox()
         self.api_timeout_spin.setRange(10, 3600)
@@ -756,7 +760,7 @@ class SettingsDialog(QDialog):
         # 性能设置
         perf_group = QGroupBox(tr("settings.group.realtime"))
         perf_form = QFormLayout(perf_group)
-        perf_form.setSpacing(10)
+        perf_form.setSpacing(ui_px(10))
 
         self.prefetch_spin = NoWheelSpinBox()
         self.prefetch_spin.setRange(3, 20)
@@ -777,7 +781,7 @@ class SettingsDialog(QDialog):
         # 一键翻译全游戏
         bulk_group = QGroupBox(tr("settings.group.bulk"))
         bulk_form = QFormLayout(bulk_group)
-        bulk_form.setSpacing(10)
+        bulk_form.setSpacing(ui_px(10))
 
         self.bulk_translate_batch_size_spin = NoWheelSpinBox()
         self.bulk_translate_batch_size_spin.setRange(1, 1000)
@@ -802,7 +806,7 @@ class SettingsDialog(QDialog):
         # 运行与显示
         runtime_group = QGroupBox(tr("settings.group.runtime"))
         runtime_form = QFormLayout(runtime_group)
-        runtime_form.setSpacing(10)
+        runtime_form.setSpacing(ui_px(10))
         runtime_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
         self.socket_port_spin = NoWheelSpinBox()
@@ -825,7 +829,7 @@ class SettingsDialog(QDialog):
 
         shortcut_group = QGroupBox(tr("settings.group.shortcuts"))
         shortcut_form = QFormLayout(shortcut_group)
-        shortcut_form.setSpacing(10)
+        shortcut_form.setSpacing(ui_px(10))
         shortcut_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         self.shortcut_inputs = {}
         current_shortcuts = resolve_shortcuts(self.config)
@@ -841,7 +845,7 @@ class SettingsDialog(QDialog):
             row = QWidget()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(6)
+            row_layout.setSpacing(ui_px(6))
             row_layout.addWidget(editor, 1)
             row_layout.addWidget(clear_button)
             shortcut_form.addRow(tr(f"settings.shortcut.{action}"), row)
@@ -865,9 +869,9 @@ class SettingsDialog(QDialog):
     def _create_about_tab(self):
         tab = QWidget()
         vbox = QVBoxLayout(tab)
-        vbox.setSpacing(16)
+        vbox.setSpacing(ui_px(16))
         
-        version = self.config.get("version", "v1.5.6")
+        version = self.config.get("version", "v1.6.0")
         
         community_section = (
             f'<b>{tr("settings.community")}</b>1058127921<br>'
@@ -889,6 +893,7 @@ class SettingsDialog(QDialog):
             '</div>'
         )
         self.about_info_label.setOpenExternalLinks(True)
+        self.about_info_label.setText(ui_rich_text(self.about_info_label.text()))
         self.about_info_label.setWordWrap(True)
 
         vbox.addWidget(self.about_info_label)

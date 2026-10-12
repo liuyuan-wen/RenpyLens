@@ -1,4 +1,4 @@
-"""Static Python statement semantics used by StoryGraph v2 and v3."""
+"""Static Python statement semantics for StoryGraph."""
 
 import ast
 
@@ -7,21 +7,34 @@ from .model import EffectIR, SymbolRef
 
 
 _PURE_CALLS = set(("abs", "bool", "clamp", "float", "int", "len", "max",
-                   "min", "round", "str"))
+                   "min", "round", "str", "Fade", "Dissolve", "ImageDissolve", "CropMove"))
 _NO_STORE_CALL_PREFIXES = (
     "renpy.pause", "renpy.end_replay", "renpy.music.",
+    "renpy.random.", "renpy.input",
 )
 
 
 def call_may_write_store(name):
     return not (name in _PURE_CALLS or
-                any(name.startswith(prefix) for prefix in _NO_STORE_CALL_PREFIXES))
+                any(name.startswith(prefix) if prefix.endswith('.') else name == prefix
+                    for prefix in _NO_STORE_CALL_PREFIXES))
 
 
 class _Reads(ast.NodeVisitor):
     def __init__(self):
         self.names = set()
         self.calls = []
+
+    def visit_FunctionDef(self, node):
+        for expression in list(node.decorator_list) + list(node.args.defaults) + list(getattr(node.args, 'kw_defaults', ())):
+            if expression is not None:
+                self.visit(expression)
+
+    def visit_ClassDef(self, node):
+        for expression in list(node.bases) + list(node.decorator_list):
+            self.visit(expression)
+        for statement in node.body:
+            self.visit(statement)
 
     def visit_Name(self, node):
         if isinstance(getattr(node, "ctx", None), ast.Load):
@@ -82,13 +95,15 @@ def _write(target, operation, value_node, guard=None):
 
 
 def analyze(source_text):
-    """Return the historical v2 effect dictionary without executing code."""
+    """Analyze Python reads and writes without executing code."""
     source_text = str(source_text or "")
     reads_set = set()
     control_reads = set()
     writes = []
     calls = []
     unsupported = []
+    string_names = set()
+    effectful_calls = []
     try:
         body = ast.parse(source_text).body
     except Exception as error:
@@ -103,11 +118,24 @@ def analyze(source_text):
 
     def scan(statements, guard=None):
         for statement in statements:
-            statement_reads, statement_calls = reads(statement)
+            statement_reads, statement_calls = reads(statement.test if isinstance(statement, ast.If) else statement)
             reads_set.update(statement_reads)
             calls.extend(statement_calls)
+            string_methods = set('%s.%s' % (name, method) for name in string_names
+                                 for method in ('strip', 'lstrip', 'rstrip', 'lower', 'upper', 'replace', 'title'))
+            effectful_calls.extend(name for name in statement_calls if call_may_write_store(name) and name not in string_methods)
             if isinstance(statement, ast.Assign):
                 for target in statement.targets:
+                    name = target_name(target)
+                    value = statement.value
+                    literal_value, known = literal(value)
+                    input_call = isinstance(value, ast.Call) and source(value.func) == 'renpy.input'
+                    string_method = isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and isinstance(value.func.value, ast.Name) and value.func.value.id in string_names
+                    if name:
+                        if input_call or known and isinstance(literal_value, str) or string_method:
+                            string_names.add(name)
+                        else:
+                            string_names.discard(name)
                     effect = _write(target, "set", statement.value, guard)
                     if effect is None:
                         unsupported.append(type(target).__name__)
@@ -136,16 +164,21 @@ def analyze(source_text):
                 condition_reads, condition_calls = reads(statement.test)
                 control_reads.update(condition_reads)
                 calls.extend(condition_calls)
+                before = set(string_names)
                 scan(statement.body, "(%s) and (%s)" % (guard, condition) if guard else condition)
+                after_true = set(string_names)
+                string_names.clear(); string_names.update(before)
                 negative = "not (%s)" % condition
                 scan(statement.orelse, "(%s) and (%s)" % (guard, negative) if guard else negative)
+                string_names.intersection_update(after_true)
             elif isinstance(statement, (ast.Expr, ast.Pass)):
+                pass
+            elif isinstance(statement, ast.FunctionDef):
                 pass
             else:
                 unsupported.append(type(statement).__name__)
 
     scan(body)
-    effectful_calls = [name for name in calls if call_may_write_store(name)]
     unknown = bool(effectful_calls or unsupported)
     result = {
         "reads": sorted(reads_set),
@@ -210,6 +243,7 @@ class _IRWriter(ast.NodeVisitor):
         self.local_names = local_names
         self.local_owner = local_owner
         self.effects = []
+        self.guard = ""
 
     def _append(self, target, operator, value_node):
         expression = parse_expression_ir(source(value_node), self.local_names, self.local_owner)
@@ -217,7 +251,26 @@ class _IRWriter(ast.NodeVisitor):
         self.effects.append(EffectIR(
             "assign", target, operator, expression, expression.reads, (), precision,
             "", expression.constant_known, expression.constant_value,
+            parse_expression_ir(self.guard, self.local_names, self.local_owner) if self.guard else None,
         ))
+
+    def visit_If(self, node):
+        parent = self.guard
+        condition = source(node.test)
+        self.guard = "(%s) and (%s)" % (parent, condition) if parent else condition
+        for statement in node.body:
+            self.visit(statement)
+        negative = "not (%s)" % condition
+        self.guard = "(%s) and (%s)" % (parent, negative) if parent else negative
+        for statement in node.orelse:
+            self.visit(statement)
+        self.guard = parent
+
+    def visit_FunctionDef(self, node):
+        pass
+
+    def visit_ClassDef(self, node):
+        pass
 
     def visit_Assign(self, node):
         for target in node.targets:
@@ -263,8 +316,8 @@ class _IRControlReader(ast.NodeVisitor):
 
 
 def analyze_ir(source_text, local_names=(), local_owner=""):
-    """Return typed statement semantics without changing the v2 analyzer."""
-    legacy = analyze(source_text)
+    """Build typed statement semantics from shared Python analysis."""
+    analysis = analyze(source_text)
     reads, read_precision = statement_reads(source_text, local_names, local_owner)
     if read_precision == "unknown" and not reads:
         reads = (SymbolRef.unknown(),)
@@ -276,16 +329,16 @@ def analyze_ir(source_text, local_names=(), local_owner=""):
         controls.extend(control_reader.reads)
     except Exception:
         controls.extend(_typed_symbol(name, local_names, local_owner)
-                        for name in legacy.get("control_reads", []))
+                        for name in analysis.get("control_reads", []))
     deduped_controls = {}
     for item in controls:
         deduped_controls[repr(item.to_dict())] = item
     controls = tuple(sorted(deduped_controls.values(), key=lambda item: item.display()))
     effects = list(_typed_writes(source_text, local_names, local_owner))
-    for write in legacy.get("writes", []):
+    for write in analysis.get("writes", []):
         # The AST writer covers ordinary assignments and additionally keeps
         # persistent/attribute/subscript targets typed.  Do not duplicate the
-        # same legacy effect when it is already represented.
+        # same analysis effect when it is already represented.
         if effects:
             continue
         expression = parse_expression_ir(write.get("expr", ""), local_names, local_owner)
@@ -296,7 +349,7 @@ def analyze_ir(source_text, local_names=(), local_owner=""):
             expression.reads, (), precision, "",
             write.get("value_known", False), write.get("value"),
         ))
-    unknown = legacy.get("unknown_effect")
+    unknown = analysis.get("unknown_effect")
     typed_unknown_boundary = bool(unknown) and (
         not effects
         or bool(unknown.get("calls"))
@@ -319,5 +372,6 @@ def analyze_ir(source_text, local_names=(), local_owner=""):
         "reads": reads,
         "control_reads": controls,
         "effects": tuple(effects),
-        "precision": legacy.get("precision", "exact"),
+        "precision": "unknown" if any(effect.kind == "unknown" for effect in effects)
+        else "partial" if any(effect.precision != "exact" for effect in effects) else "exact",
     }

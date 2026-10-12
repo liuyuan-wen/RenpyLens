@@ -2,7 +2,7 @@
 
 This module never evaluates Screen Python or calls Action constructors.  It
 only inspects parsed syntax/data and converts recognized native actions into
-typed IR.  The source scanner remains available for legacy v2 evidence.
+typed IR.  The source scanner remains available for candidate evidence.
 """
 
 import ast
@@ -114,32 +114,35 @@ def analyze_action_source(source, screen_id="", path=(), guard=None,
             return ScreenActionIR(action_id, "return", inherited_guard, value=value,
                                   effects=(effect,), precision=PrecisionSet(),
                                   provenance=provenance)
-        if kind in ("SetVariable", "ToggleVariable"):
+        if kind in ("SetVariable", "ToggleVariable", "SetScreenVariable", "ToggleScreenVariable", "SetLocalVariable", "ToggleLocalVariable"):
             variable = _literal_string(args[0]) if args else None
-            target = _symbol_from_name(variable, local_names, local_owner)
-            if kind == "SetVariable" and len(args) > 1:
+            scoped = "ScreenVariable" in kind or "LocalVariable" in kind
+            target = SymbolRef.local(variable, local_owner) if scoped and variable else _symbol_from_name(variable, local_names, local_owner)
+            toggle = kind.startswith("Toggle")
+            if not toggle and len(args) > 1:
                 value = expression(args[1])
             else:
                 value = parse_expression_ir("not %s" % (variable or "__unknown__"),
                                             local_names, local_owner)
             precision = "unknown" if target.kind == "unknown" else value.precision
             effect = EffectIR(
-                "toggle" if kind == "ToggleVariable" else "assign", target,
-                "toggle" if kind == "ToggleVariable" else "set", value,
-                tuple(value.reads) + ((target,) if kind == "ToggleVariable" else ()),
+                "toggle" if toggle else "assign", target,
+                "toggle" if toggle else "set", value,
+                tuple(value.reads) + ((target,) if toggle else ()),
                 (target,), precision,
                 "dynamic-variable-target" if target.kind == "unknown" else "",
             )
             return ScreenActionIR(
-                action_id, "toggle_variable" if kind == "ToggleVariable" else "set_variable",
+                action_id, "toggle_variable" if toggle else "set_variable",
                 inherited_guard, target, value, effects=(effect,),
                 precision=PrecisionSet("exact", precision, "exact"), provenance=provenance,
                 reason=effect.reason,
             )
         if kind == "If" and len(args) >= 2:
             condition = expression(args[0])
-            true_guard = condition
-            false_guard = parse_expression_ir("not (%s)" % condition.source,
+            prefix = "(%s) and " % inherited_guard.source if inherited_guard else ""
+            true_guard = parse_expression_ir(prefix + "(%s)" % condition.source, local_names, local_owner)
+            false_guard = parse_expression_ir(prefix + "not (%s)" % condition.source,
                                               local_names, local_owner)
             children = [convert(args[1], item_path + ("true",), true_guard)]
             if len(args) >= 3:
@@ -149,6 +152,19 @@ def analyze_action_source(source, screen_id="", path=(), guard=None,
                 precision=PrecisionSet("exact", condition.precision, "exact"),
                 provenance=provenance,
             )
+        if kind in ("Play", "Stop", "Queue", "NullAction", "Hide", "Show", "ShowTransient",
+                    "ToggleScreen", "ShowMenu", "Notify", "OpenURL"):
+            return ScreenActionIR(action_id, "presentation", inherited_guard,
+                                  arguments=tuple(expression(item) for item in args),
+                                  precision=PrecisionSet(), provenance=provenance)
+        if kind in ("MainMenu", "Quit"):
+            return ScreenActionIR(action_id, "end", inherited_guard,
+                                  arguments=tuple(expression(item) for item in args),
+                                  precision=PrecisionSet(), provenance=provenance)
+        if kind == "Rollback":
+            effect = EffectIR("rollback", may_write=(SymbolRef.unknown(),), precision="conservative")
+            return ScreenActionIR(action_id, "rollback", inherited_guard, effects=(effect,),
+                                  precision=PrecisionSet("exact", "conservative", "exact"), provenance=provenance)
         return ScreenActionIR(
             action_id, "unknown", inherited_guard,
             arguments=tuple(expression(item) for item in args),
@@ -193,7 +209,9 @@ def analyze_screen_sources(records):
             SourceLocation.from_dict(record.get("location")), actions,
             PrecisionSet("unknown" if len(unknown) > screen_unknown_start else "exact",
                          "unknown" if len(unknown) > screen_unknown_start else "exact", "exact"),
-            "sl-ast", {"uses": list(record.get("uses", ()) or ())},
+            "sl-ast", {"uses": list(record.get("uses", ()) or ()),
+                       "parameter_declarations": list(record.get("parameter_declarations", ()) or ()),
+                       "action_sources": list(record.get("actions", ()) or ())},
         ))
     return ScreenAnalysis(screens, (), unknown)
 
@@ -276,6 +294,12 @@ def screen_jump_actions(renpy_module):
 
 def call_screen(node, lookup=None):
     source_text = str(getattr(node, "line", "") or "").strip()
+    parsed = getattr(node, "parsed", None)
+    if isinstance(parsed, (tuple, list)) and len(parsed) > 1 and isinstance(parsed[1], dict) and parsed[1].get("expression"):
+        from .static_values import constant_value
+        name, known = constant_value(parsed[1].get("name", ""))
+        if known and isinstance(name, str):
+            return name, []
     match = re.match(r"call\s+screen\s+([A-Za-z_][A-Za-z0-9_]*)\b", source_text)
     if match is None:
         return None, []
@@ -286,3 +310,160 @@ def call_screen(node, lookup=None):
             if label not in labels:
                 labels.append(label)
     return match.group(1), labels
+
+
+def screen_call_bindings(node, record):
+    """Bind screen formals to call syntax, including closed argument unpacking."""
+    from .call_semantics import argument_entries
+    from .static_values import constant_value
+    parsed = getattr(node, "parsed", None)
+    data = parsed[1] if isinstance(parsed, (tuple, list)) and len(parsed) > 1 and isinstance(parsed[1], dict) else {}
+    arguments = argument_entries(data.get("arguments"))
+    if not data:
+        name, _labels = call_screen(node)
+        text = str(getattr(node, "line", "") or "")
+        suffix = text[text.find(name) + len(name):].strip() if name else ""
+        if suffix.startswith("("):
+            import tokenize
+            level, stop = 0, None
+            for token in tokenize.generate_tokens(io.StringIO(suffix).readline):
+                if token[1] == "(": level += 1
+                elif token[1] == ")":
+                    level -= 1
+                    if not level:
+                        stop = token[3][1]; break
+            if stop is not None:
+                call = ast.parse(name + suffix[:stop], mode="eval").body
+                arguments = [(None, _source(value)) for value in call.args] + [(item.arg, _source(item.value)) for item in call.keywords]
+    positional, keywords = [], {}
+    for argument in arguments:
+        if isinstance(argument, tuple):
+            key, source = argument; unpacking = ""
+        else:
+            key, source, unpacking = argument.keyword, argument.expression.source, argument.unpacking
+        if unpacking:
+            value, known = constant_value(source)
+            if not known:
+                return {}, "dynamic-screen-argument-unpacking"
+            if unpacking == "*" and isinstance(value, (tuple, list)):
+                positional.extend(repr(item) for item in value)
+            elif unpacking == "**" and isinstance(value, dict):
+                keywords.update((name, repr(item)) for name, item in value.items())
+            else:
+                return {}, "invalid-screen-argument-unpacking"
+        elif key is None:
+            positional.append(source)
+        else:
+            if key in keywords: return {}, "duplicate-screen-argument:%s" % key
+            keywords[key] = source
+    declarations = record.get("parameter_declarations") or [(name, None) for name in record.get("parameters", ())]
+    bindings = {}
+    index, consumed = 0, set()
+    for declaration in declarations:
+        name, default = declaration[:2]
+        kind = declaration[2] if len(declaration) > 2 else 1
+        if kind == 2:
+            bindings[name] = '[%s]' % ', '.join(positional[index:]); index = len(positional)
+        elif kind == 4:
+            bindings[name] = '{%s}' % ', '.join('%r: (%s)' % (key, source) for key, source in keywords.items() if key not in consumed)
+            consumed.update(keywords)
+        elif kind in (0, 1) and index < len(positional):
+            if name in keywords: return bindings, "duplicate-screen-argument:%s" % name
+            bindings[name] = positional[index]; index += 1
+        elif kind != 0 and name in keywords:
+            bindings[name] = keywords[name]; consumed.add(name)
+        elif default is not None: bindings[name] = default
+        else: return bindings, "missing-screen-argument:%s" % name
+    if index < len(positional) or set(keywords) - consumed:
+        return bindings, "unexpected-screen-arguments"
+    return bindings, ""
+
+
+def instantiate_screen(node, record, screen_id, call_id):
+    """Specialize parsed actions for this invocation without evaluating a screen."""
+    from .static_values import constant_value, substitute_source
+    bindings, binding_error = screen_call_bindings(node, record)
+    outcomes, unknown = [], []
+    if binding_error:
+        unknown.append(binding_error)
+    for used in record.get("uses", ()):
+        unknown.append("nested-screen-use:%s" % (used if isinstance(used, str) else "dynamic"))
+
+    def paths(action):
+        guard = action.guard.source if action.guard else "True"
+        value, known = constant_value(guard)
+        if known and not value:
+            return []
+        if action.kind == "list":
+            states = [(None, guard, [])]
+            for child in action.children:
+                next_states = []
+                for terminal, when, effects in states:
+                    if terminal is not None:
+                        next_states.append((terminal, when, effects)); continue
+                    for end, condition, added in paths(child):
+                        next_states.append((end, "(%s) and (%s)" % (when, condition), effects + added))
+                states = next_states
+            return states
+        if action.kind == "if":
+            states = [state for child in action.children for state in paths(child)]
+            if len(action.children) == 1:
+                states.append((None, "(%s) and not (%s)" % (guard, action.arguments[0].source), []))
+            return states
+        if action.kind == "unknown":
+            unknown.append(action.reason or "unknown-action")
+            effect = EffectIR("unknown", reason=action.reason, may_write=(SymbolRef.unknown(),), guard=action.guard)
+            return [(None, guard, [effect])]
+        if action.reason:
+            unknown.append(action.reason)
+        return [(action if action.kind in ("jump", "call", "return", "end", "rollback") else None,
+                 guard, list(action.effects))]
+
+    def loop_bindings(item):
+        scopes = [bindings]
+        def unpack(target, value, scope):
+            if isinstance(target, ast.Name):
+                scope[target.id] = repr(value)
+            elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (list, tuple)) and len(target.elts) == len(value):
+                for child, element in zip(target.elts, value): unpack(child, element, scope)
+            else: raise ValueError("unsupported-screen-loop-target")
+        for loop in item.get("loops", ()):
+            expanded = []
+            for scope in scopes:
+                values, known = constant_value(substitute_source(loop["expression"], scope))
+                if not known or not isinstance(values, (list, tuple, dict, str, range)):
+                    unknown.append("dynamic-screen-loop"); return scopes
+                try:
+                    target = ast.parse(loop["variable"], mode="eval").body
+                    for value in values:
+                        bound = dict(scope); unpack(target, value, bound); expanded.append(bound)
+                except (SyntaxError, ValueError):
+                    unknown.append("unsupported-screen-loop-target"); return scopes
+            scopes = expanded
+        return scopes
+
+    for index, item in enumerate(record.get("actions", ())):
+        item = item if isinstance(item, dict) else {"source": item}
+        if item.get("attribute", "action") not in ("action", "alternate"):
+            continue
+        for iteration, scope in enumerate(loop_bindings(item)):
+            source = substitute_source(item["source"], scope)
+            guard_source = substitute_source(item.get("guard") or "True", scope)
+            guard = parse_expression_ir(guard_source)
+            action = analyze_action_source(source, screen_id, (call_id, index, iteration), guard,
+                                           (), screen_id, "sl-ast-bound")
+            texts = []
+            for text in item.get("texts", ()):
+                when, known = constant_value(substitute_source(text.get("guard") or "True", scope))
+                if known and not when: continue
+                value, known = constant_value(substitute_source(text["source"], scope))
+                if known and isinstance(value, str) and value not in texts: texts.append(value)
+            caption = texts[0] if len(texts) == 1 else ""
+            for terminal, when, effects in paths(action):
+                value, known = constant_value(when)
+                if known and not value: continue
+                if terminal is None: continue
+                outcomes.append({"action": terminal, "condition": "True" if known else when,
+                                 "effects": effects, "choice": caption, "slot": len(outcomes),
+                                 "screen": record["name"]})
+    return outcomes, sorted(set(unknown))

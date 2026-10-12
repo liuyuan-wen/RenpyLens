@@ -1,11 +1,10 @@
-"""Shared Shadow Machine migrated from the live Hook.
-
-The implementation intentionally preserves the stage-0 predictor contract;
-semantic and IR improvements are deferred to later stages.
-"""
+"""Shared text rendering and bounded, effect-aware shadow prediction."""
 
 
 from .call_semantics import CallPlanError, evaluate_call, formal_entries, plan_call
+from .function_effects import BoundFunction, UnknownEffects, summarize_call
+from .function_source import function_syntax
+from .text_sources import filtered_text, say_segment
 
 
 def _debug_value(value, limit=160):
@@ -98,6 +97,24 @@ def _default_character_id(expression, previous=""):
 _translator_format_text = _default_format_text
 _translator_strip_text_tags = _default_strip_text_tags
 
+
+def render_segment(renpy, statement, displayed=None, translate=False):
+    """Resolve one script text using the same bounded evaluator as prefetch."""
+    items, _, debug, _ = predict(renpy, None, services={"text_request": (statement, displayed, translate)})
+    if not items:
+        raise ValueError(debug["stop_reason"])
+    return items[0]
+
+
+class _TextSource(object):
+    def __init__(self, text):
+        self.what = text
+        self.who = None
+
+
+def render_text(renpy, text):
+    return render_segment(renpy, _TextSource(text), translate=True)["source"]
+
 def predict(
     renpy,
     current,
@@ -117,8 +134,8 @@ def predict(
     """Interpret a bounded script prefix without executing game Python.
 
     Only plain data and explicitly supported syntax enter the shadow store.
-    Unknown operations end the prefix; they must never be skipped while
-    continuing to report subsequent dialogue as belonging to this route.
+    Calls with bounded effects invalidate their writes. Reading invalidated
+    data or encountering unbounded effects ends the predictable prefix.
     """
     import ast
     import operator
@@ -210,6 +227,11 @@ def predict(
     speaker_state = [last_message.get("character_id", ""), last_message.get("who", "")]
     audio_scope = [False]
     missing = object()
+    unknown_objects = "\x00unknown_objects"
+
+    class UnknownValue(object):
+        def __init__(self, name):
+            self.name = name
     upcoming = []
     branches = []
     continuations = []
@@ -281,6 +303,10 @@ def predict(
 
     def clone(value):
         tick()
+        if isinstance(value, UnknownValue):
+            return value
+        if id(value) in shadow.get(unknown_objects, set()):
+            raise Stop("function-dependency")
         kind = type(value)
         if kind in scalar_types:
             return value
@@ -312,6 +338,8 @@ def predict(
         """Clone prediction-owned data while retaining immutable AST nodes."""
         if copies is None:
             copies = {}
+        if id(value) in shadow.get(unknown_objects, set()):
+            return UnknownValue("alias")
         if value is missing or type(value) in scalar_types:
             return value
         value_id = id(value)
@@ -344,9 +372,29 @@ def predict(
                 shadow[name] = clone(renpy.store.__dict__[name])
         if shadow[name] is missing:
             raise Stop("missing-variable")
+        if isinstance(shadow[name], UnknownValue):
+            raise Stop("function-dependency:" + name)
+        # Already-cloned containers can alias a value mutated by an opaque call.
+        def check(value, seen):
+            if isinstance(value, UnknownValue):
+                raise Stop("function-dependency:" + name)
+            if id(value) in shadow.get(unknown_objects, set()):
+                raise Stop("function-dependency:" + name)
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+            if containers.get(type(value)) is not None:
+                tick()
+                values = value.values() if isinstance(value, dict) else value
+                for item in values:
+                    check(item, seen)
+        if shadow.get(unknown_objects):
+            check(shadow[name], set())
         return shadow[name]
 
     assignment_target = [None]
+    function_locals = []
+    function_stack = []
 
     binary = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
               ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
@@ -376,6 +424,8 @@ def predict(
         if kind in ("Constant", "Num", "Str", "NameConstant"):
             return clone(getattr(tree, "value", getattr(tree, "n", getattr(tree, "s", None))))
         if isinstance(tree, ast.Name):
+            if function_locals and tree.id in function_locals[-1]:
+                return function_locals[-1][tree.id]
             if tree.id in ("True", "False", "None"):
                 return {"True": True, "False": False, "None": None}[tree.id]
             if audio_scope[0]:
@@ -413,6 +463,8 @@ def predict(
             return expression(tree.value)[expression(tree.slice)]
         if isinstance(tree, ast.Attribute) and isinstance(tree.value, ast.Name) and tree.value.id == "persistent" and not tree.attr.startswith("_"):
             return read("persistent." + tree.attr)
+        if isinstance(tree, ast.Attribute) and isinstance(tree.value, ast.Name) and tree.value.id == "store":
+            return read(tree.attr)
         if (isinstance(tree, ast.Attribute) and isinstance(tree.value, ast.Name)
                 and tree.value.id in ("preferences", "config")
                 and not tree.attr.startswith("_")):
@@ -425,6 +477,8 @@ def predict(
                 raise Stop("custom-engine-object")
             return clone(values[tree.attr])
         if isinstance(tree, ast.Call) and isinstance(tree.func, ast.Name):
+            if function_locals and tree.func.id in function_locals[-1]:
+                raise Stop("overridden-builtin")
             pure = {"len": len, "abs": abs, "min": min, "max": max, "int": int,
                     "float": float, "str": str, "bool": bool, "round": round,
                     "any": any, "all": all}
@@ -450,6 +504,9 @@ def predict(
                     raise Stop("unsupported-clamp")
                 value, lower, upper = [expression(arg) for arg in tree.args]
                 return max(lower, min(value, upper))
+            candidate = renpy.store.__dict__.get(tree.func.id)
+            if candidate is not None and tree.func.id not in shadow:
+                return pure_function_call(candidate, tree)
         if isinstance(tree, ast.Call) and isinstance(tree.func, ast.Attribute):
             random_namespace = tree.func.value
             if (isinstance(random_namespace, ast.Attribute)
@@ -547,11 +604,70 @@ def predict(
     def evaluate(source):
         return expression(ast.parse(source, mode="eval").body)
 
+    def pure_function_call(function, call):
+        """Evaluate a proven pure Python body entirely in prediction data."""
+        import types
+        if not isinstance(function, types.FunctionType):
+            raise Stop("unsupported-expression:Call")
+        if function in function_stack or len(function_stack) >= 8:
+            raise Stop("recursive-function")
+        if (getattr(function, "__globals__", getattr(function, "func_globals", None)) is not renpy.store.__dict__
+                or getattr(call, "starargs", None) or getattr(call, "kwargs", None)
+                or any(k.arg is None for k in call.keywords)):
+            raise Stop("unsupported-expression:Call")
+        args = [expression(arg) for arg in call.args]
+        kwargs = dict((k.arg, expression(k.value)) for k in call.keywords)
+        def check(name):
+            if isinstance(shadow.get(name), UnknownValue):
+                raise Stop("function-dependency:" + name)
+            if name in shadow and shadow.get(unknown_objects):
+                read(name)
+        try:
+            replaced, mutated, _ = summarize_call(function, [([arg], set()) for arg in args],
+                dict((key, ([value], set())) for key, value in kwargs.items()), renpy, tick, check_global=check)
+        except UnknownEffects:
+            raise Stop("unsupported-expression:Call")
+        if replaced or mutated:
+            raise Stop("unsupported-expression:Call")
+        import inspect
+        values = inspect.getcallargs(function, *args, **kwargs)
+        frame = dict((name, clone(value)) for name, value in values.items())
+        function_locals.append(frame)
+        function_stack.append(function)
+        syntax = function_syntax(function, renpy)
+        def body(statements):
+            for item in statements:
+                tick()
+                if isinstance(item, ast.Return):
+                    return True, expression(item.value) if item.value is not None else None
+                if isinstance(item, ast.If):
+                    returned, value = body(item.body if expression(item.test) else item.orelse)
+                    if returned:
+                        return True, value
+                elif isinstance(item, ast.Assign) and all(isinstance(t, ast.Name) for t in item.targets):
+                    value = expression(item.value)
+                    for target in item.targets:
+                        frame[target.id] = value
+                elif isinstance(item, ast.AugAssign) and isinstance(item.target, ast.Name):
+                    frame[item.target.id] = operation(item.op, expression(item.target), expression(item.value))
+                elif isinstance(item, ast.Expr):
+                    expression(item.value)
+                elif not isinstance(item, ast.Pass):
+                    raise Stop("unsupported-function-body")
+            return False, None
+        try:
+            return body(syntax.body)[1]
+        finally:
+            function_stack.pop()
+            function_locals.pop()
+
     def assign(target, value):
         if isinstance(target, ast.Name):
             shadow[target.id] = value
         elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "persistent" and not target.attr.startswith("_"):
             shadow["persistent." + target.attr] = value
+        elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "store":
+            shadow[target.attr] = value
         elif isinstance(target, (ast.Tuple, ast.List)):
             if len(target.elts) != len(value):
                 raise Stop("unpack-mismatch")
@@ -561,6 +677,115 @@ def predict(
             expression(target.value)[expression(target.slice)] = value
         else:
             raise Stop("unsupported-assignment")
+
+    def summarized_call(call):
+        def runtime(node):
+            if isinstance(node, ast.Name) and node.id not in shadow:
+                return renpy.store.__dict__[node.id]
+            if isinstance(node, ast.Attribute):
+                import types
+                candidate = runtime(node.value)
+                for base in type(candidate).__mro__:
+                    handler = base.__dict__.get("__getattribute__")
+                    if handler is not None and handler is not object.__getattribute__ and type(candidate) is not types.ModuleType:
+                        raise UnknownEffects()
+                    descriptor = base.__dict__.get(node.attr)
+                    if descriptor is not None and not isinstance(descriptor, types.FunctionType) and hasattr(type(descriptor), "__get__"):
+                        raise UnknownEffects()
+                data = object.__getattribute__(candidate, "__dict__")
+                if node.attr in data:
+                    return data[node.attr]
+                for base in type(candidate).__mro__:
+                    method = base.__dict__.get(node.attr)
+                    if isinstance(method, types.FunctionType):
+                        roots = set((node.value.id,)) if isinstance(node.value, ast.Name) else set()
+                        return BoundFunction(method, ([candidate], roots))
+                    if method is not None:
+                        break
+                raise UnknownEffects()
+            raise UnknownEffects()
+
+        def check_global(name):
+            if isinstance(shadow.get(name), UnknownValue):
+                raise Stop("function-dependency:" + name)
+            if name in shadow and shadow.get(unknown_objects):
+                read(name)
+
+        def argument(node):
+            roots = set()
+            if isinstance(node, ast.Name):
+                roots.add(node.id)
+            elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                roots.add("persistent." + node.attr if node.value.id == "persistent" else node.value.id)
+            try:
+                value = expression(node)
+            except Stop as error:
+                if str(error) not in ("unsupported-value", "unsupported-expression:Attribute"):
+                    raise
+                value = runtime(node)
+            return ([value], roots)
+
+        try:
+            if getattr(call, "starargs", None) or getattr(call, "kwargs", None) or any(k.arg is None for k in call.keywords):
+                raise UnknownEffects()
+            replaced, mutated, mutated_ids = summarize_call(
+                runtime(call.func), [argument(arg) for arg in call.args],
+                dict((k.arg, argument(k.value)) for k in call.keywords), renpy, tick,
+                check_global=check_global)
+        except (UnknownEffects, KeyError, AttributeError):
+            raise Stop("unsupported-python:Expr")
+        ids = shadow.setdefault(unknown_objects, set())
+        ids.update(mutated_ids)
+        for value_id in mutated_ids:
+            if value_id in memo:
+                ids.add(id(memo[value_id]))
+        for name in mutated:
+            values = renpy.store.__dict__
+            key = name
+            if name.startswith("persistent."):
+                values = renpy.store.persistent.__dict__
+                key = name[11:]
+            original = values.get(key)
+            if original is not None and type(original) not in scalar_types:
+                ids.add(id(original))
+                if id(original) in memo:
+                    ids.add(id(memo[id(original)]))
+            if name in shadow and type(shadow[name]) not in scalar_types:
+                ids.add(id(shadow[name]))
+        for name in replaced | mutated:
+            shadow[name] = UnknownValue(name)
+        debug.setdefault("function_effects", []).append({
+            "writes": sorted(replaced | mutated), "mutations": sorted(mutated)})
+
+    def audio_argument(tree):
+        # Filter constructors describe audio processing. Validate their native
+        # identity and arguments without constructing filters or touching audio.
+        if isinstance(tree, ast.Call) and isinstance(tree.func, ast.Attribute) and isinstance(tree.func.value, ast.Name):
+            module_name = tree.func.value.id
+            module = renpy.store.__dict__.get(module_name)
+            native = getattr(getattr(renpy, "audio", None), "filter", None)
+            if module is native and native is not None and module_name not in shadow:
+                constructor = getattr(native, tree.func.attr, None)
+                if callable(constructor) and not tree.func.attr.startswith("_") and getattr(constructor, "__module__", "") == "renpy.audio.filter":
+                    if getattr(tree, "starargs", None) or getattr(tree, "kwargs", None) or any(k.arg is None for k in tree.keywords):
+                        raise Stop("unsupported-audio-arguments")
+                    import inspect
+                    try:
+                        target = constructor.__init__ if isinstance(constructor, type) else constructor
+                        count = len(tree.args) + (1 if isinstance(constructor, type) else 0)
+                        inspect.getcallargs(target, *([None] * count), **dict((k.arg, None) for k in tree.keywords))
+                    except TypeError:
+                        raise Stop("unsupported-audio-arguments")
+                    for arg in tree.args:
+                        audio_argument(arg)
+                    for keyword in tree.keywords:
+                        audio_argument(keyword.value)
+                    return
+        if isinstance(tree, (ast.List, ast.Tuple)):
+            for child in tree.elts:
+                audio_argument(child)
+            return
+        expression(tree)
 
     def statements(body):
         for statement in body:
@@ -573,7 +798,18 @@ def predict(
                     else None
                 )
                 try:
-                    value = expression(statement.value)
+                    try:
+                        value = expression(statement.value)
+                    except Stop as error:
+                        if str(error) != "unsupported-expression:Call" or not isinstance(statement.value, ast.Call):
+                            raise
+                        try:
+                            summarized_call(statement.value)
+                        except Stop as summary_error:
+                            if str(summary_error) == "unsupported-python:Expr":
+                                raise error
+                            raise
+                        value = UnknownValue(assignment_target[0] or "call-result")
                 finally:
                     assignment_target[0] = None
                 for target in statement.targets:
@@ -676,8 +912,9 @@ def predict(
                         or not isinstance(namespace.value, ast.Name)
                         or namespace.value.id != "renpy"
                         or namespace.attr not in ("sound", "music")
-                        or function.attr not in ("play", "queue", "stop", "set_volume", "set_pan", "set_pause")):
-                    raise Stop("unsupported-python:Expr")
+                        or function.attr not in ("play", "queue", "stop", "set_volume", "set_pan", "set_pause", "set_audio_filter")):
+                    summarized_call(call)
+                    continue
                 store_renpy = renpy.store.__dict__.get("renpy", None)
                 module = getattr(store_renpy, namespace.attr, None)
                 if module is None:
@@ -703,9 +940,9 @@ def predict(
                 # Validate only the data arguments. Never stop real audio
                 # while predicting the dialogue after this statement.
                 for argument in call.args:
-                    expression(argument)
+                    audio_argument(argument)
                 for keyword in call.keywords:
-                    expression(keyword.value)
+                    audio_argument(keyword.value)
             elif isinstance(statement, ast.Expr):
                 expression(statement.value)
             else:
@@ -717,9 +954,16 @@ def predict(
             if translator is not None:
                 source = translator(source)
         def resolve(code, conversion, spec):
-            if spec or conversion and conversion != "s":
+            if spec or any(flag not in "sulc" for flag in (conversion or "")):
                 raise Stop("unsupported-substitution-format")
-            return str(evaluate(code))
+            value = str(evaluate(code))
+            if "u" in (conversion or ""):
+                value = value.upper()
+            if "l" in (conversion or ""):
+                value = value.lower()
+            if "c" in (conversion or ""):
+                value = value[:1].capitalize() + value[1:]
+            return value
         # Share syntax handling, while evaluating only in the shadow store.
         try:
             source = _translator_format_text(renpy, source, resolve)
@@ -727,6 +971,17 @@ def predict(
             raise Stop(str(error))
         source = _translator_strip_text_tags(source)
         return source.strip() if strip else source
+
+    text_request = services.get("text_request")
+    if text_request is not None:
+        try:
+            def requested_text(source, strip=True):
+                return text_value(source, strip=strip, translate=text_request[2])
+            segment = say_segment(renpy, text_request[0], requested_text, displayed=text_request[1])
+            return [segment], [], debug, []
+        except (Stop, KeyError, TypeError, ValueError, IndexError) as error:
+            debug["stop_reason"] = str(error)
+            return [], [], debug, []
 
     def resolve_scene_text(statement):
         if type(statement).__name__ not in ("Show", "Scene"):
@@ -1011,10 +1266,12 @@ def predict(
     def resolve_say_value(statement):
         if getattr(statement, "arguments", None):
             raise Stop("say-arguments")
-        clean = text_value(statement.what or "")
+        segment = say_segment(renpy, statement, text_value)
+        clean = segment["source"]
         raw_who = getattr(statement, "who", None)
         if raw_who == "extend":
-            return {"who": speaker_state[1], "what": clean, "italic": False}
+            segment.update(who=speaker_state[1])
+            return segment
         who = raw_who or ""
         if raw_who in shadow:
             who = read(raw_who)
@@ -1028,26 +1285,16 @@ def predict(
                     who = (text_value(character.__dict__.get("who_prefix", ""), strip=False, translate=True)
                            + text_value(who, strip=False, translate=True)
                            + text_value(character.__dict__.get("who_suffix", ""), strip=False, translate=True)).strip()
-                return {
-                    "who": who or "",
-                    "what": clean,
-                    "italic": bool(statement.what.strip().startswith("{i}")
-                                   and statement.what.strip().endswith("{/i}")),
-                }
+                segment.update(who=who or "")
+                return segment
             elif type(character) in string_types:
                 who = read(raw_who)
             else:
                 raise Stop("unsupported-speaker")
         elif raw_who:
             who = evaluate(raw_who)
-        return {
-            "who": text_value(who or ""),
-            "what": clean,
-            "italic": bool(
-                statement.what.strip().startswith("{i}")
-                and statement.what.strip().endswith("{/i}")
-            ),
-        }
+        segment.update(who=text_value(who or ""))
+        return segment
 
     def advance(statement, active_frame_box):
         kind = type(statement).__name__
@@ -1172,7 +1419,7 @@ def predict(
             option = {
                 "node": item[2][0],
                 "state": fork_value((shadow, frames, speaker_state)),
-                "choice": text_value(raw_choice),
+                "choice": text_value(filtered_text(renpy, raw_choice), translate=True),
                 "choice_path": choice_path,
                 "stop_node": getattr(menu_node, "next", None),
             }
@@ -1354,7 +1601,7 @@ def predict(
             raw_choice = item[0] or ""
             if set_value is not None and raw_choice in evaluate(set_expression):
                 continue
-            choice_text = text_value(raw_choice)
+            choice_text = text_value(filtered_text(renpy, raw_choice), translate=True)
             branch_record = {
                 "menu_id": menu_id,
                 "choice_index": item_index,
@@ -1417,7 +1664,7 @@ def predict(
                 continue
             choices.append({
                 "choice_index": item_index,
-                "choice": text_value(raw_choice),
+                "choice": text_value(filtered_text(renpy, raw_choice), translate=True),
                 "raw_choice": raw_choice,
             })
 
@@ -1526,8 +1773,9 @@ def predict(
     if state_names is not None:
         route_state = {}
         for name in state_names:
-            if name in shadow and shadow[name] is not missing:
-                route_state[name] = shadow[name]
+            if name in shadow:
+                if shadow[name] is not missing and not isinstance(shadow[name], UnknownValue):
+                    route_state[name] = shadow[name]
             elif name.startswith("persistent."):
                 persistent = getattr(renpy.store, "persistent", None)
                 if persistent is not None and name[11:] in persistent.__dict__:

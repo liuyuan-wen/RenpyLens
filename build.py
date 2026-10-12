@@ -6,6 +6,25 @@ import argparse
 import tempfile
 
 
+def prepare_macos_icon(project_dir, work_dir):
+    """Convert the project PNG with the icon tools supplied by macOS."""
+    iconset = os.path.join(work_dir, "RenpyLens.iconset")
+    os.makedirs(iconset)
+    source = os.path.join(project_dir, "assets", "icon.png")
+    for size in (16, 32, 128, 256, 512):
+        for scale in (1, 2):
+            suffix = "@2x" if scale == 2 else ""
+            target = os.path.join(iconset, f"icon_{size}x{size}{suffix}.png")
+            pixels = str(size * scale)
+            subprocess.check_call(
+                ["sips", "-z", pixels, pixels, source, "--out", target],
+                stdout=subprocess.DEVNULL,
+            )
+    icon = os.path.join(work_dir, "RenpyLens.icns")
+    subprocess.check_call(["iconutil", "-c", "icns", "-o", icon, iconset])
+    return icon
+
+
 def prepare_upx(project_dir, env, disabled=False):
     """Use the bundled UPX explicitly; never silently build without it."""
     if disabled:
@@ -106,33 +125,53 @@ def build_exe():
                         help="Disable UPX compression (use if the built executable is blocked or fails to start)")
     args = parser.parse_args()
 
-    # 获取版本号
-    sys.path.append(os.path.join(os.getcwd(), "src"))
-    try:
-        from config import DEFAULT_CONFIG
-        version = DEFAULT_CONFIG.get("version", "v1.5.6")
-    except ImportError:
-        version = "v1.5.6"
+    is_macos = sys.platform == "darwin"
+    is_windows = sys.platform == "win32"
+    # macOS app bundles use onedir and do not support UPX compression.
+    require_upx = is_windows and not args.noupx
+    data_separator = ";" if is_windows else ":"
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(project_dir)
 
-    print(f"开始打包 RenpyLens {version}...")
-    
-    # 确保在当前目录
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    output_name = select_output_name(version, os.getcwd())
-    if output_name != f"RenpyLens_{version}":
-        print(f"[WARN] 标准输出文件正在使用，将改为生成 {output_name}.exe")
-    
-    # 使用指定的 Python 解释器
     python_exe = args.python
     if not os.path.exists(python_exe):
         print(f"[WARN] 指定的 Python 解释器不存在: {python_exe}，将回退使用默认解释器")
         python_exe = sys.executable
+    try:
+        probe = subprocess.run(
+            [python_exe, "-c", "import PyInstaller"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        print(f"[ERROR] 无法运行 Python 解释器: {exc}")
+        return 1
+    if probe.returncode:
+        print("[ERROR] 所选 Python 环境缺少 PyInstaller，请先安装依赖：")
+        print(f'"{python_exe}" -m pip install -r requirements.txt')
+        return 1
 
+    # 获取版本号
+    sys.path.append(os.path.join(os.getcwd(), "src"))
+    try:
+        from config import DEFAULT_CONFIG
+        version = DEFAULT_CONFIG.get("version", "v1.6.0")
+    except ImportError:
+        version = "v1.6.0"
+
+    print(f"开始打包 RenpyLens {version}...")
+    
+    # 确保在当前目录
+    output_name = select_output_name(version, project_dir) if is_windows else f"RenpyLens_{version}"
+    extension = ".app" if is_macos else ".exe" if is_windows else ""
+    output_file = output_name + extension
+    if output_name != f"RenpyLens_{version}":
+        print(f"[WARN] 标准输出文件正在使用，将改为生成 {output_name}.exe")
+    
     # PyInstaller does not always search Conda's Library/bin when the selected
     # interpreter is invoked outside an activated environment. Add all runtime
     # DLL directories to its search path so extension-module dependencies such
     # as OpenSSL, Expat, SQLite, and compression libraries are collected.
-    runtime_dll_dirs = find_python_runtime_dirs(python_exe)
+    runtime_dll_dirs = find_python_runtime_dirs(python_exe) if is_windows else []
     build_env = os.environ.copy()
     if runtime_dll_dirs:
         build_env["PATH"] = os.pathsep.join(
@@ -166,7 +205,7 @@ def build_exe():
     # 构建 PyInstaller 命令
     # Require the bundled compressor instead of silently falling back to no UPX.
     try:
-        upx_options = prepare_upx(os.getcwd(), build_env, args.noupx)
+        upx_options = prepare_upx(project_dir, build_env, disabled=not require_upx)
     except (OSError, subprocess.CalledProcessError) as exc:
         print(f"[ERROR] 无法运行项目目录中的 upx.exe: {exc}")
         return 1
@@ -175,15 +214,15 @@ def build_exe():
         python_exe, "-m", "PyInstaller",
         "--name", output_name,
         "--windowed", # 隐藏控制台窗口
-        "--onefile",   # --onedir 可以打包成一个目录
+        "--onedir" if is_macos else "--onefile",
         "--paths", "src", # 将 src 目录添加到模块搜索路径
-        "--add-data", "assets/_translator_hook.rpy;.", # 包含必须的资源文件
-        "--add-data", "assets/RenpyLensBridge.js;.", # RPG Maker MV/MZ 运行时桥接
-        "--add-data", "assets/icon.ico;.", # 包含图标以便程序运行时提取
-        "--add-data", "src/renpylens_semantics;renpylens_semantics", # Semantic Kernel
-        "--add-data", "assets/icon.png;.", 
-        "--add-data", "assets/locales;assets/locales",
-        "--icon", "assets/icon.ico", # 指定程序本身的图标
+        "--add-data", f"assets/_translator_hook.rpy{data_separator}.", # 包含必须的资源文件
+        "--add-data", f"assets/RenpyLensBridge.js{data_separator}.", # RPG Maker MV/MZ 运行时桥接
+        "--add-data", f"assets/icon.ico{data_separator}.", # 包含图标以便程序运行时提取
+        "--add-data", f"src/renpylens_semantics{data_separator}renpylens_semantics", # Semantic Kernel
+        "--add-data", f"assets/icon.png{data_separator}.",
+        "--add-data", f"assets/locales{data_separator}assets/locales",
+        "--icon", "NONE" if is_macos else "assets/icon.ico",
         
         # 排除体积巨大且程序明显用不到的科学计算和系统级大包
         "--exclude-module", "numpy",
@@ -232,7 +271,7 @@ def build_exe():
         "--exclude-module", "PyQt5.QtQuick3D",
         "--exclude-module", "PyQt5.QtQml",
         
-        # 默认启用 UPX 压缩；使用 --noupx 时禁用
+        # Windows 默认启用 UPX；macOS 或使用 --noupx 时禁用。
         *upx_options,
         
         "--clean",
@@ -243,7 +282,7 @@ def build_exe():
 
     if libexpat_path:
         command[command.index("src/main.py"):command.index("src/main.py")] = [
-            "--add-binary", f"{libexpat_path};."
+            "--add-binary", f"{libexpat_path}{data_separator}."
         ]
 
     if qt_translation_dir and os.path.isdir(qt_translation_dir):
@@ -252,21 +291,27 @@ def build_exe():
                 qm_path = os.path.join(qt_translation_dir, f"{prefix}_{locale}.qm")
                 if os.path.isfile(qm_path):
                     command[command.index("src/main.py"):command.index("src/main.py")] = [
-                        "--add-data", f"{qm_path};assets/qt_translations"
+                        "--add-data", f"{qm_path}{data_separator}assets/qt_translations"
                     ]
     
-    print(f"运行命令: {' '.join(command)}")
     build_env["PYTHONIOENCODING"] = "utf-8"
     # Avoid sharing partially processed binaries or --clean operations with
     # other builds. Each invocation starts with an empty compression cache.
     with tempfile.TemporaryDirectory(prefix="renpylens-pyi-") as cache_dir:
-        build_env["PYINSTALLER_CONFIG_DIR"] = cache_dir
-        returncode = run_pyinstaller(command, build_env, require_upx=not args.noupx)
+        build_env["PYINSTALLER_CONFIG_DIR"] = os.path.join(cache_dir, "cache")
+        if is_macos:
+            try:
+                command[command.index("--icon") + 1] = prepare_macos_icon(project_dir, cache_dir)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                print(f"[ERROR] 无法生成 macOS 应用图标: {exc}")
+                return 1
+        print(f"运行命令: {' '.join(command)}")
+        returncode = run_pyinstaller(command, build_env, require_upx=require_upx)
     
     if returncode == 0:
         print("\n[OK] 打包成功！")
-        print(f"打包生成的文件 '{output_name}.exe' 已经直接放在当前代码目录下。")
-        print(f"您可以直接双击 '{output_name}.exe' 运行，或者将其发给用户（无需安装 Python）。")
+        print(f"打包产物 '{output_file}' 已经直接放在当前代码目录下。")
+        print(f"您可以直接双击 '{output_file}' 运行，或者将其发给用户（无需安装 Python）。")
     else:
         print("\n[ERROR] 打包失败，请查看上面的错误信息。")
 
@@ -290,6 +335,17 @@ def build_exe():
             print(f"[OK] 已删除临时配置: {spec_file}")
         except Exception as e:
             print(f"[WARN] 删除 spec 文件失败: {e}")
+
+    # 3. macOS 的 .app 已包含全部文件，成功后删除重复的目录版产物。
+    if is_macos and returncode == 0:
+        app_dir = os.path.join(project_dir, output_file)
+        onedir_output = os.path.join(project_dir, output_name)
+        if os.path.isdir(app_dir) and os.path.isdir(onedir_output):
+            try:
+                shutil.rmtree(onedir_output)
+                print(f"[OK] 已删除目录版产物: {onedir_output}")
+            except OSError as exc:
+                print(f"[WARN] 删除目录版产物失败: {exc}")
 
     return returncode
 

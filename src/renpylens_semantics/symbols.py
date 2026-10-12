@@ -20,8 +20,8 @@ def parameter_names(parameters):
         values = getattr(parameters, attribute, None) or []
         if isinstance(values, dict):
             values = list(values.values())
-            values.sort(key=lambda item: (getattr(item, "position", 0),
-                                          str(getattr(item, "name", ""))))
+            if all(getattr(item, "position", None) is not None for item in values):
+                values.sort(key=lambda item: item.position)
         for item in values:
             name = item[0] if isinstance(item, (tuple, list)) and item else getattr(item, "name", item)
             if name is not None and str(name) not in names:

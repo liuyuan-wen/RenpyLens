@@ -1,4 +1,4 @@
-"""Normalize and compare phase-0 StoryGraph and Shadow Route results."""
+"""Normalize and compare current StoryGraph and Shadow Route results."""
 
 from __future__ import annotations
 
@@ -126,13 +126,13 @@ def _load(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "kind", choices=("story-graph", "exact-v2", "shadow-route", "semantic-route")
+        "kind", choices=("story-graph", "shadow-route", "semantic-route")
     )
     parser.add_argument("expected")
     parser.add_argument("actual")
     args = parser.parse_args()
     normalize = (
-        story_graph_digests if args.kind in ("story-graph", "exact-v2")
+        story_graph_digests if args.kind == "story-graph"
         else semantic_route_digest if args.kind == "semantic-route"
         else shadow_route_digest
     )

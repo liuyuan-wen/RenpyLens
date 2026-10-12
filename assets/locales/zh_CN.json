@@ -81,8 +81,8 @@
   "settings.community_welcome": "欢迎入群交流视觉小说、GalGame 或任何游戏。",
   "settings.community_contact": "有任何问题、意见或建议，欢迎随时联系群主。",
   "settings.enjoy": "祝大家玩得开心～",
-  "main.settings": "⚙️ 设置",
-  "main.drop_game": "<span style=\"font-size: 48px;\">📂</span><br>将游戏 .exe 或 .lnk 拖放或点击此处选择",
+  "main.settings": "设置",
+  "main.drop_game": "<span style=\"font-size: 48px;\">📂</span><br>将游戏拖放或点击此处选择",
   "main.ready": "就绪 - 等待拖入游戏",
   "main.start_game": "▶ 装载 Hook 并开始游戏",
   "main.start_game_tip": "自动注入翻译 Hook 到游戏并启动，开始实时翻译",
@@ -227,7 +227,7 @@
   "dialog.uninstall_failed": "卸载失败",
   "dialog.key_expired": "试用 Key 已到期",
   "dialog.key_expired_message": "您的内置通道试用 API Key 已到期。\n\n{support}",
-  "file.choose_game": "选择游戏 .exe 或 .lnk（Ren'Py / RPG Maker MV/MZ）",
+  "file.choose_game": "选择游戏（Ren'Py / RPG Maker MV/MZ）",
   "file.executable_filter": "游戏文件 (*.exe *.lnk);;所有文件 (*)",
   "status.support": "如需协助，请加入官方交流QQ群：{number}",
   "status.settings_saved": "✅ 设置已保存",
@@ -370,5 +370,8 @@
   "characters.unknown": "未知",
   "characters.male": "男性",
   "characters.female": "女性",
-  "characters.other": "其他"
+  "characters.other": "其他",
+  "dialog.app_start_failed_title": "无法启动 RenpyLens",
+  "dialog.instance_replace_timeout": "上一个 RenpyLens 尚未完成退出，请稍后再试。",
+  "dialog.hook_server_start_failed": "无法监听通信端口 {port}：{error}"
 }

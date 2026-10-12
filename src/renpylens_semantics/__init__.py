@@ -8,7 +8,7 @@ from .graph_machine import predict
 from .model import (BlockIR, CallArgumentIR, CallSiteIR, EdgeIR, EdgeRef, EffectIR,
                     ExprIR, FormalBindingIR, GraphIR, NodeIR, NodeRef, PrecisionSet,
                     ScreenActionIR, ScreenAnalysis, ScreenIR, SourceLocation, SymbolRef)
-from .serialization import dump_graph, load_graph, project_v2, semantic_view
+from .serialization import dump_graph, load_graph, semantic_view
 
 __all__ = [
     "KERNEL_API_VERSION",
@@ -19,5 +19,5 @@ __all__ = [
     "CallArgumentIR", "FormalBindingIR", "CallSiteIR",
     "PrecisionSet", "NodeIR", "EdgeIR", "BlockIR", "GraphIR",
     "ScreenActionIR", "ScreenIR", "ScreenAnalysis",
-    "load_graph", "dump_graph", "project_v2", "semantic_view",
+    "load_graph", "dump_graph", "semantic_view",
 ]

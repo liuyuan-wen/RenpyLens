@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-import ctypes
 import os
 import subprocess
+import shlex
 import tempfile
+import textwrap
 import time
 import zipfile
-from ctypes import wintypes
-from dataclasses import dataclass
 
 
 _HOOK_FILE_PREFIX = "_translator_hook"
@@ -19,84 +18,9 @@ _SEMANTICS_ARCHIVE_NAME = "_renpylens_semantics.zip"
 _SEMANTICS_MARKER = "RenpyLens Semantic Kernel\n"
 
 
-if os.name == "nt":
-    TH32CS_SNAPPROCESS = 0x00000002
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-    MAX_UNICODE_PATH = 32768
-
-    class PROCESSENTRY32W(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wintypes.DWORD),
-            ("cntUsage", wintypes.DWORD),
-            ("th32ProcessID", wintypes.DWORD),
-            ("th32DefaultHeapID", ctypes.c_size_t),
-            ("th32ModuleID", wintypes.DWORD),
-            ("cntThreads", wintypes.DWORD),
-            ("th32ParentProcessID", wintypes.DWORD),
-            ("pcPriClassBase", ctypes.c_long),
-            ("dwFlags", wintypes.DWORD),
-            ("szExeFile", wintypes.WCHAR * wintypes.MAX_PATH),
-        ]
-
-    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-    _kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    _kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-    _kernel32.Process32FirstW.restype = wintypes.BOOL
-    _kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-    _kernel32.Process32NextW.restype = wintypes.BOOL
-    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    _kernel32.OpenProcess.restype = wintypes.HANDLE
-    _kernel32.QueryFullProcessImageNameW.argtypes = [
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        wintypes.LPWSTR,
-        ctypes.POINTER(wintypes.DWORD),
-    ]
-    _kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
-    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    _kernel32.CloseHandle.restype = wintypes.BOOL
-
-
-@dataclass(frozen=True)
-class _ProcessEntry:
-    pid: int
-    ppid: int
-    name: str
-
-
-@dataclass(frozen=True)
-class GameLaunchSpec:
-    executable: str
-    arguments: str = ""
-    working_directory: str = ""
-    shortcut_path: str = ""
-
-
-def resolve_game_launch(path: str) -> GameLaunchSpec | None:
-    """Resolve an EXE or Windows shortcut into detection and launch details."""
-    path = os.path.abspath(path)
-    if path.lower().endswith(".exe"):
-        return GameLaunchSpec(executable=path)
-    if not path.lower().endswith(".lnk") or os.name != "nt":
-        return None
-
-    try:
-        from win32com.client import Dispatch
-
-        shortcut = Dispatch("WScript.Shell").CreateShortcut(path)
-        target = os.path.abspath(str(shortcut.TargetPath or "").strip())
-        if not target.lower().endswith(".exe"):
-            return None
-        return GameLaunchSpec(
-            executable=target,
-            arguments=str(shortcut.Arguments or ""),
-            working_directory=str(shortcut.WorkingDirectory or "").strip(),
-            shortcut_path=path,
-        )
-    except Exception:
-        return None
+from game_package import GameLaunchSpec, find_renpy_layout, resolve_game_launch
+from process_runtime import ProcessEntry as _ProcessEntry
+from process_runtime import process_entries, process_executable_path
 
 
 def _normalize_path(path: str) -> str:
@@ -104,6 +28,8 @@ def _normalize_path(path: str) -> str:
 
 
 def _is_within_dir(path: str, root: str) -> bool:
+    path = _normalize_path(path)
+    root = _normalize_path(root)
     try:
         return os.path.commonpath([path, root]) == root
     except ValueError:
@@ -111,61 +37,16 @@ def _is_within_dir(path: str, root: str) -> bool:
 
 
 def _iter_process_entries() -> list[_ProcessEntry]:
-    if os.name != "nt":
-        return []
-
-    snapshot = _kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if snapshot == INVALID_HANDLE_VALUE:
-        return []
-
-    entries: list[_ProcessEntry] = []
-    entry = PROCESSENTRY32W()
-    entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
-
-    try:
-        if not _kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
-            return entries
-
-        while True:
-            entries.append(
-                _ProcessEntry(
-                    pid=int(entry.th32ProcessID),
-                    ppid=int(entry.th32ParentProcessID),
-                    name=str(entry.szExeFile),
-                )
-            )
-            if not _kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
-                break
-    finally:
-        _kernel32.CloseHandle(snapshot)
-
-    return entries
+    return process_entries()
 
 
 def _query_process_image_path(pid: int) -> str | None:
-    if os.name != "nt" or pid <= 0:
-        return None
-
-    handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return None
-
-    try:
-        size = wintypes.DWORD(MAX_UNICODE_PATH)
-        buffer = ctypes.create_unicode_buffer(size.value)
-        if _kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-            image_path = buffer.value
-            if image_path:
-                return _normalize_path(image_path)
-    finally:
-        _kernel32.CloseHandle(handle)
-
-    return None
+    return process_executable_path(pid) or None
 
 
 def is_game_running(exe_path: str) -> bool:
     """Return whether the exact executable is already running."""
-    if os.name != "nt" or not exe_path:
+    if not exe_path:
         return False
 
     target_path = _normalize_path(exe_path)
@@ -189,6 +70,10 @@ class GameLaunchHandle:
         self._tracked_pids = {self._root_pid}
         self._game_root = _normalize_path(os.path.dirname(exe_path))
         self._expected_exe_name = os.path.basename(exe_path).lower()
+
+    @property
+    def pid(self) -> int:
+        return self._root_pid
 
     def _collect_game_descendants(self) -> set[int]:
         entries = _iter_process_entries()
@@ -264,42 +149,42 @@ class GameLaunchHandle:
 
 
 def find_game_dir(exe_path: str) -> str | None:
-    """Infer the game/ directory from the selected executable."""
-    exe_dir = os.path.dirname(os.path.abspath(exe_path))
-    game_dir = os.path.join(exe_dir, "game")
-    if os.path.isdir(game_dir):
-        return game_dir
-    return None
+    layout = find_renpy_layout(exe_path)
+    return layout.content_dir if layout else None
 
 
 def is_renpy_game(exe_path: str) -> bool:
-    """Best-effort check for a Ren'Py game layout."""
-    exe_dir = os.path.dirname(os.path.abspath(exe_path))
-    game_dir = os.path.join(exe_dir, "game")
-    renpy_dir = os.path.join(exe_dir, "renpy")
-    lib_dir = os.path.join(exe_dir, "lib")
-
-    if not os.path.isdir(game_dir):
-        return False
-
-    if os.path.isdir(renpy_dir) or os.path.isdir(lib_dir):
-        return True
-
-    for filename in os.listdir(game_dir):
-        if filename.endswith((".rpy", ".rpyc", ".rpa")):
-            return True
-
-    return False
+    return find_renpy_layout(exe_path) is not None
 
 
 def _render_hook_script(hook_rpy_path: str, socket_port: int, graph_id: str = "") -> str:
     with open(hook_rpy_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    return (
+    rendered = (
         content.replace("{{SOCKET_PORT}}", str(int(socket_port)))
         .replace("{{CONTROL_PORT}}", str(int(socket_port) + 1))
         .replace("{{GRAPH_ID}}", str(graph_id or ""))
+    )
+    header, body = rendered.split("init python:\n", 1)
+    # Run the hook in a Python module rather than the game's rollback store.
+    # Script indexes, transport state and callbacks must survive save/load
+    # without being serialized. python hide also keeps loader locals out of
+    # the store on older engines that do not support constant named stores.
+    body = textwrap.dedent(body)
+    return header + (
+        "init python hide:\n"
+        "    import sys as _rl_sys\n"
+        "    import types as _rl_types\n"
+        "    import renpy as _rl_renpy\n"
+        "    _rl_runtime = _rl_types.ModuleType(_rl_renpy.compat.pystr('_renpylens_hook'))\n"
+        "    _rl_runtime.__dict__.update(\n"
+        "        (k, v) for k, v in vars(_rl_renpy.minstore).items()\n"
+        "        if not k.startswith('__')\n"
+        "    )\n"
+        "    _rl_runtime.config = _rl_renpy.config\n"
+        "    _rl_sys.modules['_renpylens_hook'] = _rl_runtime\n"
+        "    exec(u" + repr(body) + ", _rl_runtime.__dict__)\n"
     )
 
 
@@ -386,7 +271,7 @@ def _stage_semantics_archive(source_dir: str, game_dir: str) -> str:
         raise
 
 
-def inject_hook(exe_path: str, hook_rpy_path: str, socket_port: int) -> tuple[bool, str]:
+def inject_hook(exe_path: str, hook_rpy_path: str, socket_port: int, *, install_dir: str | None = None) -> tuple[bool, str]:
     """Render and inject the hook script into the target game's game/ folder."""
     if not os.path.isfile(exe_path):
         return False, f"Game file not found: {exe_path}"
@@ -398,11 +283,18 @@ def inject_hook(exe_path: str, hook_rpy_path: str, socket_port: int) -> tuple[bo
     if not game_dir:
         return False, "game/ directory not found"
 
+    content_dir = game_dir
+    if install_dir is not None:
+        game_dir = os.path.abspath(install_dir)
+        try:
+            os.makedirs(game_dir, exist_ok=True)
+        except OSError as exc:
+            return False, f"Failed to create Hook directory: {exc}"
     dest = os.path.join(game_dir, "_translator_hook.rpy")
     try:
         from renpylens_semantics.renpy_adapter import graph_id_for
 
-        rendered = _render_hook_script(hook_rpy_path, socket_port, graph_id_for(game_dir))
+        rendered = _render_hook_script(hook_rpy_path, socket_port, graph_id_for(content_dir))
     except Exception as e:
         return False, f"Failed to read Hook script: {e}"
 
@@ -460,9 +352,9 @@ def inject_hook(exe_path: str, hook_rpy_path: str, socket_port: int) -> tuple[bo
     return True, message
 
 
-def remove_hook(exe_path: str) -> tuple[bool, str]:
-    """Remove previously injected hook files from the game directory."""
-    game_dir = find_game_dir(exe_path)
+def remove_hook(exe_path: str, *, install_dir: str | None = None) -> tuple[bool, str]:
+    """Remove owned hook files from the selected installation directory."""
+    game_dir = install_dir if install_dir is not None else find_game_dir(exe_path)
     if not game_dir:
         return False, "game/ directory not found"
 
@@ -497,17 +389,23 @@ def launch_game(
     exe_path: str,
     arguments: str = "",
     working_directory: str = "",
+    environment: dict[str, str] | None = None,
 ) -> GameLaunchHandle | None:
     """Launch the selected game executable."""
     try:
         command = [exe_path]
-        if arguments:
-            command = f"{subprocess.list2cmdline([exe_path])} {arguments}"
-        process = subprocess.Popen(
-            command,
-            cwd=working_directory or os.path.dirname(exe_path),
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-        )
+        options = {"cwd": working_directory or os.path.dirname(exe_path)}
+        if os.name == "nt":
+            options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            if arguments:
+                command = f"{subprocess.list2cmdline([exe_path])} {arguments}"
+        else:
+            command.extend(shlex.split(arguments))
+            options["start_new_session"] = True
+        if environment is not None:
+            options["env"] = environment
+        process = subprocess.Popen(command, **options)
         return GameLaunchHandle(process, exe_path)
-    except Exception:
+    except Exception as exc:
+        print(f"[Launcher] Failed to launch {exe_path}: {exc}")
         return None

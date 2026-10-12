@@ -173,8 +173,8 @@ def parse_expression_ir(source, local_names=(), local_owner=""):
                   type(error).__name__ if error is not None else "")
 
 
-class _LegacyReads(ast.NodeVisitor):
-    """The v2 read spelling, retained only by the compatibility exporter."""
+class _ReadNames(ast.NodeVisitor):
+    """Collect identifiers used by shared control-flow records."""
 
     def __init__(self):
         self.names = set()
@@ -204,26 +204,26 @@ class _LegacyReads(ast.NodeVisitor):
             self.visit(keyword.value)
 
 
-def legacy_reads(source):
+def read_names(source):
     if not source or source in ("True", "False", "None"):
         return []
     tree, error = parse(source, "eval")
     if error is not None:
         return []
-    visitor = _LegacyReads()
+    visitor = _ReadNames()
     visitor.visit(tree)
     return sorted(visitor.names)
 
 
 def expression_reads(source):
-    return legacy_reads(source)
+    return read_names(source)
 
 
 def content_reads(text):
     result = set()
     import re
     for expression in re.findall(r"(?<!\[)\[([^\[\]]+)\]", str(text or "")):
-        result.update(legacy_reads(expression.split("!")[0].split(":")[0]))
+        result.update(read_names(expression.split("!")[0].split(":")[0]))
     return sorted(result)
 
 

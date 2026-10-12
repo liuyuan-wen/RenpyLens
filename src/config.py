@@ -5,20 +5,18 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import copy
 
 from shortcuts import DEFAULT_SHORTCUTS, resolve_shortcuts
 
-if sys.platform == "win32":
-    CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "RenpyLens")
-else:
-    CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".renpylens")
+from application_paths import application_data_dir
+
+CONFIG_DIR = application_data_dir()
 
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_CONFIG = {
-    "version": "v1.5.6",
+    "version": "v1.6.0",
     "ui_language": "auto",
     "settings_window_size": None,
     "rpgmaker_qol_games": {},

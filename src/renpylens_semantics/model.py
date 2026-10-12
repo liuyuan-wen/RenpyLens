@@ -171,11 +171,11 @@ class ExprIR(object):
 
 class EffectIR(object):
     __slots__ = ("kind", "target", "operator", "expression", "may_read", "may_write",
-                 "precision", "reason", "value_known", "value")
+                 "precision", "reason", "value_known", "value", "guard")
 
     def __init__(self, kind="unknown", target=None, operator="", expression=None,
                  may_read=(), may_write=(), precision="exact", reason="",
-                 value_known=False, value=None):
+                 value_known=False, value=None, guard=None):
         self.kind = str(kind or "unknown")
         self.target = target
         self.operator = str(operator or "")
@@ -186,6 +186,7 @@ class EffectIR(object):
         self.reason = str(reason or "")
         self.value_known = bool(value_known)
         self.value = value
+        self.guard = guard
 
     def to_dict(self):
         result = {
@@ -201,6 +202,8 @@ class EffectIR(object):
         }
         if self.value_known:
             result["value"] = _json_value(self.value)
+        if self.guard is not None:
+            result["guard"] = _json_value(self.guard)
         return result
 
     @classmethod
@@ -226,7 +229,8 @@ class EffectIR(object):
                    symbols(value.get("may_read", [])),
                    symbols(value.get("may_write", [])),
                    value.get("precision", "exact"), value.get("reason", ""),
-                   value.get("value_known", False), value.get("value"))
+                   value.get("value_known", False), value.get("value"),
+                   ExprIR.from_dict(value["guard"]) if isinstance(value.get("guard"), dict) else value.get("guard"))
 
 
 class NodeRef(object):
@@ -433,7 +437,6 @@ class NodeIR(object):
         }
         result.update(dict(
             (key, _json_value(value)) for key, value in self.extra.items()
-            if key != "_v2"
         ))
         return result
 
@@ -486,7 +489,6 @@ class EdgeIR(object):
         }
         result.update(dict(
             (key, _json_value(value)) for key, value in self.metadata.items()
-            if key != "_v2"
         ))
         if self.call_site is not None:
             result["call"] = _json_value(self.call_site)
@@ -546,7 +548,6 @@ class BlockIR(object):
         }
         result.update(dict(
             (key, _json_value(value)) for key, value in self.metadata.items()
-            if key != "_v2"
         ))
         return result
 
@@ -702,20 +703,19 @@ class ScreenAnalysis(object):
 
 
 class GraphIR(object):
-    """Container for the v3 graph and a lossless legacy compatibility view."""
+    """Container for a typed StoryGraph schema v3 graph."""
 
     schema_version = 3
 
     __slots__ = ("graph_id", "engine", "provenance", "coverage", "audit", "entry_points",
                  "nodes", "edges", "return_sites", "blocks", "block_edges",
                  "block_return_sites", "indexes", "summary", "model", "screens",
-                 "candidate_edges", "extra",
-                 "legacy")
+                 "candidate_edges", "extra")
 
     def __init__(self, graph_id="", engine="", provenance=None, coverage=None, audit=None,
                  entry_points=None, nodes=(), edges=(), return_sites=(), blocks=(),
                  block_edges=(), block_return_sites=(), indexes=None, summary=None,
-                 model=None, extra=None, legacy=None, screens=(), candidate_edges=()):
+                 model=None, extra=None, screens=(), candidate_edges=()):
         self.graph_id = str(graph_id or "")
         self.engine = engine or ""
         self.provenance = dict(provenance or {})
@@ -734,7 +734,6 @@ class GraphIR(object):
         self.screens = tuple(screens or ())
         self.candidate_edges = tuple(candidate_edges or ())
         self.extra = dict(extra or {})
-        self.legacy = legacy
 
     def to_dict(self):
         result = {
@@ -770,8 +769,6 @@ class GraphIR(object):
             (key, _json_value(value)) for key, value in self.extra.items()
             if key not in reserved
         ))
-        if isinstance(self.legacy, dict) and self.legacy.get("schema_version") == 2:
-            result["compatibility"] = {"v2": _json_value(self.legacy)}
         return result
 
 

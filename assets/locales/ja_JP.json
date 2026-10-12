@@ -59,7 +59,7 @@
     "settings.group.runtime": "実行と表示", "settings.port": "通信ポート:", "settings.show_speaker": "話者名を表示", "settings.force_topmost": "常に最前面を強制（フルスクリーン用）",
     "settings.group.shortcuts": "ショートカット", "settings.shortcut.toggle_overlay": "翻訳オーバーレイを表示/非表示:", "settings.shortcut.rpgmaker_dialogue_rollback": "RPGM 操作をロールバック:", "settings.shortcut.rpgmaker_save_anywhere": "RPGM 強制セーブ:", "settings.shortcut.rpgmaker_move_speed": "RPGM 高速移動:", "settings.shortcut.rpgmaker_through": "RPGM 壁抜け:", "settings.shortcut.rpgmaker_encounters": "RPGM ランダム遭遇:", "settings.shortcut.rpgmaker_battle_victory": "RPGM 即時勝利:", "settings.shortcut_clear": "クリア", "settings.shortcut_restore_defaults": "既定値に戻す", "settings.shortcut_unassigned": "未設定", "settings.shortcut_conflict_title": "ショートカットの競合", "settings.shortcut_conflict": "「{first}」と「{second}」に同じショートカットが設定されています。",
     "settings.about_description": "Ren'Py と RPG Maker MV/MZ に対応した AI 翻訳オーバーレイです。", "settings.developer": "開発者：", "settings.license": "ライセンス：", "settings.project": "オープンソース：", "settings.discord": "Discord：", "settings.community": "作者への連絡：",
-    "main.settings": "⚙️ 設定", "main.drop_game": "<span style=\"font-size: 48px;\">📂</span><br>ゲームの .exe または .lnk をドロップするか、クリックして選択",
+    "main.settings": "設定", "main.drop_game": "<span style=\"font-size: 48px;\">📂</span><br>ゲームをドロップするか、クリックして選択",
     "main.ready": "準備完了 - ゲームを待機中", "main.start_game": "▶ Hook を読み込んでゲームを開始", "main.uninstall_hook": "📤 Hook を削除", "main.clear_cache": "🗑️ キャッシュを消去",
     "main.engine": "翻訳エンジン:", "main.model": "モデル:", "main.model_editable": "手動変更可", "main.route": "接続先:", "main.test_latency": "速度測定", "main.test_latency_tip": "現在の接続先の遅延を測定", "main.latency_testing": "測定中…", "main.latency_failed": "失敗", "main.get_trial": "🔑 試用 API を取得",
     "main.api_address": "API アドレス:", "main.api_key": "API キー:", "main.show_overlay": "🪟 オーバーレイ", "main.hide_overlay": "🪟 隠す", "main.reset_overlay_position": "オーバーレイ位置をリセット",
@@ -75,7 +75,7 @@
     "workbench.unsaved_title": "未保存の訳文", "workbench.unsaved_message": "訳文が変更されています。閉じる前に保存しますか？", "workbench.save_close": "保存して閉じる",
     "workbench.dialogue": "台詞", "workbench.choice": "選択肢", "workbench.tag_draft": "下書き", "workbench.tag_manual": "手動", "workbench.tag_machine": "機械翻訳", "workbench.no_speaker": "話者なし",
     "dialog.no_game": "ゲームが未選択です", "dialog.task_running": "処理中", "dialog.unsupported_game": "未対応のゲーム", "dialog.inject_failed": "注入に失敗", "dialog.game_launch_failed": "ゲームを起動できませんでした", "dialog.uninstall_failed": "削除に失敗",
-    "file.choose_game": "ゲームの .exe または .lnk を選択（Ren'Py / RPG Maker MV/MZ）", "file.executable_filter": "ゲームファイル (*.exe *.lnk);;すべてのファイル (*)",
+    "file.choose_game": "ゲームを選択（Ren'Py / RPG Maker MV/MZ）", "file.executable_filter": "ゲームファイル (*.exe *.lnk);;すべてのファイル (*)",
     "status.support": "サポートが必要な場合は作者へご連絡ください。{number}", "status.settings_saved": "✅ 設定を保存しました", "status.settings_saved_shortcut_sync_failed": "⚠️ 設定は保存されましたが、ゲーム内ショートカットを同期できませんでした", "status.selected": "選択済み: {name}", "status.selected_engine": "選択済み: {name} · {engine}",
     "status.cache_cleared": "🗑️ {name} のキャッシュを消去しました", "status.injecting": "Hook を注入中...", "status.injected": "✅ Hook を注入しました: {name}", "status.starting_game": "ゲームを起動中...",
     "status.preloading": "🎮 ゲームを起動しました - 翻訳モデルを先読み中...", "status.waiting_dialogue": "🎮 ゲームを起動しました - 台詞を待機中...", "status.game_exited": "ゲームが終了しました",
@@ -139,5 +139,8 @@
   "characters.unknown": "不明",
   "characters.male": "男性",
   "characters.female": "女性",
-  "characters.other": "その他"
+  "characters.other": "その他",
+  "dialog.app_start_failed_title": "RenpyLens を起動できません",
+  "dialog.instance_replace_timeout": "前の RenpyLens がまだ終了していません。しばらくしてから再試行してください。",
+  "dialog.hook_server_start_failed": "通信ポート {port} を待ち受けできません: {error}"
 }

@@ -81,8 +81,8 @@
   "settings.community_welcome": "Contact the author with questions, feedback, or suggestions.",
   "settings.community_contact": "The author welcomes your feedback.",
   "settings.enjoy": "Have fun!",
-  "main.settings": "⚙️ Settings",
-  "main.drop_game": "<span style=\"font-size: 48px;\">📂</span><br>Drop a game .exe or .lnk here or click to browse",
+  "main.settings": "Settings",
+  "main.drop_game": "<span style=\"font-size: 48px;\">📂</span><br>Drop a game here or click to browse",
   "main.ready": "Ready - waiting for a game",
   "main.start_game": "▶ Load Hook and Start Game",
   "main.start_game_tip": "Inject the translation Hook, launch the game, and start real-time translation",
@@ -227,7 +227,7 @@
   "dialog.uninstall_failed": "Uninstall Failed",
   "dialog.key_expired": "Trial Key Expired",
   "dialog.key_expired_message": "Your built-in-channel trial API Key has expired.\n\n{support}",
-  "file.choose_game": "Select Game .exe or .lnk (Ren'Py / RPG Maker MV/MZ)",
+  "file.choose_game": "Select Game (Ren'Py / RPG Maker MV/MZ)",
   "file.executable_filter": "Game files (*.exe *.lnk);;All files (*)",
   "status.support": "For help, please contact the author. {number}",
   "status.settings_saved": "✅ Settings saved",
@@ -370,5 +370,8 @@
   "characters.unknown": "Unknown",
   "characters.male": "Male",
   "characters.female": "Female",
-  "characters.other": "Other"
+  "characters.other": "Other",
+  "dialog.app_start_failed_title": "Unable to start RenpyLens",
+  "dialog.instance_replace_timeout": "The previous RenpyLens has not finished closing. Please try again shortly.",
+  "dialog.hook_server_start_failed": "Unable to listen on communication port {port}: {error}"
 }
