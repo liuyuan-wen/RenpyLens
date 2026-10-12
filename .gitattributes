@@ -1,6 +1,0 @@
-/start.bat text eol=crlf
-/start_build.bat text eol=crlf
-/start.command text eol=lf
-/start_build.command text eol=lf
-/scripts/launch_windows.bat text eol=crlf
-/scripts/launch_macos.sh text eol=lf
